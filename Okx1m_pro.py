@@ -5,14 +5,10 @@ from datetime import datetime
 
 import ccxt
 import mysql.connector
-import okx.MarketData as MarketData
 import pytz
 from mysql.connector.pooling import MySQLConnectionPool
 
 # 数据库配置
-
-
-
 local_config = {
     'host': 'rm-t4nea067q32i31k9aro.mysql.singapore.rds.aliyuncs.com',
     'user': 'payment_pro',
@@ -172,39 +168,9 @@ def table_exists(cursor, coin, swap: bool, inverse: bool, year):
     return result[0] > 0
 
 
-flag = "0"  # 实盘:0 , 模拟盘：1
-marketDataAPI = MarketData.MarketAPI(flag=flag)
-
 lock = threading.Lock()
 last_call_time = None
-limiter_time = 0
-
-
-def fetch_ohlc_with_limiter_okx_sdk(symbol, before, after, limit):
-    global last_call_time
-    with lock:
-        if last_call_time is not None:
-            elapsed_time = time.time() - last_call_time
-            if elapsed_time < limiter_time:
-                time.sleep(limiter_time - elapsed_time)
-        while True:
-            result = marketDataAPI.get_history_candlesticks(
-                instId=symbol,
-                bar="1m",
-                before=before,
-                after=after,
-                limit=limit
-            )
-            if 'data' in result:
-                last_call_time = time.time()
-                before_str = datetime.fromtimestamp(before / 1000, beijing_tz)
-                after_str = datetime.fromtimestamp(after / 1000, beijing_tz)
-                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print(f"[{now}] symbol: {symbol:<15} [{before_str} -> {after_str}]，共 {len(result['data'])} 条数据")
-                return result
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f"[{now}] symbol: {symbol:<15} 查询K线数据失败，result: {result}，等待 {limiter_time} 秒后重试...")
-            time.sleep(limiter_time)
+limiter_time = 0.1  # 限制请求频率，单位秒
 
 
 def fetch_ohlc_with_limiter(symbol, since, limit):
@@ -218,12 +184,8 @@ def fetch_ohlc_with_limiter(symbol, since, limit):
             try:
                 datas = exchange.fetch_ohlcv(symbol, '1m', since, limit)
                 last_call_time = time.time()
-                # since_str = datetime.fromtimestamp(since / 1000, beijing_tz)
-                # now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                # print(f"[{now}] symbol: {symbol:<15} [since: {since_str}]，共 {len(datas)} 条数据")
                 return datas
             except Exception as e:
-                # print(traceback.format_exc())
                 now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 print(f"[{now}] symbol: {symbol:<15} 查询K线数据失败，e: {e}，等待 {limiter_time} 秒后重试...")
                 time.sleep(limiter_time)
@@ -285,33 +247,12 @@ def fetch_and_save_kline_data(symbol):
 
     while True:
         try:
-            # ccxt API 查询K线时，包括since时间点，okx SDK 查询时，则不包括 before 和 after 的时间点
-            # okx SDK 查询的是 before < time < after 的K线数据，可能是因为 okx 是按时间降序返回数据的，所以参数命名上是反的
-            #   只传 before，不传 after 时，会返回最新的数据，所以如果要按时间顺序获取数据，则 before 和 after 都要传
-            before = since
-            after = before + (301 * 60 * 1000)
-            # 获取交易产品历史K线数据
-            # result = fetch_ohlc_with_limiter(
-            #     symbol=okx_symbol,
-            #     before=before,
-            #     after=after,
-            #     limit=300
-            # )
-
-            # 检查获取的数据是否有效
-            # if result['data']:
-            #     datas = result['data']
-            #     datas.reverse()
-            # else:
-            #     datas = []
-
             datas = fetch_ohlc_with_limiter(symbol, since, 100)
 
             if len(datas) > 0:
                 # 去掉未确认的数据
                 datas = [data for data in datas if data[8] == 1]
 
-            # okx SDK 单次最多能查300条数据，没有数据时可以把查询开始时间向后推300分钟，直至有数据
             # ccxt 单次最多能查100条数据
             if len(datas) == 0:
                 if forward:
@@ -348,7 +289,6 @@ def fetch_and_save_kline_data(symbol):
 
             # 遍历并保存数据到MySQL
             # 打印格式化的当前时间、数量、第一条数据的时间
-            # 2025-07-07 11:23:32
             now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             first_data_time = datetime.fromtimestamp(int(datas[0][0]) // 1000, beijing_tz)
             last_data_time = datetime.fromtimestamp(int(datas[-1][0]) // 1000, beijing_tz)
@@ -399,8 +339,6 @@ def fetch_and_save_kline_data(symbol):
 
             since += 1000 * 60
 
-            # time.sleep(0.5)  # 等待一下再获取
-
         except Exception as e:
             print(f"====>since:{since}")
             print(f"Exception occurred: {e}. Retrying...")
@@ -411,7 +349,6 @@ def fetch_and_save_kline_data(symbol):
                 latest_time = get_latest_time_value(pool, base_ccy, is_swap, is_inverse, year)
                 if latest_time:
                     since = (latest_time + 60) * 1000  # 转换为毫秒级别
-                    # since = latest_time * 1000  # 转换为毫秒级别
                     print(f"====>new since:{since}")
             except:
                 pass
@@ -434,7 +371,6 @@ symbols = [
     # 'DOGE/USD:DOGE',
   
 ]
-# 增加交易对时，需要增加最上面的 mysql 线程池大小
 
 # 创建线程
 threads = []
