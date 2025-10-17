@@ -16,6 +16,8 @@ local_config = {
     'database': 'quantify',
     'port': '3306',
     'auth_plugin': '',
+    'pool_name': 'okx_pool',  # 添加简短的连接池名称
+    'pool_size': 10,  # 设置连接池大小
 }
 
 
@@ -201,7 +203,11 @@ def fetch_and_save_kline_data(symbol):
     #   如果某一年有数据，则直接从最近一条数据开始查询
     # 查询到数据后，则下一次查询的时间就根据本次查询得到的数据的最后一条的时间，向后推1分钟即可
 
-    pool = MySQLConnectionPool(**local_config)
+    # 为每个线程创建独立的连接池
+    thread_pool_config = local_config.copy()
+    thread_pool_config['pool_name'] = f"pool_{symbol.replace('/', '_').replace(':', '_')}"
+    
+    pool = MySQLConnectionPool(**thread_pool_config)
 
     market = exchange.market(symbol)
     okx_symbol = market['id']
@@ -233,10 +239,10 @@ def fetch_and_save_kline_data(symbol):
             print(
                 f"[{now}] symbol: {symbol:<15} last_data_time: {last_data_time}, new_since_time: {new_since_time}")
         else:
-            print('no since time')
-            exit()
+            print(f'[{symbol}] no since time')
+            return
     else:
-        # 没有任何数据，则从2018年1月1号开始查询数据
+        # 没有任何数据，则从2025年1月1号开始查询数据
         # 转换为毫秒级别
         since = int(datetime(start_year, 1, 1).timestamp()) * 1000
 
