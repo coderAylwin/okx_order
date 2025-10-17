@@ -100,6 +100,9 @@ class LiveTradingBotWithStopOrders:
         self.current_stop_loss_order_id = None  # 🔴 当前止损单ID
         self.current_take_profit_order_id = None  # 🔴 当前止盈单ID
         
+        # 🔴 账户余额（直接使用账户余额而非配置中的initial_capital）
+        self.account_balance = 0.0
+        
         self.logger.log(f"{'='*80}")
         self.logger.log(f"🛡️  实盘交易机器人 - 止损止盈挂单版")
         self.logger.log(f"{'='*80}")
@@ -178,11 +181,18 @@ class LiveTradingBotWithStopOrders:
         signal_type = signal['type']
         print(f"🔍 执行信号: {signal_type}, 测试模式: {self.test_mode}")
         
-        # 🔴 开仓前检查：如果有持仓记录但收到开仓信号，检查是否有未处理的平仓
+        # 🔴 开仓前检查：如果有持仓记录但收到开仓信号，先检查是否有未处理的平仓
         if signal_type in ['OPEN_LONG', 'OPEN_SHORT']:
             if self.current_position:
                 print(f"⚠️  检测到有持仓记录({self.current_position})但收到开仓信号，检查是否有未处理的平仓...")
                 self._check_pending_close()
+                
+                # 🔴 检查完后，如果仍然持仓，拒绝开仓
+                if self.current_position:
+                    signal_direction = 'long' if signal_type == 'OPEN_LONG' else 'short'
+                    self.logger.log_warning(f"⚠️  当前持仓中({self.current_position})，拒绝新的{signal_direction}开仓信号")
+                    print(f"❌ 拒绝开仓: 当前持仓={self.current_position}, 新信号={signal_direction}")
+                    return  # 🔴 直接返回，不执行开仓
         
         # 🔴 开仓 - 自动挂止损止盈单
         if signal_type == 'OPEN_LONG':
@@ -198,14 +208,15 @@ class LiveTradingBotWithStopOrders:
             print(f"🔍 止损价格: ${stop_loss:.1f}")
             print(f"🔍 止盈价格: ${take_profit:.1f}")
             
-            # 🔴 使用配置中的固定资金量（initial_capital），而不是账户总余额
-            # 因为账户余额可能分配给多个策略
-            strategy_capital = self.config.get('initial_capital', 500)
-            position_size_pct = self.config.get('position_size_percentage', 100) / 100
-            actual_invested = strategy_capital * position_size_pct
+            # 🔴 开仓前更新账户余额，确保使用最新数据
+            self._update_account_balance()
             
-            print(f"💰 策略分配资金: ${strategy_capital:.2f}")
-            print(f"💰 实际投入金额: ${actual_invested:.2f} (策略资金${strategy_capital:.2f} × {position_size_pct*100}%)")
+            # 🔴 直接使用账户余额，而不是配置中的固定资金量
+            position_size_pct = self.config.get('position_size_percentage', 100) / 100
+            actual_invested = self.account_balance * position_size_pct
+            
+            print(f"💰 账户余额: ${self.account_balance:.2f}")
+            print(f"💰 实际投入金额: ${actual_invested:.2f} (账户余额${self.account_balance:.2f} × {position_size_pct*100}%)")
             
             # 🔴 重新计算合约数量（从OKX获取合约规格）
             contract_amount = self.trader.calculate_contract_amount(
@@ -338,14 +349,15 @@ class LiveTradingBotWithStopOrders:
             print(f"🔍 止损价格: ${stop_loss:.1f}")
             print(f"🔍 止盈价格: ${take_profit:.1f}")
             
-            # 🔴 使用配置中的固定资金量（initial_capital），而不是账户总余额
-            # 因为账户余额可能分配给多个策略
-            strategy_capital = self.config.get('initial_capital', 500)
-            position_size_pct = self.config.get('position_size_percentage', 100) / 100
-            actual_invested = strategy_capital * position_size_pct
+            # 🔴 开仓前更新账户余额，确保使用最新数据
+            self._update_account_balance()
             
-            print(f"💰 策略分配资金: ${strategy_capital:.2f}")
-            print(f"💰 实际投入金额: ${actual_invested:.2f} (策略资金${strategy_capital:.2f} × {position_size_pct*100}%)")
+            # 🔴 直接使用账户余额，而不是配置中的固定资金量
+            position_size_pct = self.config.get('position_size_percentage', 100) / 100
+            actual_invested = self.account_balance * position_size_pct
+            
+            print(f"💰 账户余额: ${self.account_balance:.2f}")
+            print(f"💰 实际投入金额: ${actual_invested:.2f} (账户余额${self.account_balance:.2f} × {position_size_pct*100}%)")
             
             # 🔴 重新计算合约数量（从OKX获取合约规格）
             contract_amount = self.trader.calculate_contract_amount(
@@ -640,6 +652,9 @@ class LiveTradingBotWithStopOrders:
             self.strategy.current_invested_amount = None
             self.strategy.position_shares = None
             
+            # 🔴 平仓后立即更新账户余额
+            self._update_account_balance()
+            
             self.logger.log(f"✅ 平仓完成: 盈亏 ${profit_loss:+,.2f}")
         
         # 🔴 更新 SAR 止损位
@@ -767,8 +782,21 @@ class LiveTradingBotWithStopOrders:
                             
                             if not has_position:
                                 self.logger.log(f"🚨 确认持仓已平，止损单已触发，但无法获取订单详情")
-                                # 无法获取订单详情，只能清空状态
+                                
+                                # 🔴 取消所有挂单，清理残留的止损/止盈单
+                                self.logger.log(f"🧹 取消所有挂单...")
+                                try:
+                                    self.trader.cancel_all_stop_orders(self.symbol)
+                                    self.logger.log(f"✅ 已取消所有挂单")
+                                except Exception as cancel_e:
+                                    self.logger.log_warning(f"⚠️  取消挂单失败: {cancel_e}")
+                                
+                                # 清空状态
                                 self._clear_position_state()
+                                
+                                # 🔴 平仓后更新账户余额
+                                self._update_account_balance()
+                                
                                 return
                         except Exception as pos_e:
                             self.logger.log_error(f"查询持仓失败: {pos_e}")
@@ -804,8 +832,21 @@ class LiveTradingBotWithStopOrders:
                             
                             if not has_position:
                                 self.logger.log(f"🚨 确认持仓已平，止盈单已触发，但无法获取订单详情")
-                                # 无法获取订单详情，只能清空状态
+                                
+                                # 🔴 取消所有挂单，清理残留的止损/止盈单
+                                self.logger.log(f"🧹 取消所有挂单...")
+                                try:
+                                    self.trader.cancel_all_stop_orders(self.symbol)
+                                    self.logger.log(f"✅ 已取消所有挂单")
+                                except Exception as cancel_e:
+                                    self.logger.log_warning(f"⚠️  取消挂单失败: {cancel_e}")
+                                
+                                # 清空状态
                                 self._clear_position_state()
+                                
+                                # 🔴 平仓后更新账户余额
+                                self._update_account_balance()
+                                
                                 return
                         except Exception as pos_e:
                             self.logger.log_error(f"查询持仓失败: {pos_e}")
@@ -846,8 +887,21 @@ class LiveTradingBotWithStopOrders:
                     # 如果订单不存在，说明可能已被触发并删除
                     if '51603' in error_msg or 'does not exist' in error_msg.lower():
                         print(f"⚠️  止损单不存在(可能已触发): {self.current_stop_loss_order_id}")
+                        
+                        # 🔴 取消所有挂单，清理残留的止损/止盈单
+                        print(f"🧹 取消所有挂单...")
+                        try:
+                            self.trader.cancel_all_stop_orders(self.symbol)
+                            print(f"✅ 已取消所有挂单")
+                        except Exception as cancel_e:
+                            print(f"⚠️  取消挂单失败: {cancel_e}")
+                        
                         print(f"🧹 清空持仓状态，继续开新仓...")
                         self._clear_position_state()
+                        
+                        # 🔴 平仓后更新账户余额
+                        self._update_account_balance()
+                        
                         return
                     else:
                         raise  # 其他错误继续抛出
@@ -870,8 +924,21 @@ class LiveTradingBotWithStopOrders:
                     # 如果订单不存在，说明可能已被触发并删除
                     if '51603' in error_msg or 'does not exist' in error_msg.lower():
                         print(f"⚠️  止盈单不存在(可能已触发): {self.current_take_profit_order_id}")
+                        
+                        # 🔴 取消所有挂单，清理残留的止损/止盈单
+                        print(f"🧹 取消所有挂单...")
+                        try:
+                            self.trader.cancel_all_stop_orders(self.symbol)
+                            print(f"✅ 已取消所有挂单")
+                        except Exception as cancel_e:
+                            print(f"⚠️  取消挂单失败: {cancel_e}")
+                        
                         print(f"🧹 清空持仓状态，继续开新仓...")
                         self._clear_position_state()
+                        
+                        # 🔴 平仓后更新账户余额
+                        self._update_account_balance()
+                        
                         return
                     else:
                         raise  # 其他错误继续抛出
@@ -1011,6 +1078,9 @@ class LiveTradingBotWithStopOrders:
             # 清空持仓记录
             self._clear_position_state()
             
+            # 🔴 平仓后立即更新账户余额
+            self._update_account_balance()
+            
         except Exception as e:
             print(f"❌ 处理止损单触发失败: {e}")
             import traceback
@@ -1042,6 +1112,150 @@ class LiveTradingBotWithStopOrders:
             self.strategy.position_shares = None
         
         print(f"✅ 持仓状态已清空")
+    
+    def _update_account_balance(self):
+        """更新账户余额"""
+        try:
+            account_info = self.trader.get_account_info()
+            if account_info:
+                old_balance = self.account_balance
+                self.account_balance = account_info['balance']['total']
+                self.logger.log(f"💰 账户余额已更新: ${old_balance:.2f} → ${self.account_balance:.2f} "
+                              f"(变化: ${self.account_balance - old_balance:+,.2f})")
+            else:
+                self.logger.log_warning("⚠️  获取账户信息失败，余额未更新")
+        except Exception as e:
+            self.logger.log_error(f"更新账户余额失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _sync_position_on_startup(self):
+        """启动时同步OKX持仓状态到程序
+        
+        检查OKX是否有当前币种的持仓，如果有：
+        1. 从数据库恢复交易记录
+        2. 同步持仓状态到程序变量
+        3. 同步策略对象的持仓状态
+        """
+        try:
+            self.logger.log(f"\n{'='*80}")
+            self.logger.log(f"🔄 启动时同步持仓状态...")
+            self.logger.log(f"{'='*80}")
+            
+            # 1. 查询OKX实际持仓
+            positions = self.trader.exchange.fetch_positions([self.symbol])
+            
+            has_okx_position = False
+            okx_position_side = None
+            okx_position_contracts = 0
+            
+            for pos in positions:
+                if pos['symbol'] == self.symbol:
+                    contracts = float(pos.get('contracts', 0))
+                    if contracts > 0:
+                        has_okx_position = True
+                        okx_position_side = pos.get('side', '').lower()
+                        okx_position_contracts = contracts
+                        self.logger.log(f"📊 检测到OKX持仓: {okx_position_side}, {okx_position_contracts}张")
+                        break
+            
+            if not has_okx_position:
+                self.logger.log(f"✅ OKX无持仓，程序从空仓开始")
+                
+                # 🔴 取消所有挂单，清理残留的止损/止盈单
+                self.logger.log(f"🧹 取消所有挂单...")
+                try:
+                    self.trader.cancel_all_stop_orders(self.symbol)
+                    self.logger.log(f"✅ 已取消所有挂单")
+                except Exception as e:
+                    self.logger.log_warning(f"⚠️  取消挂单失败: {e}")
+                
+                self.logger.log(f"{'='*80}\n")
+                return
+            
+            # 2. 从数据库查询对应的交易记录
+            self.logger.log(f"🔍 从数据库查询持仓记录...")
+            trade = self.trading_db.get_open_trade(self.symbol)
+            
+            if not trade:
+                self.logger.log_warning(f"⚠️  OKX有持仓但数据库无记录，请手动检查！")
+                self.logger.log(f"   OKX持仓: {okx_position_side}, {okx_position_contracts}张")
+                self.logger.log(f"   建议: 手动平仓或手动添加数据库记录")
+                self.logger.log(f"{'='*80}\n")
+                return
+            
+            # 3. 恢复程序的持仓状态
+            self.logger.log(f"📥 恢复持仓状态到程序...")
+            
+            self.current_position = trade.position_side
+            self.current_position_side = trade.position_side
+            self.current_position_shares = trade.amount
+            self.current_trade_id = trade.id
+            self.current_entry_order_id = trade.entry_order_id
+            
+            self.logger.log(f"   持仓方向: {self.current_position}")
+            self.logger.log(f"   持仓数量: {self.current_position_shares}张")
+            self.logger.log(f"   开仓价格: ${trade.entry_price:.2f}")
+            self.logger.log(f"   开仓时间: {trade.entry_time}")
+            self.logger.log(f"   交易ID: {self.current_trade_id}")
+            self.logger.log(f"   开仓订单: {self.current_entry_order_id}")
+            
+            # 4. 查询并恢复止损/止盈单ID
+            stop_loss_price = None
+            take_profit_price = None
+            
+            try:
+                from trading_database_models import OKXStopOrder
+                session = self.trading_db.get_session()
+                
+                stop_orders = session.query(OKXStopOrder).filter_by(
+                    trade_id=self.current_trade_id,
+                    status='active'
+                ).all()
+                
+                for stop_order in stop_orders:
+                    if stop_order.order_type == 'STOP_LOSS':
+                        self.current_stop_loss_order_id = stop_order.order_id
+                        stop_loss_price = stop_order.trigger_price
+                        self.logger.log(f"   止损单ID: {self.current_stop_loss_order_id} (触发价: ${stop_loss_price:.2f})")
+                    elif stop_order.order_type == 'TAKE_PROFIT':
+                        self.current_take_profit_order_id = stop_order.order_id
+                        take_profit_price = stop_order.trigger_price
+                        self.logger.log(f"   止盈单ID: {self.current_take_profit_order_id} (触发价: ${take_profit_price:.2f})")
+                
+                self.trading_db.close_session(session)
+                
+            except Exception as e:
+                self.logger.log_warning(f"⚠️  查询止损/止盈单失败: {e}")
+            
+            # 5. 同步策略对象的持仓状态
+            self.logger.log(f"📥 同步策略对象持仓状态...")
+            if hasattr(self, 'strategy'):
+                self.strategy.position = self.current_position
+                self.strategy.entry_price = trade.entry_price
+                # 从数据库恢复止损/止盈水平
+                self.strategy.stop_loss_level = stop_loss_price
+                self.strategy.take_profit_level = take_profit_price
+                self.strategy.max_loss_level = None  # 最大亏损线由策略动态计算
+                self.strategy.current_invested_amount = trade.invested_amount
+                self.strategy.position_shares = trade.amount
+                
+                self.logger.log(f"   策略持仓: {self.strategy.position}")
+                self.logger.log(f"   策略开仓价: ${self.strategy.entry_price:.2f}")
+                if stop_loss_price:
+                    self.logger.log(f"   策略止损价: ${stop_loss_price:.2f}")
+                if take_profit_price:
+                    self.logger.log(f"   策略止盈价: ${take_profit_price:.2f}")
+            
+            self.logger.log(f"\n✅ 持仓状态同步完成！")
+            self.logger.log(f"💡 程序将跳过开仓信号，只执行止损价格更新")
+            self.logger.log(f"{'='*80}\n")
+            
+        except Exception as e:
+            self.logger.log_error(f"❌ 同步持仓状态失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.logger.log_warning(f"⚠️  建议检查OKX持仓和数据库状态，必要时手动平仓")
     
     def sync_open_trades_with_okx(self):
         """同步数据库持仓状态与OKX实际持仓（每1分钟执行 - 测试用）
@@ -1125,6 +1339,14 @@ class LiveTradingBotWithStopOrders:
             # 3. 如果OKX没有持仓，但本地有未平仓记录，说明已被平仓
             if not has_okx_position and len(trades_data) > 0:
                 self.logger.log(f"\n⚠️  发现不一致: 本地有{len(trades_data)}条未平仓记录，但OKX无持仓")
+                
+                # 🔴 取消所有挂单，清理残留的止损/止盈单
+                self.logger.log(f"🧹 取消所有挂单...")
+                try:
+                    self.trader.cancel_all_stop_orders(self.symbol)
+                    self.logger.log(f"✅ 已取消所有挂单")
+                except Exception as cancel_e:
+                    self.logger.log_warning(f"⚠️  取消挂单失败: {cancel_e}")
                 
                 synced_count = 0
                 for trade_data in trades_data:
@@ -1662,10 +1884,18 @@ class LiveTradingBotWithStopOrders:
         # 预热策略
         self.warmup_strategy()
         
-        # 显示账户信息
+        # 🔴 获取并初始化账户余额
         account_info = self.trader.get_account_info()
         if account_info:
-            self.logger.log(f"💰 账户余额: ${account_info['balance']['total']:,.2f} USDT\n")
+            self.account_balance = account_info['balance']['total']
+            self.logger.log(f"💰 账户余额: ${self.account_balance:,.2f} USDT")
+            self.logger.log(f"📊 仓位比例: {self.config.get('position_size_percentage', 100)}%")
+            self.logger.log(f"💵 可用保证金: ${self.account_balance * self.config.get('position_size_percentage', 100) / 100:,.2f} USDT\n")
+        else:
+            self.logger.log_warning("⚠️  无法获取账户信息，请检查API配置\n")
+        
+        # 🔴 启动时同步OKX持仓状态到程序
+        self._sync_position_on_startup()
         
         self.is_running = True
         self.logger.log(f"⏰ 每分钟01-05秒更新，{self.config['timeframe']}周期整点触发策略")

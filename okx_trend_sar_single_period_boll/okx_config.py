@@ -8,9 +8,9 @@ OKX API 配置文件
 
 # OKX API 配置
 OKX_API_CONFIG = {
-    'api_key': '3afaa787-5b41-4662-8a19-d08f593b8cba',           # 替换为你的 API Key
-    'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
-    'password': 'Ayw.72203991',          # 替换为你的 API Password
+    'api_key': 'b8a61cc1-fb4e-4dab-b54b-5d8e9a131a34',           # 替换为你的 API Key
+    'secret': '6AC1C93A751979E621C2A140738942EC',          # 替换为你的 Secret Key
+    'password': 'SQBT50?L.*wb,m|Q;LKduJdu',          # 替换为你的 API Password
     'enableRateLimit': True,
     'options': {
         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
@@ -30,7 +30,7 @@ TRADING_CONFIG = {
     },
     
     # 杠杆配置
-    'leverage': 2,              # 杠杆倍数（1-125），建议1-5倍
+    'leverage': 3,              # 杠杆倍数（1-125），建议1-5倍
     'margin_mode': 'cross',     # 保证金模式：'cross'=全仓, 'isolated'=逐仓
     
     # 风险控制
