@@ -1,0 +1,732 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC - SAR Single Period Trend Filter 策略绩效报告</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <style>
+        body {
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        .header {
+            text-align: center;
+            border-bottom: 3px solid #007bff;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #007bff;
+            margin: 0;
+            font-size: 2.5rem;
+        }
+        .header p {
+            color: #666;
+            margin: 10px 0 0 0;
+            font-size: 1.1rem;
+        }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        .metric-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .metric-card.positive {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        }
+        .metric-card.negative {
+            background: linear-gradient(135deg, #fc466b 0%, #3f5efb 100%);
+        }
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .metric-label {
+            font-size: 0.9rem;
+            opacity: 0.9;
+        }
+        .chart-container {
+            margin: 40px 0;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        .chart-wrapper {
+            position: relative;
+            height: 400px;
+            margin: 20px 0;
+        }
+        .chart-title {
+            text-align: center;
+            color: #007bff;
+            margin-bottom: 20px;
+            font-size: 1.3rem;
+            font-weight: bold;
+        }
+        .section {
+            margin: 40px 0;
+        }
+        .section h2 {
+            color: #007bff;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        .nav-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            font-size: 0.9rem;
+        }
+        .nav-table th, .nav-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+        }
+        .nav-table th {
+            background-color: #007bff;
+            color: white;
+            font-weight: bold;
+        }
+        .nav-table tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .nav-table tr:hover {
+            background-color: #f5f5f5;
+        }
+        .summary-box {
+            background: #f8f9fa;
+            border-left: 4px solid #007bff;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📈 BTC - SAR Single Period Trend Filter 策略绩效报告</h1>
+            <p>生成时间: 2025-10-13 17:43:30</p>
+            <p>回测期间: 2025-09-01 至 2025-09-17 (17 天)</p>
+        </div>
+        
+        <div class="metrics-grid">
+            <div class="metric-card positive">
+                <div class="metric-label">💰 总收益率</div>
+                <div class="metric-value">+1.94%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">📈 年化收益率</div>
+                <div class="metric-value">+50.98%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">⚠️ 最大回撤</div>
+                <div class="metric-value">-3.00%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">🎯 夏普比率</div>
+                <div class="metric-value">2.61</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">📉 年化波动率</div>
+                <div class="metric-value">18.41%</div>
+            </div>
+            <div class="metric-card negative">
+                <div class="metric-label">🎯 胜率</div>
+                <div class="metric-value">47.1%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">📊 盈亏比</div>
+                <div class="metric-value">1.16</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">🔄 总交易次数</div>
+                <div class="metric-value">85</div>
+            </div>
+        </div>
+        
+        <div class="summary-box">
+            <h3>📊 资金概览</h3>
+            <p><strong>初始资金:</strong> $500.00</p>
+            <p><strong>最终净值:</strong> $509.69</p>
+            <p><strong>净盈亏:</strong> $9.69</p>
+        </div>
+        
+        <div class="summary-box">
+            <h3>📈 交易统计</h3>
+            <p><strong>总交易次数:</strong> 85 次</p>
+            <p><strong>盈利交易:</strong> 40 次</p>
+            <p><strong>亏损交易:</strong> 45 次</p>
+            <p><strong>胜率:</strong> 47.1%</p>
+            <p><strong>盈亏比:</strong> 1.16</p>
+        </div>
+        
+        <div class="summary-box">
+            <h3>⚙️ 策略配置</h3>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div>
+                    <h4>📊 单周期SAR策略参数</h4>
+                    <p><strong>时间周期:</strong> 15m</p>
+                    <p><strong>指标周期:</strong> 14</p>
+                </div>
+                <div>
+                    <h4>🎯 SAR参数</h4>
+                    <p><strong>起始值:</strong> 0.005</p>
+                    <p><strong>递增值:</strong> 0.005</p>
+                    <p><strong>最大值:</strong> 0.04</p>
+                </div>
+            </div>
+            <div style="margin-top: 15px;">
+                <h4>💰 止盈止损配置</h4>
+                <p><strong>固定止盈:</strong> 0.5%</p>
+                <p><strong>最大亏损:</strong> 0%</p>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h2>📈 绩效图表</h2>
+            
+            <div class="chart-title">💰 净值曲线</div>
+            <div class="chart-wrapper">
+                <canvas id="navChart"></canvas>
+            </div>
+            
+            <div class="chart-title">📊 累计收益率</div>
+            <div class="chart-wrapper">
+                <canvas id="returnChart"></canvas>
+            </div>
+            
+            <div class="chart-title">📉 回撤分析</div>
+            <div class="chart-wrapper">
+                <canvas id="drawdownChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>📋 每日净值明细</h2>
+            <table class="nav-table">
+        <thead>
+            <tr>
+                <th>日期</th>
+                <th>价格</th>
+                <th>持仓</th>
+                <th>持仓价值</th>
+                <th>现金余额</th>
+                <th>总净值</th>
+                <th>日收益率</th>
+                <th>累计收益率</th>
+                <th>回撤</th>
+            </tr>
+        </thead>
+        <tbody>
+        
+            <tr>
+                <td>2025-09-01</td>
+                <td>$108,742.30</td>
+                <td>short</td>
+                <td>$500.21</td>
+                <td>$0.10</td>
+                <td>$500.31</td>
+                <td>+0.00%</td>
+                <td>+0.06%</td>
+                <td>0.00%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-02</td>
+                <td>$110,794.20</td>
+                <td>long</td>
+                <td>$498.57</td>
+                <td>$0.10</td>
+                <td>$498.67</td>
+                <td>-0.33%</td>
+                <td>-0.27%</td>
+                <td>-0.33%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-03</td>
+                <td>$112,174.10</td>
+                <td>long</td>
+                <td>$504.78</td>
+                <td>$0.10</td>
+                <td>$504.88</td>
+                <td>+1.25%</td>
+                <td>+0.98%</td>
+                <td>0.00%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-04</td>
+                <td>$109,460.60</td>
+                <td>short</td>
+                <td>$503.52</td>
+                <td>$0.10</td>
+                <td>$503.62</td>
+                <td>-0.25%</td>
+                <td>+0.72%</td>
+                <td>-0.25%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-05</td>
+                <td>$110,673.10</td>
+                <td>short</td>
+                <td>$509.10</td>
+                <td>$0.10</td>
+                <td>$509.20</td>
+                <td>+1.11%</td>
+                <td>+1.84%</td>
+                <td>0.00%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-06</td>
+                <td>$110,344.90</td>
+                <td>空仓</td>
+                <td>$0.00</td>
+                <td>$514.16</td>
+                <td>$514.16</td>
+                <td>+0.97%</td>
+                <td>+2.83%</td>
+                <td>0.00%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-07</td>
+                <td>$111,298.00</td>
+                <td>long</td>
+                <td>$511.97</td>
+                <td>$0.10</td>
+                <td>$512.07</td>
+                <td>-0.41%</td>
+                <td>+2.41%</td>
+                <td>-0.41%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-08</td>
+                <td>$112,600.00</td>
+                <td>long</td>
+                <td>$517.96</td>
+                <td>$0.10</td>
+                <td>$518.06</td>
+                <td>+1.17%</td>
+                <td>+3.61%</td>
+                <td>0.00%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-09</td>
+                <td>$110,818.70</td>
+                <td>空仓</td>
+                <td>$0.00</td>
+                <td>$520.31</td>
+                <td>$520.31</td>
+                <td>+0.43%</td>
+                <td>+4.06%</td>
+                <td>0.00%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-10</td>
+                <td>$113,817.00</td>
+                <td>空仓</td>
+                <td>$0.00</td>
+                <td>$522.68</td>
+                <td>$522.68</td>
+                <td>+0.46%</td>
+                <td>+4.54%</td>
+                <td>0.00%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-11</td>
+                <td>$114,124.20</td>
+                <td>long</td>
+                <td>$513.56</td>
+                <td>$0.10</td>
+                <td>$513.66</td>
+                <td>-1.73%</td>
+                <td>+2.73%</td>
+                <td>-1.73%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-12</td>
+                <td>$115,076.90</td>
+                <td>long</td>
+                <td>$517.85</td>
+                <td>$0.10</td>
+                <td>$517.95</td>
+                <td>+0.83%</td>
+                <td>+3.59%</td>
+                <td>-0.90%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-13</td>
+                <td>$115,732.00</td>
+                <td>short</td>
+                <td>$520.79</td>
+                <td>$0.10</td>
+                <td>$520.90</td>
+                <td>+0.57%</td>
+                <td>+4.18%</td>
+                <td>-0.34%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-14</td>
+                <td>$115,208.50</td>
+                <td>short</td>
+                <td>$506.92</td>
+                <td>$0.10</td>
+                <td>$507.02</td>
+                <td>-2.66%</td>
+                <td>+1.40%</td>
+                <td>-3.00%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-15</td>
+                <td>$114,782.60</td>
+                <td>short</td>
+                <td>$516.52</td>
+                <td>$0.10</td>
+                <td>$516.62</td>
+                <td>+1.89%</td>
+                <td>+3.32%</td>
+                <td>-1.16%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-16</td>
+                <td>$115,900.10</td>
+                <td>空仓</td>
+                <td>$0.00</td>
+                <td>$511.05</td>
+                <td>$511.05</td>
+                <td>-1.08%</td>
+                <td>+2.21%</td>
+                <td>-2.22%</td>
+            </tr>
+            
+            <tr>
+                <td>2025-09-17</td>
+                <td>$115,814.70</td>
+                <td>short</td>
+                <td>$509.58</td>
+                <td>$0.10</td>
+                <td>$509.69</td>
+                <td>-0.27%</td>
+                <td>+1.94%</td>
+                <td>-2.49%</td>
+            </tr>
+            </tbody></table>
+        </div>
+        
+        <div class="footer">
+            <p>🤖 由 SAR Single Period Trend Filter 策略自动生成</p>
+        </div>
+    </div>
+
+    <script>
+        // 图表数据
+        const chartData = {"dates": ["2025-09-01", "2025-09-02", "2025-09-03", "2025-09-04", "2025-09-05", "2025-09-06", "2025-09-07", "2025-09-08", "2025-09-09", "2025-09-10", "2025-09-11", "2025-09-12", "2025-09-13", "2025-09-14", "2025-09-15", "2025-09-16", "2025-09-17"], "nav_values": [500.31, 498.67, 504.88, 503.62, 509.2, 514.16, 512.07, 518.06, 520.31, 522.68, 513.66, 517.95, 520.9, 507.02, 516.62, 511.05, 509.69], "cumulative_returns": [0.06, -0.27, 0.98, 0.72, 1.84, 2.83, 2.41, 3.61, 4.06, 4.54, 2.73, 3.59, 4.18, 1.4, 3.32, 2.21, 1.94], "drawdowns": [0.0, -0.33, 0.0, -0.25, 0.0, 0.0, -0.41, 0.0, 0.0, 0.0, -1.73, -0.9, -0.34, -3.0, -1.16, -2.22, -2.49], "initial_capital": 500, "max_drawdown_point": {"date": "2025-09-14", "value": -3.0}};
+        
+        // 通用图表配置
+        const commonOptions = {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
+            plugins: {
+                tooltip: {
+                    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                    titleColor: 'white',
+                    bodyColor: 'white',
+                    borderColor: '#007bff',
+                    borderWidth: 1,
+                    cornerRadius: 5,
+                    displayColors: false,
+                    callbacks: {
+                        title: function(context) {
+                            return '日期: ' + context[0].label;
+                        }
+                    }
+                },
+                legend: {
+                    display: true,
+                    position: 'top'
+                }
+            },
+            scales: {
+                x: {
+                    type: 'category',
+                    display: true,
+                    title: {
+                        display: true,
+                        text: '日期'
+                    },
+                    grid: {
+                        display: true,
+                        color: 'rgba(0,0,0,0.1)'
+                    }
+                },
+                y: {
+                    display: true,
+                    grid: {
+                        display: true,
+                        color: 'rgba(0,0,0,0.1)'
+                    }
+                }
+            }
+        };
+
+        // 1. 净值曲线图
+        const navCtx = document.getElementById('navChart').getContext('2d');
+        new Chart(navCtx, {
+            type: 'line',
+            data: {
+                labels: chartData.dates,
+                datasets: [
+                    {
+                        label: '净值曲线',
+                        data: chartData.nav_values,
+                        borderColor: '#007bff',
+                        backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.1,
+                        pointRadius: 1,
+                        pointHoverRadius: 5
+                    },
+                    {
+                        label: '初始资金线',
+                        data: Array(chartData.dates.length).fill(chartData.initial_capital),
+                        borderColor: '#6c757d',
+                        backgroundColor: 'transparent',
+                        borderWidth: 1,
+                        borderDash: [5, 5],
+                        fill: false,
+                        pointRadius: 0,
+                        pointHoverRadius: 0
+                    }
+                ]
+            },
+            options: {
+                ...commonOptions,
+                scales: {
+                    ...commonOptions.scales,
+                    y: {
+                        ...commonOptions.scales.y,
+                        title: {
+                            display: true,
+                            text: '净值 ($)'
+                        },
+                        ticks: {
+                            callback: function(value) {
+                                return '$' + value.toLocaleString();
+                            }
+                        }
+                    }
+                },
+                plugins: {
+                    ...commonOptions.plugins,
+                    tooltip: {
+                        ...commonOptions.plugins.tooltip,
+                        callbacks: {
+                            ...commonOptions.plugins.tooltip.callbacks,
+                            label: function(context) {
+                                if (context.datasetIndex === 0) {
+                                    return '净值: $' + context.parsed.y.toLocaleString();
+                                } else {
+                                    return '初始资金: $' + context.parsed.y.toLocaleString();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // 2. 累计收益率图
+        const returnCtx = document.getElementById('returnChart').getContext('2d');
+        new Chart(returnCtx, {
+            type: 'line',
+            data: {
+                labels: chartData.dates,
+                datasets: [
+                    {
+                        label: '累计收益率',
+                        data: chartData.cumulative_returns,
+                        borderColor: '#28a745',
+                        backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.1,
+                        pointRadius: 1,
+                        pointHoverRadius: 5
+                    },
+                    {
+                        label: '零基准线',
+                        data: Array(chartData.dates.length).fill(0),
+                        borderColor: '#6c757d',
+                        backgroundColor: 'transparent',
+                        borderWidth: 1,
+                        borderDash: [5, 5],
+                        fill: false,
+                        pointRadius: 0,
+                        pointHoverRadius: 0
+                    }
+                ]
+            },
+            options: {
+                ...commonOptions,
+                scales: {
+                    ...commonOptions.scales,
+                    y: {
+                        ...commonOptions.scales.y,
+                        title: {
+                            display: true,
+                            text: '收益率 (%)'
+                        },
+                        ticks: {
+                            callback: function(value) {
+                                return value.toFixed(1) + '%';
+                            }
+                        }
+                    }
+                },
+                plugins: {
+                    ...commonOptions.plugins,
+                    tooltip: {
+                        ...commonOptions.plugins.tooltip,
+                        callbacks: {
+                            ...commonOptions.plugins.tooltip.callbacks,
+                            label: function(context) {
+                                if (context.datasetIndex === 0) {
+                                    return '累计收益率: ' + context.parsed.y.toFixed(2) + '%';
+                                } else {
+                                    return '零基准线: 0%';
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // 3. 回撤分析图
+        const drawdownCtx = document.getElementById('drawdownChart').getContext('2d');
+        const drawdownChart = new Chart(drawdownCtx, {
+            type: 'line',
+            data: {
+                labels: chartData.dates,
+                datasets: [
+                    {
+                        label: '回撤曲线',
+                        data: chartData.drawdowns,
+                        borderColor: '#dc3545',
+                        backgroundColor: 'rgba(220, 53, 69, 0.2)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.1,
+                        pointRadius: 1,
+                        pointHoverRadius: 5
+                    }
+                ]
+            },
+            options: {
+                ...commonOptions,
+                scales: {
+                    ...commonOptions.scales,
+                    y: {
+                        ...commonOptions.scales.y,
+                        title: {
+                            display: true,
+                            text: '回撤 (%)'
+                        },
+                        max: 0,
+                        ticks: {
+                            callback: function(value) {
+                                return value.toFixed(1) + '%';
+                            }
+                        }
+                    }
+                },
+                plugins: {
+                    ...commonOptions.plugins,
+                    tooltip: {
+                        ...commonOptions.plugins.tooltip,
+                        callbacks: {
+                            ...commonOptions.plugins.tooltip.callbacks,
+                            label: function(context) {
+                                return '回撤: ' + context.parsed.y.toFixed(2) + '%';
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // 标记最大回撤点
+        if (chartData.max_drawdown_point) {
+            const maxDDIndex = chartData.dates.indexOf(chartData.max_drawdown_point.date);
+            if (maxDDIndex !== -1) {
+                // 添加最大回撤点标记
+                drawdownChart.data.datasets.push({
+                    label: '最大回撤点',
+                    data: chartData.dates.map((date, index) => 
+                        index === maxDDIndex ? chartData.max_drawdown_point.value : null
+                    ),
+                    borderColor: '#ff6b6b',
+                    backgroundColor: '#ff6b6b',
+                    borderWidth: 3,
+                    pointRadius: 6,
+                    pointHoverRadius: 8,
+                    showLine: false,
+                    fill: false
+                });
+                drawdownChart.update();
+            }
+        }
+    </script>
+</body>
+</html>
+        

@@ -1,0 +1,51 @@
+[
+  {
+    "timestamp": "2025-10-15 17:20:04",
+    "type": "signal",
+    "data": {
+      "type": "UPDATE_STOP_LOSS",
+      "new_stop_loss": 4134.68369670359,
+      "old_stop_loss": 4131.295517399572,
+      "position": "long",
+      "reason": "多单SAR止损动态更新 | 旧止损$4131.30 → 新止损$4134.68"
+    }
+  },
+  {
+    "timestamp": "2025-10-15 17:25:02",
+    "type": "signal",
+    "data": {
+      "type": "UPDATE_STOP_LOSS",
+      "new_stop_loss": 4137.936348835447,
+      "old_stop_loss": 4134.68369670359,
+      "position": "long",
+      "reason": "多单SAR止损动态更新 | 旧止损$4134.68 → 新止损$4137.94"
+    }
+  },
+  {
+    "timestamp": "2025-10-15 17:30:02",
+    "type": "signal",
+    "data": {
+      "type": "UPDATE_STOP_LOSS",
+      "new_stop_loss": 4141.058894882029,
+      "old_stop_loss": 4137.936348835447,
+      "position": "long",
+      "reason": "多单SAR止损动态更新 | 旧止损$4137.94 → 新止损$4141.06"
+    }
+  },
+  {
+    "timestamp": "2025-10-15 17:32:02",
+    "type": "signal",
+    "data": {
+      "type": "STOP_LOSS_LONG",
+      "price": 4141.058894882029,
+      "profit_loss": -189.41105117971347,
+      "invested_amount": -139.42105117971346,
+      "position_shares": 10.0,
+      "old_balance": 0.00999999999999801,
+      "new_balance": -139.41105117971347,
+      "transaction_fee": 0.0,
+      "exit_timestamp": "2025-10-15 17:31:00",
+      "reason": "多单SAR亏损平仓 | 条件：价格$4139.01≤SAR止损$4141.06 | 价格来源：1分钟最低价触及SAR止损线：价格$4141.06 | 盈亏$-189.41"
+    }
+  }
+]
