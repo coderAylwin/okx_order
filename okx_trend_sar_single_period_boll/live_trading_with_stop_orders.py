@@ -539,14 +539,18 @@ class LiveTradingBotWithStopOrders:
                 try:
                     # 发送市价平仓订单
                     if self.current_position == 'long':
+                        params = {'posSide': 'long', 'reduceOnly': True}
                         close_order = self.trader.exchange.create_market_sell_order(
                             self.symbol, 
-                            self.current_position_shares
+                            self.current_position_shares,
+                            params
                         )
                     else:  # short
+                        params = {'posSide': 'short', 'reduceOnly': True}
                         close_order = self.trader.exchange.create_market_buy_order(
                             self.symbol,
-                            self.current_position_shares
+                            self.current_position_shares,
+                            params
                         )
                     
                     print(f"✅ 市价平仓成功: 订单ID={close_order['id']}")

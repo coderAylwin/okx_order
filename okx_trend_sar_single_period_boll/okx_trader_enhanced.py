@@ -179,8 +179,11 @@ class OKXTraderEnhanced:
             return result
         
         try:
-            # 1. 开仓
-            entry_order = self.exchange.create_market_buy_order(symbol, amount)
+            # 1. 开仓 - 添加posSide参数
+            params = {
+                'posSide': 'long'  # 明确指定为多仓
+            }
+            entry_order = self.exchange.create_market_buy_order(symbol, amount, params)
             result['entry_order'] = entry_order
             print(f"✅ 开多单成功: {symbol}, 数量: {amount}, 订单ID: {entry_order['id']}")
             
@@ -229,8 +232,11 @@ class OKXTraderEnhanced:
             return result
         
         try:
-            # 1. 开仓
-            entry_order = self.exchange.create_market_sell_order(symbol, amount)
+            # 1. 开仓 - 添加posSide参数
+            params = {
+                'posSide': 'short'  # 明确指定为空仓
+            }
+            entry_order = self.exchange.create_market_sell_order(symbol, amount, params)
             result['entry_order'] = entry_order
             print(f"✅ 开空单成功: {symbol}, 数量: {amount}, 订单ID: {entry_order['id']}")
             
@@ -278,6 +284,7 @@ class OKXTraderEnhanced:
                 'slTriggerPx': str(trigger_price),  # 止损触发价
                 'slOrdPx': str(trigger_price),  # 止损委托价（限价单，使用触发价）
                 'reduceOnly': True,  # 只减仓
+                'posSide': 'long' if side == 'long' else 'short',  # 明确指定仓位方向
             }
             
             if side == 'long':
@@ -321,6 +328,7 @@ class OKXTraderEnhanced:
                 'tpTriggerPx': str(trigger_price),  # 止盈触发价
                 'tpOrdPx': str(trigger_price),  # 止盈委托价（限价单，使用触发价）
                 'reduceOnly': True,
+                'posSide': 'long' if side == 'long' else 'short',  # 明确指定仓位方向
             }
             
             if side == 'long':
