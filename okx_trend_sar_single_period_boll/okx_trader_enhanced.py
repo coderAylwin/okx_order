@@ -101,8 +101,12 @@ class OKXTraderEnhanced:
         # 获取合约规格和最小下单量
         contract_size, min_size = self.get_contract_size(symbol)
         
-        # 计算仓位价值 = 保证金 × 杠杆
-        position_value = usdt_amount * leverage
+        # 🔴 增加安全缓冲：只使用90%的保证金，留出10%缓冲
+        safe_margin = usdt_amount * 0.99
+        print(f"🔒 安全保证金计算: ${usdt_amount:.2f} × 90% = ${safe_margin:.2f}")
+        
+        # 计算仓位价值 = 安全保证金 × 杠杆
+        position_value = safe_margin * leverage
         
         # 计算可购买的币数量 = 仓位价值 ÷ 价格
         coin_amount = position_value / current_price
@@ -135,9 +139,10 @@ class OKXTraderEnhanced:
         required_margin = actual_position_value / leverage
         
         print(f"💰 合约数量计算:")
-        print(f"   保证金: ${usdt_amount:.2f}")
+        print(f"   原始保证金: ${usdt_amount:.2f}")
+        print(f"   安全保证金: ${safe_margin:.2f} (90%缓冲)")
         print(f"   杠杆: {leverage}x")
-        print(f"   仓位价值: ${position_value:.2f} (保证金 × 杠杆)")
+        print(f"   仓位价值: ${position_value:.2f} (安全保证金 × 杠杆)")
         print(f"   当前价格: ${current_price:.2f}")
         print(f"   合约规格: {contract_size} 币/张")
         print(f"   最小下单: {min_size} 张")
@@ -145,6 +150,7 @@ class OKXTraderEnhanced:
         print(f"   实际下单: {contract_amount} 张")
         print(f"   实际仓位价值: ${actual_position_value:.2f}")
         print(f"   实际所需保证金: ${required_margin:.2f}")
+        print(f"   安全缓冲: ${usdt_amount - required_margin:.2f} USDT")
         
         return contract_amount
     
@@ -509,6 +515,73 @@ class OKXTraderEnhanced:
             self.take_profit_order_id = None
         
         return success
+    
+    def cancel_stop_orders_by_position_side(self, symbol, position_side, db_service=None):
+        """根据持仓方向取消对应的止损止盈单
+        
+        Args:
+            symbol: 交易对符号
+            position_side: 持仓方向 ('long' 或 'short')
+            db_service: 数据库服务实例（可选）
+        
+        Returns:
+            bool: 是否成功
+        """
+        if not db_service:
+            print(f"⚠️  未提供数据库服务，无法查询特定方向的订单")
+            return False
+        
+        try:
+            print(f"🔍 查询 {position_side} 方向的止损止盈单...")
+            
+            # 从数据库查询该方向的活跃订单
+            session = db_service.get_session()
+            try:
+                from trading_database_models import OKXStopOrder
+                
+                active_orders = session.query(OKXStopOrder).filter_by(
+                    symbol=symbol,
+                    position_side=position_side,
+                    status='active'
+                ).all()
+                
+                if not active_orders:
+                    print(f"✅ 没有找到 {position_side} 方向的活跃订单")
+                    return True
+                
+                print(f"📋 找到 {len(active_orders)} 个 {position_side} 方向的活跃订单")
+                
+                success = True
+                for order in active_orders:
+                    order_id = order.order_id
+                    order_type = order.order_type
+                    
+                    print(f"🔄 撤销 {order_type} 订单: {order_id}")
+                    
+                    try:
+                        cancel_result = self.cancel_order(symbol, order_id)
+                        if cancel_result:
+                            print(f"✅ 已撤销 {order_type} 订单: {order_id}")
+                            
+                            # 更新数据库状态
+                            order.status = 'canceled'
+                            order.canceled_at = datetime.now()
+                            session.commit()
+                        else:
+                            print(f"⚠️  撤销 {order_type} 订单失败: {order_id}")
+                            success = False
+                    except Exception as e:
+                        print(f"❌ 撤销 {order_type} 订单异常: {e}")
+                        success = False
+                
+                return success
+                
+            finally:
+                db_service.close_session(session)
+                
+        except Exception as e:
+            print(f"❌ 查询/撤销 {position_side} 方向订单失败: {e}")
+            return False
     
     # 保留原有方法以兼容现有代码
     def get_latest_klines(self, symbol, timeframe='1m', limit=100):

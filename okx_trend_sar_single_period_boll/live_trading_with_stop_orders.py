@@ -211,18 +211,63 @@ class LiveTradingBotWithStopOrders:
         signal_type = signal['type']
         print(f"🔍 执行信号: {signal_type}, 测试模式: {self.test_mode}")
         
-        # 🔴 开仓前检查：如果有持仓记录但收到开仓信号，先检查是否有未处理的平仓
+        # 🔴 开仓前检查：直接检查OKX实际持仓，如果有持仓则拒绝开仓
         if signal_type in ['OPEN_LONG', 'OPEN_SHORT']:
-            if self.current_position:
-                print(f"⚠️  检测到有持仓记录({self.current_position})但收到开仓信号，检查是否有未处理的平仓...")
-                self._check_pending_close()
+            print(f"🔍 开仓前检查OKX实际持仓...")
+            
+            try:
+                # 直接查询OKX实际持仓
+                positions = self.trader.exchange.fetch_positions([self.symbol])
                 
-                # 🔴 检查完后，如果仍然持仓，拒绝开仓
-                if self.current_position:
+                has_okx_long_position = False
+                has_okx_short_position = False
+                okx_long_contracts = 0
+                okx_short_contracts = 0
+                
+                for pos in positions:
+                    if pos['symbol'] == self.symbol:
+                        contracts = float(pos.get('contracts', 0))
+                        if contracts > 0:
+                            side = pos.get('side', '').lower()
+                            if side == 'long':
+                                has_okx_long_position = True
+                                okx_long_contracts = contracts
+                            elif side == 'short':
+                                has_okx_short_position = True
+                                okx_short_contracts = contracts
+                
+                # 检查是否有任何持仓
+                has_any_okx_position = has_okx_long_position or has_okx_short_position
+                
+                if has_any_okx_position:
                     signal_direction = 'long' if signal_type == 'OPEN_LONG' else 'short'
-                    self.logger.log_warning(f"⚠️  当前持仓中({self.current_position})，拒绝新的{signal_direction}开仓信号")
-                    print(f"❌ 拒绝开仓: 当前持仓={self.current_position}, 新信号={signal_direction}")
+                    
+                    # 详细记录持仓信息
+                    position_info = []
+                    if has_okx_long_position:
+                        position_info.append(f"多单{okx_long_contracts}张")
+                    if has_okx_short_position:
+                        position_info.append(f"空单{okx_short_contracts}张")
+                    
+                    self.logger.log_warning(f"⚠️  OKX实际持仓中({', '.join(position_info)})，拒绝新的{signal_direction}开仓信号")
+                    print(f"❌ 拒绝开仓: OKX实际持仓={', '.join(position_info)}, 新信号={signal_direction}")
                     return  # 🔴 直接返回，不执行开仓
+                
+                # OKX无持仓，检查程序内部状态是否一致
+                if self.current_position:
+                    print(f"⚠️  OKX无持仓但程序内部有持仓记录({self.current_position})，清空程序状态...")
+                    self._clear_position_state()
+                    print(f"✅ 程序状态已清空，可以开新仓")
+                
+                print(f"✅ OKX无持仓，可以开仓")
+                
+            except Exception as e:
+                print(f"❌ 检查OKX持仓失败: {e}")
+                # 如果检查失败，为了安全起见，拒绝开仓
+                signal_direction = 'long' if signal_type == 'OPEN_LONG' else 'short'
+                self.logger.log_warning(f"⚠️  无法检查OKX持仓，拒绝{signal_direction}开仓信号（安全考虑）")
+                print(f"❌ 拒绝开仓: 无法检查OKX持仓，新信号={signal_direction}")
+                return
         
         # 🔴 开仓 - 自动挂止损止盈单
         if signal_type == 'OPEN_LONG':
@@ -800,9 +845,9 @@ class LiveTradingBotWithStopOrders:
                         self.symbol
                     )
                     
-                    # 如果止损单已触发（状态变为 closed/filled）
-                    if stop_order['status'] in ['closed', 'filled']:
-                        self.logger.log(f"🚨 检测到止损单触发: {self.current_stop_loss_order_id}")
+                    # 如果止损单已触发（状态变为 closed/filled）或失败（状态为 error）
+                    if stop_order['status'] in ['closed', 'filled', 'error']:
+                        self.logger.log(f"🚨 检测到止损单触发: {self.current_stop_loss_order_id} (状态: {stop_order['status']})")
                         self._handle_stop_order_triggered(stop_order, 'STOP_LOSS')
                         return
                         
@@ -822,14 +867,6 @@ class LiveTradingBotWithStopOrders:
                             
                             if not has_position:
                                 self.logger.log(f"🚨 确认持仓已平，止损单已触发，但无法获取订单详情")
-                                
-                                # 🔴 取消所有挂单，清理残留的止损/止盈单
-                                self.logger.log(f"🧹 取消所有挂单...")
-                                try:
-                                    self.trader.cancel_all_stop_orders(self.symbol)
-                                    self.logger.log(f"✅ 已取消所有挂单")
-                                except Exception as cancel_e:
-                                    self.logger.log_warning(f"⚠️  取消挂单失败: {cancel_e}")
                                 
                                 # 清空状态
                                 self._clear_position_state()
@@ -851,8 +888,8 @@ class LiveTradingBotWithStopOrders:
                         self.symbol
                     )
                     
-                    if tp_order['status'] in ['closed', 'filled']:
-                        self.logger.log(f"🚨 检测到止盈单触发: {self.current_take_profit_order_id}")
+                    if tp_order['status'] in ['closed', 'filled', 'error']:
+                        self.logger.log(f"🚨 检测到止盈单触发: {self.current_take_profit_order_id} (状态: {tp_order['status']})")
                         self._handle_stop_order_triggered(tp_order, 'TAKE_PROFIT')
                         return
                         
@@ -872,14 +909,6 @@ class LiveTradingBotWithStopOrders:
                             
                             if not has_position:
                                 self.logger.log(f"🚨 确认持仓已平，止盈单已触发，但无法获取订单详情")
-                                
-                                # 🔴 取消所有挂单，清理残留的止损/止盈单
-                                self.logger.log(f"🧹 取消所有挂单...")
-                                try:
-                                    self.trader.cancel_all_stop_orders(self.symbol)
-                                    self.logger.log(f"✅ 已取消所有挂单")
-                                except Exception as cancel_e:
-                                    self.logger.log_warning(f"⚠️  取消挂单失败: {cancel_e}")
                                 
                                 # 清空状态
                                 self._clear_position_state()
@@ -917,8 +946,8 @@ class LiveTradingBotWithStopOrders:
                     )
                     
                     # 如果已触发但未处理
-                    if stop_order['status'] in ['closed', 'filled']:
-                        print(f"🚨 发现未处理的止损单触发，立即处理...")
+                    if stop_order['status'] in ['closed', 'filled', 'error']:
+                        print(f"🚨 发现未处理的止损单触发，立即处理... (状态: {stop_order['status']})")
                         self._handle_stop_order_triggered(stop_order, 'STOP_LOSS')
                         return
                         
@@ -928,19 +957,24 @@ class LiveTradingBotWithStopOrders:
                     if '51603' in error_msg or 'does not exist' in error_msg.lower():
                         print(f"⚠️  止损单不存在(可能已触发): {self.current_stop_loss_order_id}")
                         
-                        # 🔴 取消所有挂单，清理残留的止损/止盈单
-                        print(f"🧹 取消所有挂单...")
+                        # 🔴 只有在检测到OKX没有实际持仓时才清空持仓状态
                         try:
-                            self.trader.cancel_all_stop_orders(self.symbol)
-                            print(f"✅ 已取消所有挂单")
-                        except Exception as cancel_e:
-                            print(f"⚠️  取消挂单失败: {cancel_e}")
-                        
-                        print(f"🧹 清空持仓状态，继续开新仓...")
-                        self._clear_position_state()
-                        
-                        # 🔴 平仓后更新账户余额
-                        self._update_account_balance()
+                            positions = self.trader.exchange.fetch_positions([self.symbol])
+                            has_actual_position = any(
+                                float(pos.get('contracts', 0)) > 0 
+                                for pos in positions 
+                                if pos['symbol'] == self.symbol
+                            )
+                            
+                            if not has_actual_position:
+                                print(f"✅ 确认OKX无持仓，清空程序状态...")
+                                self._clear_position_state()
+                                self._update_account_balance()
+                            else:
+                                print(f"⚠️  OKX仍有持仓，不清空程序状态")
+                        except Exception as pos_e:
+                            print(f"❌ 检查OKX持仓失败: {pos_e}")
+                            print(f"⚠️  为了安全，不清空程序状态")
                         
                         return
                     else:
@@ -954,8 +988,8 @@ class LiveTradingBotWithStopOrders:
                         self.symbol
                     )
                     
-                    if tp_order['status'] in ['closed', 'filled']:
-                        print(f"🚨 发现未处理的止盈单触发，立即处理...")
+                    if tp_order['status'] in ['closed', 'filled', 'error']:
+                        print(f"🚨 发现未处理的止盈单触发，立即处理... (状态: {tp_order['status']})")
                         self._handle_stop_order_triggered(tp_order, 'TAKE_PROFIT')
                         return
                         
@@ -965,19 +999,24 @@ class LiveTradingBotWithStopOrders:
                     if '51603' in error_msg or 'does not exist' in error_msg.lower():
                         print(f"⚠️  止盈单不存在(可能已触发): {self.current_take_profit_order_id}")
                         
-                        # 🔴 取消所有挂单，清理残留的止损/止盈单
-                        print(f"🧹 取消所有挂单...")
+                        # 🔴 只有在检测到OKX没有实际持仓时才清空持仓状态
                         try:
-                            self.trader.cancel_all_stop_orders(self.symbol)
-                            print(f"✅ 已取消所有挂单")
-                        except Exception as cancel_e:
-                            print(f"⚠️  取消挂单失败: {cancel_e}")
-                        
-                        print(f"🧹 清空持仓状态，继续开新仓...")
-                        self._clear_position_state()
-                        
-                        # 🔴 平仓后更新账户余额
-                        self._update_account_balance()
+                            positions = self.trader.exchange.fetch_positions([self.symbol])
+                            has_actual_position = any(
+                                float(pos.get('contracts', 0)) > 0 
+                                for pos in positions 
+                                if pos['symbol'] == self.symbol
+                            )
+                            
+                            if not has_actual_position:
+                                print(f"✅ 确认OKX无持仓，清空程序状态...")
+                                self._clear_position_state()
+                                self._update_account_balance()
+                            else:
+                                print(f"⚠️  OKX仍有持仓，不清空程序状态")
+                        except Exception as pos_e:
+                            print(f"❌ 检查OKX持仓失败: {pos_e}")
+                            print(f"⚠️  为了安全，不清空程序状态")
                         
                         return
                     else:
@@ -1201,15 +1240,6 @@ class LiveTradingBotWithStopOrders:
             
             if not has_okx_position:
                 self.logger.log(f"✅ OKX无持仓，程序从空仓开始")
-                
-                # 🔴 取消所有挂单，清理残留的止损/止盈单
-                self.logger.log(f"🧹 取消所有挂单...")
-                try:
-                    self.trader.cancel_all_stop_orders(self.symbol)
-                    self.logger.log(f"✅ 已取消所有挂单")
-                except Exception as e:
-                    self.logger.log_warning(f"⚠️  取消挂单失败: {e}")
-                
                 self.logger.log(f"{'='*80}\n")
                 return
             
@@ -1358,19 +1388,81 @@ class LiveTradingBotWithStopOrders:
             try:
                 positions = self.trader.exchange.fetch_positions([self.symbol])
                 
+                # 🔍 添加详细的调试信息
+                self.logger.log(f"🔍 调用OKX API获取持仓信息...")
+                self.logger.log(f"📋 OKX API返回的持仓数据:")
+                self.logger.log(f"   查询的交易对: {self.symbol}")
+                self.logger.log(f"   返回的持仓数量: {len(positions)}")
+                
+                for i, pos in enumerate(positions):
+                    self.logger.log(f"   持仓 #{i+1}:")
+                    self.logger.log(f"     symbol: {pos.get('symbol')}")
+                    self.logger.log(f"     side: {pos.get('side')}")
+                    self.logger.log(f"     contracts: {pos.get('contracts')}")
+                    self.logger.log(f"     size: {pos.get('size')}")
+                    self.logger.log(f"     notional: {pos.get('notional')}")
+                    self.logger.log(f"     margin: {pos.get('margin')}")
+                    self.logger.log(f"     unrealizedPnl: {pos.get('unrealizedPnl')}")
+                    self.logger.log(f"     percentage: {pos.get('percentage')}")
+                    self.logger.log(f"     markPrice: {pos.get('markPrice')}")
+                    self.logger.log(f"     entryPrice: {pos.get('entryPrice')}")
+                    self.logger.log(f"     timestamp: {pos.get('timestamp')}")
+                    self.logger.log(f"     datetime: {pos.get('datetime')}")
+                    self.logger.log(f"     info: {pos.get('info', {})}")
+                
                 # 过滤出有持仓的记录（contracts > 0）
                 has_okx_position = False
+                has_okx_long_position = False
+                has_okx_short_position = False
+                okx_long_contracts = 0
+                okx_short_contracts = 0
+                
                 for pos in positions:
-                    if pos['symbol'] == self.symbol:
+                    # 🔍 检查多种可能的symbol格式
+                    pos_symbol = pos.get('symbol', '')
+                    pos_inst_id = pos.get('info', {}).get('instId', '')
+                    
+                    # 检查是否匹配当前交易对
+                    symbol_match = (
+                        pos_symbol == self.symbol or 
+                        pos_inst_id == self.symbol or
+                        pos_symbol == self.symbol.replace('-', '/') or
+                        pos_inst_id == self.symbol.replace('-', '/')
+                    )
+                    
+                    if symbol_match:
                         contracts = float(pos.get('contracts', 0))
-                        if contracts > 0:
+                        size = float(pos.get('size', 0))
+                        notional = float(pos.get('notional', 0))
+                        
+                        self.logger.log(f"🔍 匹配的交易对持仓:")
+                        self.logger.log(f"   contracts: {contracts}")
+                        self.logger.log(f"   size: {size}")
+                        self.logger.log(f"   notional: {notional}")
+                        
+                        # 使用contracts、size或notional来判断是否有持仓
+                        if contracts > 0 or size > 0 or notional > 0:
                             has_okx_position = True
                             side = pos.get('side', '').lower()
+                            
+                            if side == 'long':
+                                has_okx_long_position = True
+                                okx_long_contracts = contracts
+                            elif side == 'short':
+                                has_okx_short_position = True
+                                okx_short_contracts = contracts
+                            
                             self.logger.log(f"📊 OKX实际持仓: {side}, {contracts}张")
-                            break
                 
                 if not has_okx_position:
                     self.logger.log(f"📊 OKX实际持仓: 无")
+                else:
+                    position_info = []
+                    if has_okx_long_position:
+                        position_info.append(f"多单{okx_long_contracts}张")
+                    if has_okx_short_position:
+                        position_info.append(f"空单{okx_short_contracts}张")
+                    self.logger.log(f"📊 OKX实际持仓: {', '.join(position_info)}")
                     
             except Exception as e:
                 self.logger.log_error(f"查询OKX持仓失败: {e}")
@@ -1379,14 +1471,7 @@ class LiveTradingBotWithStopOrders:
             # 3. 如果OKX没有持仓，但本地有未平仓记录，说明已被平仓
             if not has_okx_position and len(trades_data) > 0:
                 self.logger.log(f"\n⚠️  发现不一致: 本地有{len(trades_data)}条未平仓记录，但OKX无持仓")
-                
-                # 🔴 取消所有挂单，清理残留的止损/止盈单
-                self.logger.log(f"🧹 取消所有挂单...")
-                try:
-                    self.trader.cancel_all_stop_orders(self.symbol)
-                    self.logger.log(f"✅ 已取消所有挂单")
-                except Exception as cancel_e:
-                    self.logger.log_warning(f"⚠️  取消挂单失败: {cancel_e}")
+                self.logger.log(f"💡 将尝试查找平仓订单并更新数据库记录")
                 
                 synced_count = 0
                 for trade_data in trades_data:
@@ -2028,15 +2113,15 @@ class LiveTradingBotWithStopOrders:
                     self.check_stop_orders_status()
                     last_stop_check_minute = current_minute
                 
-                # 🔄 每1分钟：同步数据库持仓状态与OKX实际持仓（测试模式）
-                should_sync = (
-                    not self.is_warmup_phase and
-                    (last_sync_time is None or (current_time - last_sync_time).total_seconds() >= 60)  # 1分钟 = 60秒
-                )
+                # # 🔄 每1分钟：同步数据库持仓状态与OKX实际持仓（测试模式）
+                # should_sync = (
+                #     not self.is_warmup_phase and
+                #     (last_sync_time is None or (current_time - last_sync_time).total_seconds() >= 60)  # 1分钟 = 60秒
+                # )
                 
-                if should_sync:
-                    self.sync_open_trades_with_okx()
-                    last_sync_time = current_time
+                # if should_sync:
+                #     self.sync_open_trades_with_okx()
+                #     last_sync_time = current_time
                 
                 time.sleep(1)
                 

@@ -12,6 +12,10 @@ OKX_API_CONFIG = {
     'secret': '3968DCAB3420DFEF2110FD451625E61F',          # 替换为你的 Secret Key
     'password': 'g:68YsKuPnn4zf)vuAm,CO5J',          # 替换为你的 API Password
     'enableRateLimit': True,
+    # 'proxies': {
+    #     'https': 'http://127.0.0.1:1087',
+    # },
+    'timeout': 60000,
     'options': {
         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
     }
