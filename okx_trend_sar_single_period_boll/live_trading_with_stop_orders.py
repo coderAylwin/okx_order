@@ -42,14 +42,33 @@ class LiveTradingBotWithStopOrders:
         
         # 🔴 使用增强版交易接口
         leverage = TRADING_CONFIG.get('leverage', 1)
-        self.trader = OKXTraderEnhanced(test_mode=test_mode, leverage=leverage)
+        try:
+            self.trader = OKXTraderEnhanced(test_mode=test_mode, leverage=leverage)
+            
+            # 验证API是否正确初始化
+            if not hasattr(self.trader, 'exchange') or self.trader.exchange is None:
+                print("❌ 警告: OKX API未正确初始化")
+                print("   请检查 okx_config.py 中的API配置")
+        except Exception as e:
+            print(f"❌ 初始化OKX交易接口失败: {e}")
+            raise
         
         # 初始化数据库服务（K线数据）
-        self.db_service = DatabaseService(config=LOCAL_DATABASE_CONFIG)
+        try:
+            self.db_service = DatabaseService(config=LOCAL_DATABASE_CONFIG)
+        except Exception as e:
+            print(f"⚠️  初始化K线数据库失败: {e}")
+            print("   程序将继续运行，但预热功能将不可用")
+            self.db_service = None
         
         # 🔴 初始化交易数据库服务（订单、交易记录），使用相同的数据库配置
-        self.trading_db = TradingDatabaseService(db_config=LOCAL_DATABASE_CONFIG)
-        print(f"✅ 交易数据库已连接: {LOCAL_DATABASE_CONFIG['database']}@{LOCAL_DATABASE_CONFIG['host']}")
+        try:
+            self.trading_db = TradingDatabaseService(db_config=LOCAL_DATABASE_CONFIG)
+            print(f"✅ 交易数据库已连接: {LOCAL_DATABASE_CONFIG['database']}@{LOCAL_DATABASE_CONFIG['host']}")
+        except Exception as e:
+            print(f"⚠️  初始化交易数据库失败: {e}")
+            print("   程序将继续运行，但订单记录功能将不可用")
+            self.trading_db = None
         
         # 解析周期（如 '15m' -> 15）
         self.period_minutes = int(config['timeframe'].replace('m', '').replace('h', '')) if 'm' in config['timeframe'] else int(config['timeframe'].replace('h', '')) * 60
@@ -116,17 +135,28 @@ class LiveTradingBotWithStopOrders:
         """预热策略（与原版相同）"""
         self.logger.log(f"🔥 开始预热策略（{warmup_days}天数据）...")
         
+        # 🔴 检查数据库是否可用
+        if self.db_service is None:
+            self.logger.log_warning("⚠️  K线数据库未连接，跳过预热")
+            self.logger.log("💡 程序将从当前时刻开始积累数据")
+            return
+        
         end_time = datetime.now()
         start_time = end_time - timedelta(days=warmup_days)
         
         start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
         end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
         
-        df = self.db_service.get_kline_data(
-            self.config['long_coin'],
-            start_str,
-            end_str
-        )
+        try:
+            df = self.db_service.get_kline_data(
+                self.config['long_coin'],
+                start_str,
+                end_str
+            )
+        except Exception as e:
+            self.logger.log_error(f"获取K线数据失败: {e}")
+            self.logger.log_warning("跳过预热，程序将从当前时刻开始积累数据")
+            return
         
         if df.empty:
             self.logger.log_warning("未获取到预热数据")
@@ -258,84 +288,87 @@ class LiveTradingBotWithStopOrders:
                 self.logger.log(f"   止盈单: {result['take_profit_order']['id'] if result['take_profit_order'] else '未设置'}")
                 
                 # 🔴 保存开仓订单到数据库
-                try:
-                    # 1. 保存开仓订单
-                    entry_order_id = result['entry_order']['id']
-                    self.trading_db.save_order(
-                        order_id=entry_order_id,
-                        symbol=self.symbol,
-                        order_type='MARKET',
-                        side='buy',
-                        position_side='long',
-                        amount=contract_amount,
-                        price=entry_price,
-                        status='filled',
-                        invested_amount=actual_invested,
-                        order_time=datetime.now(),
-                        filled_time=datetime.now()
-                    )
-                    
-                    # 2. 保存交易记录（无论止损单是否设置成功都要保存）
-                    trade_id = self.trading_db.save_trade(
-                        symbol=self.symbol,
-                        position_side='long',
-                        entry_order_id=entry_order_id,
-                        entry_price=entry_price,
-                        entry_time=datetime.now(),
-                        amount=contract_amount,
-                        invested_amount=actual_invested,
-                        status='open'
-                    )
-                    
-                    # 🔴 保存到实例变量，供后续更新使用
-                    self.current_trade_id = trade_id
-                    self.current_entry_order_id = entry_order_id
-                    
-                    print(f"💾 已保存: 开仓订单({entry_order_id}) + 交易记录(ID={trade_id})")
-                    
-                    # 3. 保存止损单到 okx_stop_orders（不保存到 okx_orders）
-                    if result['stop_loss_order']:
-                        stop_loss_order_id = result['stop_loss_order']['id']
-                        
-                        self.trading_db.save_stop_order(
-                            order_id=stop_loss_order_id,
+                if self._is_trading_db_available():
+                    try:
+                        # 1. 保存开仓订单
+                        entry_order_id = result['entry_order']['id']
+                        self.trading_db.save_order(
+                            order_id=entry_order_id,
                             symbol=self.symbol,
-                            trade_id=trade_id,
-                            entry_order_id=entry_order_id,
-                            order_type='STOP_LOSS',
+                            order_type='MARKET',
+                            side='buy',
                             position_side='long',
-                            trigger_price=stop_loss,
                             amount=contract_amount,
-                            status='active'
+                            price=entry_price,
+                            status='filled',
+                            invested_amount=actual_invested,
+                            order_time=datetime.now(),
+                            filled_time=datetime.now()
                         )
                         
-                        self.current_stop_loss_order_id = stop_loss_order_id
-                        print(f"💾 已保存: 止损单({stop_loss_order_id}) → okx_stop_orders")
-                    
-                    # 4. 保存止盈单到 okx_stop_orders（不保存到 okx_orders）
-                    if result['take_profit_order']:
-                        take_profit_order_id = result['take_profit_order']['id']
-                        
-                        self.trading_db.save_stop_order(
-                            order_id=take_profit_order_id,
+                        # 2. 保存交易记录（无论止损单是否设置成功都要保存）
+                        trade_id = self.trading_db.save_trade(
                             symbol=self.symbol,
-                            trade_id=trade_id,
-                            entry_order_id=entry_order_id,
-                            order_type='TAKE_PROFIT',
                             position_side='long',
-                            trigger_price=take_profit,
+                            entry_order_id=entry_order_id,
+                            entry_price=entry_price,
+                            entry_time=datetime.now(),
                             amount=contract_amount,
-                            status='active'
+                            invested_amount=actual_invested,
+                            status='open'
                         )
                         
-                        self.current_take_profit_order_id = take_profit_order_id
-                        print(f"💾 已保存: 止盈单({take_profit_order_id}) → okx_stop_orders")
-                    
-                    print(f"✅ 所有订单已保存: okx_orders(开仓) + okx_stop_orders(止损/止盈)")
-                except Exception as e:
-                    print(f"❌ 保存订单到数据库失败: {e}")
-                    import traceback
-                    traceback.print_exc()
+                        # 🔴 保存到实例变量，供后续更新使用
+                        self.current_trade_id = trade_id
+                        self.current_entry_order_id = entry_order_id
+                        
+                        print(f"💾 已保存: 开仓订单({entry_order_id}) + 交易记录(ID={trade_id})")
+                        
+                        # 3. 保存止损单到 okx_stop_orders（不保存到 okx_orders）
+                        if result['stop_loss_order']:
+                            stop_loss_order_id = result['stop_loss_order']['id']
+                            
+                            self.trading_db.save_stop_order(
+                                order_id=stop_loss_order_id,
+                                symbol=self.symbol,
+                                trade_id=trade_id,
+                                entry_order_id=entry_order_id,
+                                order_type='STOP_LOSS',
+                                position_side='long',
+                                trigger_price=stop_loss,
+                                amount=contract_amount,
+                                status='active'
+                            )
+                            
+                            self.current_stop_loss_order_id = stop_loss_order_id
+                            print(f"💾 已保存: 止损单({stop_loss_order_id}) → okx_stop_orders")
+                        
+                        # 4. 保存止盈单到 okx_stop_orders（不保存到 okx_orders）
+                        if result['take_profit_order']:
+                            take_profit_order_id = result['take_profit_order']['id']
+                            
+                            self.trading_db.save_stop_order(
+                                order_id=take_profit_order_id,
+                                symbol=self.symbol,
+                                trade_id=trade_id,
+                                entry_order_id=entry_order_id,
+                                order_type='TAKE_PROFIT',
+                                position_side='long',
+                                trigger_price=take_profit,
+                                amount=contract_amount,
+                                status='active'
+                            )
+                            
+                            self.current_take_profit_order_id = take_profit_order_id
+                            print(f"💾 已保存: 止盈单({take_profit_order_id}) → okx_stop_orders")
+                        
+                        print(f"✅ 所有订单已保存: okx_orders(开仓) + okx_stop_orders(止损/止盈)")
+                    except Exception as e:
+                        print(f"❌ 保存订单到数据库失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    print(f"⚠️  交易数据库未连接，跳过保存订单")
         
         elif signal_type == 'OPEN_SHORT':
             position_shares = signal.get('position_shares', 0)
@@ -398,84 +431,87 @@ class LiveTradingBotWithStopOrders:
                 self.logger.log(f"   止盈单: {result['take_profit_order']['id'] if result['take_profit_order'] else '未设置'}")
                 
                 # 🔴 保存开仓订单到数据库
-                try:
-                    # 1. 保存开仓订单
-                    entry_order_id = result['entry_order']['id']
-                    self.trading_db.save_order(
-                        order_id=entry_order_id,
-                        symbol=self.symbol,
-                        order_type='MARKET',
-                        side='sell',
-                        position_side='short',
-                        amount=contract_amount,
-                        price=entry_price,
-                        status='filled',
-                        invested_amount=actual_invested,
-                        order_time=datetime.now(),
-                        filled_time=datetime.now()
-                    )
-                    
-                    # 2. 保存交易记录（无论止损单是否设置成功都要保存）
-                    trade_id = self.trading_db.save_trade(
-                        symbol=self.symbol,
-                        position_side='short',
-                        entry_order_id=entry_order_id,
-                        entry_price=entry_price,
-                        entry_time=datetime.now(),
-                        amount=contract_amount,
-                        invested_amount=actual_invested,
-                        status='open'
-                    )
-                    
-                    # 🔴 保存到实例变量，供后续更新使用
-                    self.current_trade_id = trade_id
-                    self.current_entry_order_id = entry_order_id
-                    
-                    print(f"💾 已保存: 开仓订单({entry_order_id}) + 交易记录(ID={trade_id})")
-                    
-                    # 3. 保存止损单到 okx_stop_orders（不保存到 okx_orders）
-                    if result['stop_loss_order']:
-                        stop_loss_order_id = result['stop_loss_order']['id']
-                        
-                        self.trading_db.save_stop_order(
-                            order_id=stop_loss_order_id,
+                if self._is_trading_db_available():
+                    try:
+                        # 1. 保存开仓订单
+                        entry_order_id = result['entry_order']['id']
+                        self.trading_db.save_order(
+                            order_id=entry_order_id,
                             symbol=self.symbol,
-                            trade_id=trade_id,
-                            entry_order_id=entry_order_id,
-                            order_type='STOP_LOSS',
+                            order_type='MARKET',
+                            side='sell',
                             position_side='short',
-                            trigger_price=stop_loss,
                             amount=contract_amount,
-                            status='active'
+                            price=entry_price,
+                            status='filled',
+                            invested_amount=actual_invested,
+                            order_time=datetime.now(),
+                            filled_time=datetime.now()
                         )
                         
-                        self.current_stop_loss_order_id = stop_loss_order_id
-                        print(f"💾 已保存: 止损单({stop_loss_order_id}) → okx_stop_orders")
-                    
-                    # 4. 保存止盈单到 okx_stop_orders（不保存到 okx_orders）
-                    if result['take_profit_order']:
-                        take_profit_order_id = result['take_profit_order']['id']
-                        
-                        self.trading_db.save_stop_order(
-                            order_id=take_profit_order_id,
+                        # 2. 保存交易记录（无论止损单是否设置成功都要保存）
+                        trade_id = self.trading_db.save_trade(
                             symbol=self.symbol,
-                            trade_id=trade_id,
-                            entry_order_id=entry_order_id,
-                            order_type='TAKE_PROFIT',
                             position_side='short',
-                            trigger_price=take_profit,
+                            entry_order_id=entry_order_id,
+                            entry_price=entry_price,
+                            entry_time=datetime.now(),
                             amount=contract_amount,
-                            status='active'
+                            invested_amount=actual_invested,
+                            status='open'
                         )
                         
-                        self.current_take_profit_order_id = take_profit_order_id
-                        print(f"💾 已保存: 止盈单({take_profit_order_id}) → okx_stop_orders")
-                    
-                    print(f"✅ 所有订单已保存: okx_orders(开仓) + okx_stop_orders(止损/止盈)")
-                except Exception as e:
-                    print(f"❌ 保存订单到数据库失败: {e}")
-                    import traceback
-                    traceback.print_exc()
+                        # 🔴 保存到实例变量，供后续更新使用
+                        self.current_trade_id = trade_id
+                        self.current_entry_order_id = entry_order_id
+                        
+                        print(f"💾 已保存: 开仓订单({entry_order_id}) + 交易记录(ID={trade_id})")
+                        
+                        # 3. 保存止损单到 okx_stop_orders（不保存到 okx_orders）
+                        if result['stop_loss_order']:
+                            stop_loss_order_id = result['stop_loss_order']['id']
+                            
+                            self.trading_db.save_stop_order(
+                                order_id=stop_loss_order_id,
+                                symbol=self.symbol,
+                                trade_id=trade_id,
+                                entry_order_id=entry_order_id,
+                                order_type='STOP_LOSS',
+                                position_side='short',
+                                trigger_price=stop_loss,
+                                amount=contract_amount,
+                                status='active'
+                            )
+                            
+                            self.current_stop_loss_order_id = stop_loss_order_id
+                            print(f"💾 已保存: 止损单({stop_loss_order_id}) → okx_stop_orders")
+                        
+                        # 4. 保存止盈单到 okx_stop_orders（不保存到 okx_orders）
+                        if result['take_profit_order']:
+                            take_profit_order_id = result['take_profit_order']['id']
+                            
+                            self.trading_db.save_stop_order(
+                                order_id=take_profit_order_id,
+                                symbol=self.symbol,
+                                trade_id=trade_id,
+                                entry_order_id=entry_order_id,
+                                order_type='TAKE_PROFIT',
+                                position_side='short',
+                                trigger_price=take_profit,
+                                amount=contract_amount,
+                                status='active'
+                            )
+                            
+                            self.current_take_profit_order_id = take_profit_order_id
+                            print(f"💾 已保存: 止盈单({take_profit_order_id}) → okx_stop_orders")
+                        
+                        print(f"✅ 所有订单已保存: okx_orders(开仓) + okx_stop_orders(止损/止盈)")
+                    except Exception as e:
+                        print(f"❌ 保存订单到数据库失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    print(f"⚠️  交易数据库未连接，跳过保存订单")
         
         # 🔴 平仓 - 主动市价平仓或OKX自动平仓
         elif signal_type in ['STOP_LOSS_LONG', 'TAKE_PROFIT_LONG', 'STOP_LOSS_SHORT', 'TAKE_PROFIT_SHORT']:
@@ -1469,8 +1505,16 @@ class LiveTradingBotWithStopOrders:
             if session:
                 self.trading_db.close_session(session)
     
+    def _is_trading_db_available(self):
+        """检查交易数据库是否可用"""
+        return self.trading_db is not None
+    
     def _save_indicator_signal(self, result, timestamp, open_price, high_price, low_price, close_price, volume):
         """保存指标信号到数据库"""
+        # 检查数据库是否可用
+        if not self._is_trading_db_available():
+            return
+            
         print(f"🔍 _save_indicator_signal被调用: timestamp={timestamp}")
         try:
             # 提取指标数据
@@ -1884,18 +1928,46 @@ class LiveTradingBotWithStopOrders:
         # 预热策略
         self.warmup_strategy()
         
+        # 🔴 检查API是否正确初始化
+        if not hasattr(self.trader, 'exchange') or self.trader.exchange is None:
+            self.logger.log_error("❌ OKX API未正确初始化！")
+            self.logger.log_error("   请检查 okx_config.py 中的API配置：")
+            self.logger.log_error("   - API_KEY")
+            self.logger.log_error("   - API_SECRET")
+            self.logger.log_error("   - API_PASSWORD")
+            self.logger.log_error("   - test_mode 设置")
+            self.logger.log_error("\n程序无法继续运行，请修复配置后重试。")
+            return  # 🔴 直接返回，不启动交易循环
+        
         # 🔴 获取并初始化账户余额
-        account_info = self.trader.get_account_info()
-        if account_info:
-            self.account_balance = account_info['balance']['total']
-            self.logger.log(f"💰 账户余额: ${self.account_balance:,.2f} USDT")
-            self.logger.log(f"📊 仓位比例: {self.config.get('position_size_percentage', 100)}%")
-            self.logger.log(f"💵 可用保证金: ${self.account_balance * self.config.get('position_size_percentage', 100) / 100:,.2f} USDT\n")
-        else:
-            self.logger.log_warning("⚠️  无法获取账户信息，请检查API配置\n")
+        try:
+            account_info = self.trader.get_account_info()
+            if account_info and 'balance' in account_info:
+                self.account_balance = account_info['balance']['total']
+                self.logger.log(f"💰 账户余额: ${self.account_balance:,.2f} USDT")
+                self.logger.log(f"📊 仓位比例: {self.config.get('position_size_percentage', 100)}%")
+                self.logger.log(f"💵 可用保证金: ${self.account_balance * self.config.get('position_size_percentage', 100) / 100:,.2f} USDT\n")
+            else:
+                self.logger.log_error("❌ 无法获取账户信息！")
+                self.logger.log_error("   可能原因：")
+                self.logger.log_error("   1. API权限不足（需要交易权限）")
+                self.logger.log_error("   2. API Key错误或已过期")
+                self.logger.log_error("   3. 网络连接问题")
+                self.logger.log_error("\n程序无法继续运行，请检查API配置。")
+                return  # 🔴 直接返回，不启动交易循环
+        except Exception as e:
+            self.logger.log_error(f"❌ 获取账户信息异常: {e}")
+            self.logger.log_error("程序无法继续运行，请检查API配置。")
+            import traceback
+            traceback.print_exc()
+            return  # 🔴 直接返回，不启动交易循环
         
         # 🔴 启动时同步OKX持仓状态到程序
-        self._sync_position_on_startup()
+        try:
+            self._sync_position_on_startup()
+        except Exception as e:
+            self.logger.log_warning(f"⚠️  同步持仓状态失败: {e}")
+            self.logger.log_warning("程序将继续运行，但建议手动检查持仓状态")
         
         self.is_running = True
         self.logger.log(f"⏰ 每分钟01-05秒更新，{self.config['timeframe']}周期整点触发策略")

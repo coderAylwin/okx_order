@@ -17,7 +17,13 @@ LOCAL_DATABASE_CONFIG = {
     'user': 'payment_pro',
     'password': 'nS4kO7tG1jH7cI6oR4b',           # 请修改为您的MySQL密码
     'database': 'quantify',    # 数据库名称
-    'auth_plugin': '',
-    'pool_name': 'okx_pool',  # 添加简短的连接池名称
-    'pool_size': 10,  # 设置连接池大小
+    'charset': 'utf8mb4',
 }
+# LOCAL_DATABASE_CONFIG = {
+#     'host': '127.0.0.1',     # 本地MySQL
+#     'port': 3306,
+#     'user': 'root',
+#     'password': '',           # 请修改为您的MySQL密码
+#     'database': 'quantify',    # 数据库名称
+#     'charset': 'utf8mb4'
+# }

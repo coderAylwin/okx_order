@@ -8,14 +8,23 @@ OKX API 配置文件
 
 # OKX API 配置
 OKX_API_CONFIG = {
-    'api_key': 'b8a61cc1-fb4e-4dab-b54b-5d8e9a131a34',           # 替换为你的 API Key
-    'secret': '6AC1C93A751979E621C2A140738942EC',          # 替换为你的 Secret Key
-    'password': 'SQBT50?L.*wb,m|Q;LKduJdu',          # 替换为你的 API Password
+    'api_key': 'a1ffa3fd-834c-4ed8-8f1a-aa83aceaa892',           # 替换为你的 API Key
+    'secret': '3968DCAB3420DFEF2110FD451625E61F',          # 替换为你的 Secret Key
+    'password': 'g:68YsKuPnn4zf)vuAm,CO5J',          # 替换为你的 API Password
     'enableRateLimit': True,
     'options': {
         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
     }
 }
+# OKX_API_CONFIG = {
+#     'api_key': '3afaa787-5b41-4662-8a19-d08f593b8cba',           # 替换为你的 API Key
+#     'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
+#     'password': 'Ayw.72203991',          # 替换为你的 API Password
+#     'enableRateLimit': True,
+#     'options': {
+#         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
+#     }
+# }
 
 # 交易配置
 TRADING_CONFIG = {
