@@ -29,6 +29,16 @@ from trading_database_service import TradingDatabaseService  # 🔴 新增：交
 class LiveTradingBotWithStopOrders:
     """实盘交易机器人 - 支持止损止盈挂单"""
     
+    @staticmethod
+    def safe_float(value, default=0.0):
+        """安全地将值转换为float，处理None值"""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    
     def __init__(self, config, test_mode=True):
         """初始化"""
         self.config = config
@@ -213,22 +223,70 @@ class LiveTradingBotWithStopOrders:
         
         # 🔴 开仓前检查：直接检查OKX实际持仓，如果有持仓则拒绝开仓
         if signal_type in ['OPEN_LONG', 'OPEN_SHORT']:
-            print(f"🔍 开仓前检查OKX实际持仓...")
+            print(f"🚨🚨🚨 开仓前检查OKX实际持仓 - 防止重复开仓 🚨🚨🚨")
+            print(f"🔍 当前交易对: {self.symbol}")
+            print(f"🔍 信号类型: {signal_type}")
             
             try:
                 # 直接查询OKX实际持仓
+                print(f"🔍 调用OKX API获取持仓信息...")
                 positions = self.trader.exchange.fetch_positions([self.symbol])
+                print(f"🔍 OKX API返回的持仓数据: {len(positions)}条")
                 
                 has_okx_long_position = False
                 has_okx_short_position = False
                 okx_long_contracts = 0
                 okx_short_contracts = 0
                 
-                for pos in positions:
-                    if pos['symbol'] == self.symbol:
-                        contracts = float(pos.get('contracts', 0))
-                        if contracts > 0:
+                # 🔍 详细打印所有持仓信息
+                for i, pos in enumerate(positions):
+                    print(f"🔍 持仓 #{i+1}:")
+                    print(f"   symbol: {pos.get('symbol')}")
+                    print(f"   side: {pos.get('side')}")
+                    print(f"   contracts: {pos.get('contracts')}")
+                    print(f"   size: {pos.get('size')}")
+                    print(f"   notional: {pos.get('notional')}")
+                    
+                    # 检查是否匹配当前交易对（支持多种symbol格式）
+                    pos_symbol = pos.get('symbol', '')
+                    pos_inst_id = pos.get('info', {}).get('instId', '')
+                    
+                    # 检查多种可能的symbol格式
+                    symbol_match = (
+                        pos_symbol == self.symbol or 
+                        pos_inst_id == self.symbol or
+                        pos_symbol == self.symbol.replace('-', '/') or
+                        pos_inst_id == self.symbol.replace('-', '/') or
+                        pos_symbol == self.symbol.replace('-', '/') + ':USDT' or
+                        pos_inst_id == self.symbol.replace('-', '/') + ':USDT'
+                    )
+                    
+                    print(f"🔍 Symbol匹配检查:")
+                    print(f"   程序symbol: {self.symbol}")
+                    print(f"   API symbol: {pos_symbol}")
+                    print(f"   API instId: {pos_inst_id}")
+                    print(f"   匹配结果: {symbol_match}")
+                    
+                    if symbol_match:
+                        # 安全地处理可能为None的字段
+                        contracts_raw = pos.get('contracts', 0)
+                        size_raw = pos.get('size', 0)
+                        notional_raw = pos.get('notional', 0)
+                        
+                        contracts = float(contracts_raw) if contracts_raw is not None else 0.0
+                        size = float(size_raw) if size_raw is not None else 0.0
+                        notional = float(notional_raw) if notional_raw is not None else 0.0
+                        
+                        print(f"🔍 匹配的交易对持仓:")
+                        print(f"   contracts: {contracts}")
+                        print(f"   size: {size}")
+                        print(f"   notional: {notional}")
+                        
+                        # 使用contracts、size或notional来判断是否有持仓
+                        if contracts > 0 or size > 0 or notional > 0:
                             side = pos.get('side', '').lower()
+                            print(f"🔍 检测到有效持仓: {side}, {contracts}张")
+                            
                             if side == 'long':
                                 has_okx_long_position = True
                                 okx_long_contracts = contracts
@@ -238,6 +296,10 @@ class LiveTradingBotWithStopOrders:
                 
                 # 检查是否有任何持仓
                 has_any_okx_position = has_okx_long_position or has_okx_short_position
+                print(f"🔍 持仓检查结果:")
+                print(f"   has_okx_long_position: {has_okx_long_position}")
+                print(f"   has_okx_short_position: {has_okx_short_position}")
+                print(f"   has_any_okx_position: {has_any_okx_position}")
                 
                 if has_any_okx_position:
                     signal_direction = 'long' if signal_type == 'OPEN_LONG' else 'short'
@@ -249,6 +311,7 @@ class LiveTradingBotWithStopOrders:
                     if has_okx_short_position:
                         position_info.append(f"空单{okx_short_contracts}张")
                     
+                    print(f"🚨🚨🚨 检测到OKX实际持仓，拒绝开仓 🚨🚨🚨")
                     self.logger.log_warning(f"⚠️  OKX实际持仓中({', '.join(position_info)})，拒绝新的{signal_direction}开仓信号")
                     print(f"❌ 拒绝开仓: OKX实际持仓={', '.join(position_info)}, 新信号={signal_direction}")
                     return  # 🔴 直接返回，不执行开仓
@@ -263,6 +326,8 @@ class LiveTradingBotWithStopOrders:
                 
             except Exception as e:
                 print(f"❌ 检查OKX持仓失败: {e}")
+                import traceback
+                traceback.print_exc()
                 # 如果检查失败，为了安全起见，拒绝开仓
                 signal_direction = 'long' if signal_type == 'OPEN_LONG' else 'short'
                 self.logger.log_warning(f"⚠️  无法检查OKX持仓，拒绝{signal_direction}开仓信号（安全考虑）")
@@ -860,9 +925,16 @@ class LiveTradingBotWithStopOrders:
                         try:
                             positions = self.trader.exchange.fetch_positions([self.symbol])
                             has_position = any(
-                                float(pos.get('contracts', 0)) > 0 
+                                (self.safe_float(pos.get('contracts')) > 0 or 
+                                 self.safe_float(pos.get('size')) > 0 or 
+                                 self.safe_float(pos.get('notional')) > 0)
                                 for pos in positions 
-                                if pos['symbol'] == self.symbol
+                                if (pos.get('symbol', '') == self.symbol or 
+                                    pos.get('info', {}).get('instId', '') == self.symbol or
+                                    pos.get('symbol', '') == self.symbol.replace('-', '/') or
+                                    pos.get('info', {}).get('instId', '') == self.symbol.replace('-', '/') or
+                                    pos.get('symbol', '') == self.symbol.replace('-', '/') + ':USDT' or
+                                    pos.get('info', {}).get('instId', '') == self.symbol.replace('-', '/') + ':USDT')
                             )
                             
                             if not has_position:
@@ -902,9 +974,16 @@ class LiveTradingBotWithStopOrders:
                         try:
                             positions = self.trader.exchange.fetch_positions([self.symbol])
                             has_position = any(
-                                float(pos.get('contracts', 0)) > 0 
+                                (self.safe_float(pos.get('contracts')) > 0 or 
+                                 self.safe_float(pos.get('size')) > 0 or 
+                                 self.safe_float(pos.get('notional')) > 0)
                                 for pos in positions 
-                                if pos['symbol'] == self.symbol
+                                if (pos.get('symbol', '') == self.symbol or 
+                                    pos.get('info', {}).get('instId', '') == self.symbol or
+                                    pos.get('symbol', '') == self.symbol.replace('-', '/') or
+                                    pos.get('info', {}).get('instId', '') == self.symbol.replace('-', '/') or
+                                    pos.get('symbol', '') == self.symbol.replace('-', '/') + ':USDT' or
+                                    pos.get('info', {}).get('instId', '') == self.symbol.replace('-', '/') + ':USDT')
                             )
                             
                             if not has_position:
@@ -961,9 +1040,16 @@ class LiveTradingBotWithStopOrders:
                         try:
                             positions = self.trader.exchange.fetch_positions([self.symbol])
                             has_actual_position = any(
-                                float(pos.get('contracts', 0)) > 0 
+                                (self.safe_float(pos.get('contracts')) > 0 or 
+                                 self.safe_float(pos.get('size')) > 0 or 
+                                 self.safe_float(pos.get('notional')) > 0)
                                 for pos in positions 
-                                if pos['symbol'] == self.symbol
+                                if (pos.get('symbol', '') == self.symbol or 
+                                    pos.get('info', {}).get('instId', '') == self.symbol or
+                                    pos.get('symbol', '') == self.symbol.replace('-', '/') or
+                                    pos.get('info', {}).get('instId', '') == self.symbol.replace('-', '/') or
+                                    pos.get('symbol', '') == self.symbol.replace('-', '/') + ':USDT' or
+                                    pos.get('info', {}).get('instId', '') == self.symbol.replace('-', '/') + ':USDT')
                             )
                             
                             if not has_actual_position:
@@ -1003,9 +1089,16 @@ class LiveTradingBotWithStopOrders:
                         try:
                             positions = self.trader.exchange.fetch_positions([self.symbol])
                             has_actual_position = any(
-                                float(pos.get('contracts', 0)) > 0 
+                                (self.safe_float(pos.get('contracts')) > 0 or 
+                                 self.safe_float(pos.get('size')) > 0 or 
+                                 self.safe_float(pos.get('notional')) > 0)
                                 for pos in positions 
-                                if pos['symbol'] == self.symbol
+                                if (pos.get('symbol', '') == self.symbol or 
+                                    pos.get('info', {}).get('instId', '') == self.symbol or
+                                    pos.get('symbol', '') == self.symbol.replace('-', '/') or
+                                    pos.get('info', {}).get('instId', '') == self.symbol.replace('-', '/') or
+                                    pos.get('symbol', '') == self.symbol.replace('-', '/') + ':USDT' or
+                                    pos.get('info', {}).get('instId', '') == self.symbol.replace('-', '/') + ':USDT')
                             )
                             
                             if not has_actual_position:
@@ -1229,97 +1322,44 @@ class LiveTradingBotWithStopOrders:
             okx_position_contracts = 0
             
             for pos in positions:
-                if pos['symbol'] == self.symbol:
-                    contracts = float(pos.get('contracts', 0))
-                    if contracts > 0:
+                # 检查是否匹配当前交易对（支持多种symbol格式）
+                pos_symbol = pos.get('symbol', '')
+                pos_inst_id = pos.get('info', {}).get('instId', '')
+                
+                # 检查多种可能的symbol格式
+                symbol_match = (
+                    pos_symbol == self.symbol or 
+                    pos_inst_id == self.symbol or
+                    pos_symbol == self.symbol.replace('-', '/') or
+                    pos_inst_id == self.symbol.replace('-', '/') or
+                    pos_symbol == self.symbol.replace('-', '/') + ':USDT' or
+                    pos_inst_id == self.symbol.replace('-', '/') + ':USDT'
+                )
+                
+                if symbol_match:
+                    contracts = self.safe_float(pos.get('contracts'))
+                    size = self.safe_float(pos.get('size'))
+                    notional = self.safe_float(pos.get('notional'))
+                    
+                    # 使用contracts、size或notional来判断是否有持仓
+                    if contracts > 0 or size > 0 or notional > 0:
                         has_okx_position = True
                         okx_position_side = pos.get('side', '').lower()
                         okx_position_contracts = contracts
                         self.logger.log(f"📊 检测到OKX持仓: {okx_position_side}, {okx_position_contracts}张")
+                        self.current_position = okx_position_side
+                        self.current_position_side = okx_position_side
+                        self.current_position_shares = okx_position_contracts
+                        self.current_trade_id = None
+                        self.current_entry_order_id = None
+                        self.current_stop_loss_order_id = None
+                        self.current_take_profit_order_id = None
                         break
             
             if not has_okx_position:
                 self.logger.log(f"✅ OKX无持仓，程序从空仓开始")
                 self.logger.log(f"{'='*80}\n")
                 return
-            
-            # 2. 从数据库查询对应的交易记录
-            self.logger.log(f"🔍 从数据库查询持仓记录...")
-            trade = self.trading_db.get_open_trade(self.symbol)
-            
-            if not trade:
-                self.logger.log_warning(f"⚠️  OKX有持仓但数据库无记录，请手动检查！")
-                self.logger.log(f"   OKX持仓: {okx_position_side}, {okx_position_contracts}张")
-                self.logger.log(f"   建议: 手动平仓或手动添加数据库记录")
-                self.logger.log(f"{'='*80}\n")
-                return
-            
-            # 3. 恢复程序的持仓状态
-            self.logger.log(f"📥 恢复持仓状态到程序...")
-            
-            self.current_position = trade.position_side
-            self.current_position_side = trade.position_side
-            self.current_position_shares = trade.amount
-            self.current_trade_id = trade.id
-            self.current_entry_order_id = trade.entry_order_id
-            
-            self.logger.log(f"   持仓方向: {self.current_position}")
-            self.logger.log(f"   持仓数量: {self.current_position_shares}张")
-            self.logger.log(f"   开仓价格: ${trade.entry_price:.2f}")
-            self.logger.log(f"   开仓时间: {trade.entry_time}")
-            self.logger.log(f"   交易ID: {self.current_trade_id}")
-            self.logger.log(f"   开仓订单: {self.current_entry_order_id}")
-            
-            # 4. 查询并恢复止损/止盈单ID
-            stop_loss_price = None
-            take_profit_price = None
-            
-            try:
-                from trading_database_models import OKXStopOrder
-                session = self.trading_db.get_session()
-                
-                stop_orders = session.query(OKXStopOrder).filter_by(
-                    trade_id=self.current_trade_id,
-                    status='active'
-                ).all()
-                
-                for stop_order in stop_orders:
-                    if stop_order.order_type == 'STOP_LOSS':
-                        self.current_stop_loss_order_id = stop_order.order_id
-                        stop_loss_price = stop_order.trigger_price
-                        self.logger.log(f"   止损单ID: {self.current_stop_loss_order_id} (触发价: ${stop_loss_price:.2f})")
-                    elif stop_order.order_type == 'TAKE_PROFIT':
-                        self.current_take_profit_order_id = stop_order.order_id
-                        take_profit_price = stop_order.trigger_price
-                        self.logger.log(f"   止盈单ID: {self.current_take_profit_order_id} (触发价: ${take_profit_price:.2f})")
-                
-                self.trading_db.close_session(session)
-                
-            except Exception as e:
-                self.logger.log_warning(f"⚠️  查询止损/止盈单失败: {e}")
-            
-            # 5. 同步策略对象的持仓状态
-            self.logger.log(f"📥 同步策略对象持仓状态...")
-            if hasattr(self, 'strategy'):
-                self.strategy.position = self.current_position
-                self.strategy.entry_price = trade.entry_price
-                # 从数据库恢复止损/止盈水平
-                self.strategy.stop_loss_level = stop_loss_price
-                self.strategy.take_profit_level = take_profit_price
-                self.strategy.max_loss_level = None  # 最大亏损线由策略动态计算
-                self.strategy.current_invested_amount = trade.invested_amount
-                self.strategy.position_shares = trade.amount
-                
-                self.logger.log(f"   策略持仓: {self.strategy.position}")
-                self.logger.log(f"   策略开仓价: ${self.strategy.entry_price:.2f}")
-                if stop_loss_price:
-                    self.logger.log(f"   策略止损价: ${stop_loss_price:.2f}")
-                if take_profit_price:
-                    self.logger.log(f"   策略止盈价: ${take_profit_price:.2f}")
-            
-            self.logger.log(f"\n✅ 持仓状态同步完成！")
-            self.logger.log(f"💡 程序将跳过开仓信号，只执行止损价格更新")
-            self.logger.log(f"{'='*80}\n")
             
         except Exception as e:
             self.logger.log_error(f"❌ 同步持仓状态失败: {e}")
@@ -1431,9 +1471,9 @@ class LiveTradingBotWithStopOrders:
                     )
                     
                     if symbol_match:
-                        contracts = float(pos.get('contracts', 0))
-                        size = float(pos.get('size', 0))
-                        notional = float(pos.get('notional', 0))
+                        contracts = self.safe_float(pos.get('contracts'))
+                        size = self.safe_float(pos.get('size'))
+                        notional = self.safe_float(pos.get('notional'))
                         
                         self.logger.log(f"🔍 匹配的交易对持仓:")
                         self.logger.log(f"   contracts: {contracts}")
