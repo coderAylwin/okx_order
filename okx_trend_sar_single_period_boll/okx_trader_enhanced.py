@@ -378,15 +378,36 @@ class OKXTraderEnhanced:
                 order_status = self.get_order_status(symbol, self.stop_loss_order_id)
                 print(f"   订单状态: {order_status.get('status', 'unknown')}")
                 
-                print(f"🔄 尝试撤销旧止损单: {self.stop_loss_order_id}")
-                cancel_result = self.cancel_order(symbol, self.stop_loss_order_id)
-                # 无论撤销成功与否，都继续执行挂新单
+                # 如果旧单仍然有效，才需要撤销
+                if order_status.get('status') in ['live', 'effective']:
+                    print(f"🔄 撤销旧止损单: {self.stop_loss_order_id}")
+                    cancel_result = self.cancel_order(symbol, self.stop_loss_order_id)
+                    
+                    if cancel_result:
+                        print(f"✅ 旧止损单撤销成功")
+                        # 等待撤销完成，避免重复订单
+                        import time
+                        time.sleep(0.5)
+                        
+                        # 再次检查旧单是否真的被撤销
+                        verify_status = self.get_order_status(symbol, self.stop_loss_order_id)
+                        if verify_status.get('status') in ['live', 'effective']:
+                            print(f"⚠️  旧止损单撤销可能未完成，状态: {verify_status.get('status')}")
+                        else:
+                            print(f"✅ 确认旧止损单已撤销")
+                    else:
+                        print(f"❌ 旧止损单撤销失败，但继续创建新单")
+                else:
+                    print(f"ℹ️  旧止损单已无效，无需撤销")
             
             # 2. 挂新止损单
+            print(f"🔄 创建新止损单: ${new_trigger_price:.2f}")
             new_order = self.set_stop_loss(symbol, side, new_trigger_price, amount)
             if new_order:
                 self.stop_loss_order_id = new_order['id']
                 print(f"✅ 止损单已更新: ${new_trigger_price:.2f} (新订单ID: {new_order['id']})")
+            else:
+                print(f"❌ 新止损单创建失败")
             
             return new_order
             
@@ -478,16 +499,21 @@ class OKXTraderEnhanced:
             response = self.exchange.private_get_trade_orders_algo_pending(params)
             
             if response.get('code') == '0' and response.get('data'):
-                algo_data = response['data'][0]
-                return {
-                    'id': order_id,
-                    'status': algo_data.get('state'),
-                    'type': 'conditional',
-                    'trigger_price': algo_data.get('slTriggerPx'),
-                    'created_time': algo_data.get('cTime'),
-                    'order_type': algo_data.get('ordType'),
-                    'side': algo_data.get('side'),
-                }
+                # 遍历返回的订单列表，查找指定的订单ID
+                for algo_data in response['data']:
+                    if algo_data.get('algoId') == order_id:
+                        return {
+                            'id': order_id,
+                            'status': algo_data.get('state'),
+                            'type': 'conditional',
+                            'trigger_price': algo_data.get('slTriggerPx'),
+                            'created_time': algo_data.get('cTime'),
+                            'order_type': algo_data.get('ordType'),
+                            'side': algo_data.get('side'),
+                        }
+                
+                # 如果遍历完所有订单都没找到指定的订单ID
+                return {'status': 'not_found', 'id': order_id, 'message': 'Order not found in pending list'}
             else:
                 return {'status': 'not_found', 'id': order_id, 'response': response}
         except Exception as e:
