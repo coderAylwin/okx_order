@@ -326,10 +326,10 @@ class ATRCalculator:
                     # 打印14周期全部波动率
                     print(f"        14周期全部波动率: {self.atr_periods}")
                     # 判断是否通过过滤条件
-                    if atr_ratio <= 1.3:
-                        print(f"        ✅ ATR波动率: 通过过滤 ({atr_ratio:.4f} ≤ 1.3)")
-                    else:
-                        print(f"        ❌ ATR波动率: 过高 ({atr_ratio:.4f} > 1.3)")
+                    # if atr_ratio <= 1.3:
+                    #     print(f"        ✅ ATR波动率: 通过过滤 ({atr_ratio:.4f} ≤ 1.3)")
+                    # else:
+                    #     print(f"        ❌ ATR波动率: 过高 ({atr_ratio:.4f} > 1.3)")
     
     def get_atr_volatility_ratio(self):
         """
@@ -605,8 +605,8 @@ class SarBollingerBandsIndicator:
                 self.rsi_values = self.rsi_values[-self.rsi_period * 2:]
             
             # RSI 调试信息（只在预热完成后显示）
-            if self.is_warmed_up:
-                print(f"    🔍 RSI更新: {old_rsi:.2f} → {self.current_rsi:.2f} (价格数量: {len(self.close_history)})")
+            # if self.is_warmed_up:
+            #     print(f"    🔍 RSI更新: {old_rsi:.2f} → {self.current_rsi:.2f} (价格数量: {len(self.close_history)})")
         else:
             self.current_rsi = 50  # 数据不足时使用中性值
         
@@ -642,13 +642,13 @@ class SarBollingerBandsIndicator:
         
         # 调试信息
         if self.is_warmed_up:
-            print(f"    📊 SAR值: {sar_value:.2f} | 方向: {'上升' if sar_rising else '下降'}")
-            print(f"    📈 布林带: 上轨{upper:.2f} | 中轨{basis:.2f} | 下轨{lower:.2f}")
-            print(f"    📏 布林带宽度: {bollinger_width:.2f} | 1/4宽度: {quarter_bollinger_width:.2f}")
-            print(f"    🔧 中轨MA (basis_ma): {basis_ma:.2f}")
-            print(f"    💫 回归MA: {regressive_ma:.2f} = {self.regression_factor:.1f}×{basis_ma:.2f} + {1-self.regression_factor:.1f}×{basis:.2f}")
-            print(f"    📊 RSI: {self.current_rsi:.2f} (周期{self.rsi_period})")
-            print(f"    🔍 SAR转向: 上升{bars_since_turn_up}期 | 下降{bars_since_turn_down}期")
+            # print(f"    📊 SAR值: {sar_value:.2f} | 方向: {'上升' if sar_rising else '下降'}")
+            # print(f"    📈 布林带: 上轨{upper:.2f} | 中轨{basis:.2f} | 下轨{lower:.2f}")
+            # print(f"    📏 布林带宽度: {bollinger_width:.2f} | 1/4宽度: {quarter_bollinger_width:.2f}")
+            # print(f"    🔧 中轨MA (basis_ma): {basis_ma:.2f}")
+            # print(f"    💫 回归MA: {regressive_ma:.2f} = {self.regression_factor:.1f}×{basis_ma:.2f} + {1-self.regression_factor:.1f}×{basis:.2f}")
+            # print(f"    📊 RSI: {self.current_rsi:.2f} (周期{self.rsi_period})")
+            # print(f"    🔍 SAR转向: 上升{bars_since_turn_up}期 | 下降{bars_since_turn_down}期")
             
             if sar_rising:
                 signal_status = f"✅ 看多信号 (SAR上升)"
@@ -659,9 +659,9 @@ class SarBollingerBandsIndicator:
                 
             print(f"    🎯 信号状态: {signal_status}")
             print(f"    🎯 最终信号: 看多={bull_signal} | 看空={bear_signal}")
-        else:
-            # 预热期间的简化调试信息
-            print(f"    🔥 SAR预热中 {self.warmup_data_count}/{self.required_warmup} | SAR: {sar_value:.2f} | RSI: {self.current_rsi:.2f}")
+        # else:
+        #     # 预热期间的简化调试信息
+        #     print(f"    🔥 SAR预热中 {self.warmup_data_count}/{self.required_warmup} | SAR: {sar_value:.2f} | RSI: {self.current_rsi:.2f}")
         
         return {
             'sar_value': sar_value,
@@ -831,8 +831,8 @@ class TrendSarStrategy:
                 elif kline_count == 11:
                     print(f"\n    ... (省略中间K线，继续预热中) ...")
             
-            if (i + 1) % 100 == 0:
-                print(f"    预热进度: {i+1}/{len(historical_data)} | {self.timeframe} K线: {kline_count}个")
+            # if (i + 1) % 100 == 0:
+            #     print(f"    预热进度: {i+1}/{len(historical_data)} | {self.timeframe} K线: {kline_count}个")
         
         print(f"\n✅ 单周期预热完成！")
         print(f"  📊 {self.timeframe}周期: {kline_count}个K线")
