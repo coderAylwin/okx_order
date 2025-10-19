@@ -348,6 +348,23 @@ class LiveTradingBotWithStopOrders:
             print(f"🔍 止损价格: ${stop_loss:.1f}")
             print(f"🔍 止盈价格: ${take_profit:.1f}")
             
+            # 🔴 风险收益比检查：止损比例不能比止盈比例小
+            stop_loss_pct = abs(entry_price - stop_loss) / entry_price * 100
+            take_profit_pct = abs(take_profit - entry_price) / entry_price * 100
+            
+            print(f"🔍 风险收益比检查:")
+            print(f"   止损比例: {stop_loss_pct:.2f}%")
+            print(f"   止盈比例: {take_profit_pct:.2f}%")
+            
+            if stop_loss_pct < take_profit_pct:
+                print(f"❌ 风险收益比不合理，拒绝开仓:")
+                print(f"   止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+                print(f"   风险大于收益，不符合交易原则")
+                self.logger.log_warning(f"⚠️  拒绝开多仓: 止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+                return
+            
+            print(f"✅ 风险收益比合理: 止损比例({stop_loss_pct:.2f}%) >= 止盈比例({take_profit_pct:.2f}%)")
+            
             # 🔴 开仓前更新账户余额，确保使用最新数据
             self._update_account_balance()
             
@@ -491,6 +508,23 @@ class LiveTradingBotWithStopOrders:
             print(f"🔍 信号价格: ${entry_price:.2f}")
             print(f"🔍 止损价格: ${stop_loss:.1f}")
             print(f"🔍 止盈价格: ${take_profit:.1f}")
+            
+            # 🔴 风险收益比检查：止损比例不能比止盈比例小
+            stop_loss_pct = abs(stop_loss - entry_price) / entry_price * 100
+            take_profit_pct = abs(entry_price - take_profit) / entry_price * 100
+            
+            print(f"🔍 风险收益比检查:")
+            print(f"   止损比例: {stop_loss_pct:.2f}%")
+            print(f"   止盈比例: {take_profit_pct:.2f}%")
+            
+            if stop_loss_pct < take_profit_pct:
+                print(f"❌ 风险收益比不合理，拒绝开仓:")
+                print(f"   止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+                print(f"   风险大于收益，不符合交易原则")
+                self.logger.log_warning(f"⚠️  拒绝开空仓: 止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+                return
+            
+            print(f"✅ 风险收益比合理: 止损比例({stop_loss_pct:.2f}%) >= 止盈比例({take_profit_pct:.2f}%)")
             
             # 🔴 开仓前更新账户余额，确保使用最新数据
             self._update_account_balance()
@@ -2141,17 +2175,17 @@ class LiveTradingBotWithStopOrders:
                     last_check_minute = current_minute
                 
                 # 🔔 每分钟18-23秒：检查止损/止盈单状态（仅在有持仓时）
-                should_check_stop = (
-                    not self.is_warmup_phase and
-                    self.current_position and  # 只在有持仓时检查
-                    18 <= current_second <= 23 and
-                    (last_stop_check_minute is None or current_minute > last_stop_check_minute)
-                )
+                # should_check_stop = (
+                #     not self.is_warmup_phase and
+                #     self.current_position and  # 只在有持仓时检查
+                #     18 <= current_second <= 23 and
+                #     (last_stop_check_minute is None or current_minute > last_stop_check_minute)
+                # )
                 
-                if should_check_stop:
-                    # self.logger.log(f"🔔 检查止损/止盈单状态...")
-                    self.check_stop_orders_status()
-                    last_stop_check_minute = current_minute
+                # if should_check_stop:
+                #     # self.logger.log(f"🔔 检查止损/止盈单状态...")
+                #     self.check_stop_orders_status()
+                #     last_stop_check_minute = current_minute
                 
                 # # 🔄 每1分钟：同步数据库持仓状态与OKX实际持仓（测试模式）
                 # should_sync = (

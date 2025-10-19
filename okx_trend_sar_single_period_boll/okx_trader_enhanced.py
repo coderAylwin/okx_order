@@ -101,9 +101,9 @@ class OKXTraderEnhanced:
         # 获取合约规格和最小下单量
         contract_size, min_size = self.get_contract_size(symbol)
         
-        # 🔴 增加安全缓冲：只使用90%的保证金，留出10%缓冲
-        safe_margin = usdt_amount * 0.99
-        print(f"🔒 安全保证金计算: ${usdt_amount:.2f} × 90% = ${safe_margin:.2f}")
+        # 🔴 增加安全缓冲：只使用95%的保证金，留出5%缓冲
+        safe_margin = usdt_amount * 0.95
+        print(f"🔒 安全保证金计算: ${usdt_amount:.2f} × 95% = ${safe_margin:.2f}")
         
         # 计算仓位价值 = 安全保证金 × 杠杆
         position_value = safe_margin * leverage
@@ -140,7 +140,7 @@ class OKXTraderEnhanced:
         
         print(f"💰 合约数量计算:")
         print(f"   原始保证金: ${usdt_amount:.2f}")
-        print(f"   安全保证金: ${safe_margin:.2f} (90%缓冲)")
+        print(f"   安全保证金: ${safe_margin:.2f} (95%缓冲)")
         print(f"   杠杆: {leverage}x")
         print(f"   仓位价值: ${position_value:.2f} (安全保证金 × 杠杆)")
         print(f"   当前价格: ${current_price:.2f}")
@@ -376,6 +376,8 @@ class OKXTraderEnhanced:
             if self.stop_loss_order_id:
                 print(f"🔄 检查旧止损单状态: {self.stop_loss_order_id}")
                 order_status = self.get_order_status(symbol, self.stop_loss_order_id)
+                # 打印 order_status
+                print(f"   订单信息: {order_status}")
                 print(f"   订单状态: {order_status.get('status', 'unknown')}")
                 
                 # 如果旧单仍然有效，才需要撤销
@@ -495,9 +497,11 @@ class OKXTraderEnhanced:
             params = {
                 'instId': symbol,
                 'algoId': order_id,
+                'ordType': 'conditional'  # 添加ordType参数，指定为条件单
             }
             response = self.exchange.private_get_trade_orders_algo_pending(params)
-            
+            # 打印 response
+            print(f"   查询条件单状态响应: {response}")
             if response.get('code') == '0' and response.get('data'):
                 # 遍历返回的订单列表，查找指定的订单ID
                 for algo_data in response['data']:
