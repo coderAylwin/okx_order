@@ -1044,10 +1044,10 @@ class TrendSarStrategy:
             print(f"  ⚠️  【预热未完成】指标预热中，跳过开仓")
             return
             
-        potential_invested_amount = self._get_invested_capital()
-        if potential_invested_amount <= 0:
-            print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
-            return
+        # potential_invested_amount = self._get_invested_capital()
+        # if potential_invested_amount <= 0:
+        #     print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
+        #     return
         
         # 获取波动率相关值
         current_ratio = self.volatility_calculator.get_volatility_ratio_vs_ema()
