@@ -10,7 +10,7 @@ import urllib.parse
 import subprocess
 import tempfile
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class DingTalkNotifier:
     """钉钉消息推送器"""
@@ -126,7 +126,7 @@ class DingTalkNotifier:
             print(f"❌ 钉钉消息推送异常: {str(e)}")
             return None
     
-    def send_indicator_update(self, timestamp, timeframe, sar_result, position_info=None):
+    def send_indicator_update(self, timestamp, timeframe, sar_result, position_info=None, atr_info=None):
         """
         发送周期结束时的指标更新消息
         
@@ -136,23 +136,49 @@ class DingTalkNotifier:
             sar_result: SAR指标结果
             position_info: 持仓信息（可选）
         """
-        time_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+        # 🔴 计算完整周期时间范围
+        period_minutes = int(timeframe.replace('m', '').replace('h', '')) if 'm' in timeframe else int(timeframe.replace('h', '')) * 60
+        
+        # 计算周期开始时间（向下取整到周期边界）
+        period_start = timestamp.replace(second=0, microsecond=0)
+        period_start_minute = (period_start.minute // period_minutes) * period_minutes
+        period_start = period_start.replace(minute=period_start_minute)
+        
+        # 计算周期结束时间
+        period_end = period_start + timedelta(minutes=period_minutes) - timedelta(seconds=1)
+        
+        # 格式化时间范围
+        time_range = f"{period_start.strftime('%Y-%m-%d %H:%M:%S')} - {period_end.strftime('%H:%M:%S')}"
         
         # 构建基础指标信息
         content = f"## 📊 {timeframe}周期指标更新\n\n"
-        content += f"**⏰ 时间**: {time_str}\n\n"
+        content += f"**⏰ 时间**: {time_range}\n\n"
         content += f"---\n\n"
         
         # SAR指标信息
         sar_direction = "📈 上升" if sar_result.get('sar_rising') else "📉 下降"
         content += f"**SAR值**: {sar_result.get('sar_value', 0):.2f} {sar_direction}\n\n"
-        content += f"**RSI**: {sar_result.get('rsi', 0):.2f}\n\n"
+        
+        # RSI指标信息（添加开仓条件判断）
+        rsi_value = sar_result.get('rsi', 0)
+        rsi_long_condition = rsi_value <= 75
+        rsi_short_condition = rsi_value >= 25
+        rsi_long_status = "✅" if rsi_long_condition else "❌"
+        rsi_short_status = "✅" if rsi_short_condition else "❌"
+        content += f"**RSI**: {rsi_value:.2f} | 多单条件: {rsi_long_status} (≤75) | 空单条件: {rsi_short_status} (≥25)\n\n"
         
         # 布林带信息
         content += f"**布林带**:\n"
         content += f"- 上轨: {sar_result.get('upper', 0):.2f}\n"
         content += f"- 中轨: {sar_result.get('basis', 0):.2f}\n"
         content += f"- 下轨: {sar_result.get('lower', 0):.2f}\n\n"
+        
+        # ATR波动率信息
+        if atr_info:
+            atr_ratio = atr_info.get('atr_ratio', 0)
+            atr_condition = atr_ratio <= 1.3
+            atr_status = "✅" if atr_condition else "❌"
+            content += f"**波动率**: 比率 {atr_ratio:.4f} | 开仓条件: {atr_status} (≤1.3)\n\n"
         
         # 持仓信息
         if position_info:
@@ -188,7 +214,7 @@ class DingTalkNotifier:
             else:
                 content += f"**持仓状态**: ⚪ 空仓\n\n"
         
-        title = f"【{timeframe}指标】{time_str}"
+        title = f"【{timeframe}指标】{time_range}"
         self.send_message(title, content)
     
     def send_open_position(self, timestamp, direction, entry_price, reason, position_info):

@@ -939,12 +939,16 @@ class TrendSarStrategy:
                         'take_profit_level': self.take_profit_level
                     }
                 
+                # 🔴 获取ATR波动率信息
+                atr_info = self.atr_calculator.get_atr_volatility_ratio()
+                
                 print(f"  🔍 准备发送指标更新消息...")
                 result = self.dingtalk_notifier.send_indicator_update(
                     timestamp=new_kline['timestamp'],
                     timeframe=self.timeframe,
                     sar_result=sar_result,
-                    position_info=position_info
+                    position_info=position_info,
+                    atr_info=atr_info
                 )
                 print(f"  🔍 指标更新消息发送结果: {result}")
             else:

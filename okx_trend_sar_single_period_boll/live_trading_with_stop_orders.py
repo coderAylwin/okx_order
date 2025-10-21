@@ -213,6 +213,54 @@ class LiveTradingBotWithStopOrders:
         
         self.is_warmup_phase = False
         self.logger.log(f"🎯 预热阶段结束，进入正式交易阶段\n")
+        
+        # 🔴 发送钉钉消息：预热完成，开始交易
+        if hasattr(self.strategy, 'dingtalk_notifier') and self.strategy.dingtalk_notifier:
+            try:
+                # 🔴 发送消息前先获取最新账户余额
+                try:
+                    account_info = self.trader.get_account_info()
+                    if account_info and 'balance' in account_info:
+                        current_balance = account_info['balance']['total']
+                    else:
+                        current_balance = self.account_balance  # 使用缓存的余额
+                except Exception as e:
+                    self.logger.log_warning(f"⚠️  获取账户余额失败，使用缓存值: {e}")
+                    current_balance = self.account_balance
+                
+                current_time = datetime.now()
+                time_str = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 构建预热完成消息
+                title = f"🚀 交易系统启动完成"
+                content = f"## 🚀 交易系统启动完成\n\n"
+                content += f"**⏰ 启动时间**: {time_str}\n\n"
+                content += f"---\n\n"
+                content += f"**📊 交易对**: {self.symbol}\n\n"
+                content += f"**⏰ 策略周期**: {self.config['timeframe']}\n\n"
+                content += f"**🧪 测试模式**: {'是' if self.test_mode else '否'}\n\n"
+                content += f"**💰 账户余额**: ${current_balance:,.2f} USDT\n\n"
+                content += f"**📊 仓位比例**: {self.config.get('position_size_percentage', 100)}%\n\n"
+                content += f"**💵 可用保证金**: ${current_balance * self.config.get('position_size_percentage', 100) / 100:,.2f} USDT\n\n"
+                content += f"---\n\n"
+                content += f"**🔥 预热数据**: {len(df)} 条历史数据\n\n"
+                content += f"**📦 缓存数据**: {cache_count} 条K线数据\n\n"
+                content += f"---\n\n"
+                content += f"✅ **系统已准备就绪，开始监控市场并执行交易策略**\n\n"
+                content += f"🛡️ **特性**: 开仓自动挂止损止盈单 | SAR止损动态更新\n\n"
+                
+                # 发送消息
+                result = self.strategy.dingtalk_notifier.send_message(title, content)
+                if result and result.get('errcode') == 0:
+                    self.logger.log(f"📱 预热完成钉钉消息发送成功")
+                else:
+                    self.logger.log_warning(f"⚠️  预热完成钉钉消息发送失败: {result}")
+            except Exception as e:
+                self.logger.log_error(f"❌ 发送预热完成钉钉消息失败: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            self.logger.log(f"📱 钉钉通知器未配置，跳过预热完成消息")
     
     def execute_signal(self, signal):
         """执行交易信号 - 增强版"""
@@ -1789,7 +1837,7 @@ class LiveTradingBotWithStopOrders:
             traceback.print_exc()
     
     def check_and_fill_missing_data(self):
-        """主动检查并补充缺失数据（每分钟08秒触发）
+        """主动检查并补充缺失数据（每分钟05秒触发）
         
         - 检查最近3分钟的数据完整性
         - 如果有缺失，尝试从API拉取（最多3次重试）
@@ -1900,7 +1948,13 @@ class LiveTradingBotWithStopOrders:
                             print(f"   是周期末尾: {is_period_last_minute}")
                             print(f"   首周期完成: {self.first_period_completed}")
                             
-                            if is_period_last_minute and self.first_period_completed:
+                            if is_period_last_minute:
+                                # 🔴 如果是首周期，先设置首周期完成标志
+                                if not self.first_period_completed:
+                                    self.first_period_completed = True
+                                    self.logger.log(f"\n🎯 首个完整周期完成（通过数据补充检测）")
+                                    self.logger.log(f"✅ 从下一个周期开始处理交易信号\n")
+                                
                                 self.logger.log(f"🎯 补充了周期末尾数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 立即触发K线聚合和指标计算...")
                                 
                                 # 触发K线生成和策略计算
@@ -2161,11 +2215,11 @@ class LiveTradingBotWithStopOrders:
                     if success:
                         last_update_minute = current_minute
                 
-                # 🔍 每分钟08-13秒：主动检查数据完整性（预热完成后才开始检查）
+                # 🔍 每分钟05-09秒：主动检查数据完整性（预热完成后才开始检查）
                 # 紧跟在01-05秒正常更新之后，确保周期末尾数据完整并及时触发策略
                 should_check = (
                     not self.is_warmup_phase and
-                    8 <= current_second <= 13 and
+                    5 <= current_second <= 9 and
                     (last_check_minute is None or current_minute > last_check_minute)
                 )
                 
