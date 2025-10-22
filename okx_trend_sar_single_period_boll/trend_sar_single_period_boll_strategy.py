@@ -929,6 +929,7 @@ class TrendSarStrategy:
             print(f"  🔍 推送周期结束时的指标信息（包含持仓情况）")
             print(f"  🔍 dingtalk_notifier对象: {self.dingtalk_notifier}")
             if self.dingtalk_notifier:
+                # 🔴 传递策略逻辑层面的持仓信息（已添加说明区分真实持仓）
                 position_info = None
                 if self.position is not None:
                     position_info = {
@@ -942,11 +943,15 @@ class TrendSarStrategy:
                 # 🔴 获取ATR波动率信息
                 atr_info = self.atr_calculator.get_atr_volatility_ratio()
                 
+                # 🔴 在sar_result中添加当前价格信息（用于风险收益比计算）
+                sar_result_with_price = sar_result.copy()
+                sar_result_with_price['current_price'] = close_price  # 使用收盘价作为当前价格
+                
                 print(f"  🔍 准备发送指标更新消息...")
                 result = self.dingtalk_notifier.send_indicator_update(
                     timestamp=new_kline['timestamp'],
                     timeframe=self.timeframe,
-                    sar_result=sar_result,
+                    sar_result=sar_result_with_price,
                     position_info=position_info,
                     atr_info=atr_info
                 )

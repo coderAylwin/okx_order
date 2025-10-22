@@ -180,10 +180,33 @@ class DingTalkNotifier:
             atr_status = "✅" if atr_condition else "❌"
             content += f"**波动率**: 比率 {atr_ratio:.4f} | 开仓条件: {atr_status} (≤1.3)\n\n"
         
+        # 风险收益比信息（基于当前价格和SAR值计算）
+        current_price = sar_result.get('current_price', sar_result.get('sar_value', 0))
+        if current_price > 0:
+            sar_value = sar_result.get('sar_value', 0)
+            if sar_value > 0:
+                # 计算多单风险收益比（假设以当前价格开仓）
+                long_stop_loss_pct = abs(current_price - sar_value) / current_price * 100
+                long_take_profit_pct = 0.55  # 固定止盈0.55%
+                long_risk_reward_ok = long_stop_loss_pct >= long_take_profit_pct
+                long_status = "✅" if long_risk_reward_ok else "❌"
+                
+                # 计算空单风险收益比（假设以当前价格开仓）
+                short_stop_loss_pct = abs(sar_value - current_price) / current_price * 100
+                short_take_profit_pct = 0.55  # 固定止盈0.55%
+                short_risk_reward_ok = short_stop_loss_pct >= short_take_profit_pct
+                short_status = "✅" if short_risk_reward_ok else "❌"
+                
+                content += f"**风险收益比** (基于当前价格${current_price:.2f}):\n"
+                content += f"- 多单: 止损{long_stop_loss_pct:.2f}% vs 止盈{long_take_profit_pct:.2f}% {long_status}\n"
+                content += f"- 空单: 止损{short_stop_loss_pct:.2f}% vs 止盈{short_take_profit_pct:.2f}% {short_status}\n"
+                content += f"*注：实际开仓时的风险收益比以开仓信号价格为准*\n\n"
+        
         # 持仓信息
         if position_info:
             content += f"---\n\n"
-            content += f"## 💼 持仓信息\n\n"
+            content += f"## 💼 策略持仓状态\n\n"
+            content += f"*注：此为策略逻辑层面的持仓状态，非OKX实际持仓*\n\n"
             
             position_type = position_info.get('position')
             if position_type:

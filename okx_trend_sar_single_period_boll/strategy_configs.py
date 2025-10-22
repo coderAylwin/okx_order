@@ -10,8 +10,8 @@ def get_strategy_config():
         'position_size_percentage': 100,
         
         # 回测时间范围
-        'start_date': '2025-01-01 00:00:00',
-        'end_date': '2025-10-13 17:30:00',
+        'start_date': '2025-09-01 00:00:00',
+        'end_date': '2025-10-21 19:10:00',
         
         # 单周期SAR策略参数
         'timeframe': '15m',
@@ -19,9 +19,9 @@ def get_strategy_config():
         'damping': 0.9,
         
         # SAR参数
-        'sar_start': 0.03,
-        'sar_increment': 0.03,
-        'sar_maximum': 0.07,
+        'sar_start': 0.005,
+        'sar_increment': 0.005,
+        'sar_maximum': 0.04,
         
         # 布林带参数
         'mult': 2.0,

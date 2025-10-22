@@ -265,7 +265,7 @@ class OKXTraderEnhanced:
             return result
     
     def set_stop_loss(self, symbol, side, trigger_price, amount):
-        """设置止损单（条件单）
+        """设置止损单（Post-Only限价单）
         
         Args:
             symbol: 交易对符号
@@ -281,14 +281,11 @@ class OKXTraderEnhanced:
             return {'id': 'TEST_SL', 'status': 'simulated'}
         
         try:
-            # OKX 条件单参数
-            # 参考: https://www.okx.com/docs-v5/en/#order-book-trading-algo-trading-post-place-algo-order
-            
+            # 🔴 工作流程：先尝试Post-Only限价单（省手续费）
             params = {
                 'tdMode': 'cross',  # 保证金模式：cross（全仓）或 isolated（逐仓）
-                'ordType': 'conditional',  # 条件单类型
-                'slTriggerPx': str(trigger_price),  # 止损触发价
-                'slOrdPx': str(trigger_price),  # 止损委托价（限价单，使用触发价）
+                'ordType': 'post_only',  # 🔴 只做Maker单，节省手续费
+                'px': str(trigger_price),  # 委托价格（Post-Only限价单）
                 'reduceOnly': True,  # 只减仓
                 'posSide': 'long' if side == 'long' else 'short',  # 明确指定仓位方向
             }
@@ -304,15 +301,39 @@ class OKXTraderEnhanced:
                     symbol, 'limit', 'buy', amount, trigger_price, params
                 )
             
-            print(f"✅ 止损单设置成功（限价）: {symbol}, 触发价: {trigger_price}, 订单ID: {order['id']}")
+            print(f"✅ 止损单设置成功（Post-Only限价单）: {symbol}, 价格: ${trigger_price:.2f}, 订单ID: {order['id']}")
             return order
             
         except Exception as e:
             print(f"❌ 设置止损单失败 ({symbol}): {e}")
-            return None
+            # 如果Post-Only失败，尝试使用普通限价单
+            print(f"🔄 尝试使用普通限价单...")
+            try:
+                params = {
+                    'tdMode': 'cross',
+                    'ordType': 'limit',  # 普通限价单
+                    'reduceOnly': True,
+                    'posSide': 'long' if side == 'long' else 'short',
+                }
+                
+                if side == 'long':
+                    order = self.exchange.create_order(
+                        symbol, 'limit', 'sell', amount, trigger_price, params
+                    )
+                else:
+                    order = self.exchange.create_order(
+                        symbol, 'limit', 'buy', amount, trigger_price, params
+                    )
+                
+                print(f"✅ 止损单设置成功（普通限价单）: {symbol}, 价格: ${trigger_price:.2f}, 订单ID: {order['id']}")
+                return order
+                
+            except Exception as e2:
+                print(f"❌ 普通限价单也失败: {e2}")
+                return None
     
     def set_take_profit(self, symbol, side, trigger_price, amount):
-        """设置止盈单（条件单）
+        """设置止盈单（Post-Only限价单）
         
         Args:
             symbol: 交易对符号
@@ -328,11 +349,11 @@ class OKXTraderEnhanced:
             return {'id': 'TEST_TP', 'status': 'simulated'}
         
         try:
+            # 🔴 工作流程：先尝试Post-Only限价单（省手续费）
             params = {
                 'tdMode': 'cross',
-                'ordType': 'conditional',
-                'tpTriggerPx': str(trigger_price),  # 止盈触发价
-                'tpOrdPx': str(trigger_price),  # 止盈委托价（限价单，使用触发价）
+                'ordType': 'post_only',  # 🔴 只做Maker单，节省手续费
+                'px': str(trigger_price),  # 委托价格（Post-Only限价单）
                 'reduceOnly': True,
                 'posSide': 'long' if side == 'long' else 'short',  # 明确指定仓位方向
             }
@@ -348,12 +369,36 @@ class OKXTraderEnhanced:
                     symbol, 'limit', 'buy', amount, trigger_price, params
                 )
             
-            print(f"✅ 止盈单设置成功（限价）: {symbol}, 触发价: {trigger_price}, 订单ID: {order['id']}")
+            print(f"✅ 止盈单设置成功（Post-Only限价单）: {symbol}, 价格: ${trigger_price:.2f}, 订单ID: {order['id']}")
             return order
             
         except Exception as e:
             print(f"❌ 设置止盈单失败 ({symbol}): {e}")
-            return None
+            # 如果Post-Only失败，尝试使用普通限价单
+            print(f"🔄 尝试使用普通限价单...")
+            try:
+                params = {
+                    'tdMode': 'cross',
+                    'ordType': 'limit',  # 普通限价单
+                    'reduceOnly': True,
+                    'posSide': 'long' if side == 'long' else 'short',
+                }
+                
+                if side == 'long':
+                    order = self.exchange.create_order(
+                        symbol, 'limit', 'sell', amount, trigger_price, params
+                    )
+                else:
+                    order = self.exchange.create_order(
+                        symbol, 'limit', 'buy', amount, trigger_price, params
+                    )
+                
+                print(f"✅ 止盈单设置成功（普通限价单）: {symbol}, 价格: ${trigger_price:.2f}, 订单ID: {order['id']}")
+                return order
+                
+            except Exception as e2:
+                print(f"❌ 普通限价单也失败: {e2}")
+                return None
     
     def update_stop_loss(self, symbol, side, new_trigger_price, amount):
         """更新止损单（撤销旧单，挂新单）
