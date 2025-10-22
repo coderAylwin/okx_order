@@ -1035,16 +1035,14 @@ class TrendSarStrategy:
             else: # 这里注释掉后，就是一个方向只开一个仓位（回测不开仓效果还好一些）
                 print(f"  🔍 进入else分支（方向未改变）")
                 print(f"  🔍 self.position is None: {self.position is None}")
-                if self.position is None:
-                    # 🎯 空仓直接开仓
-                    print(f"  🔍 进入空仓开仓分支")
-                    print(f"  🔍 开仓条件检查:")
-                    print(f"       📊 SAR方向改变: {direction_changed}")
-                    print(f"       💼 无持仓状态: True")
+                # 🔴 修改：不依赖本地持仓状态，让实盘交易脚本处理持仓检查
+                # 策略只负责生成信号，实盘脚本负责检查OKX实际持仓
+                print(f"  🔍 生成开仓信号（由实盘脚本检查OKX实际持仓）")
+                print(f"  🔍 开仓条件检查:")
+                print(f"       📊 SAR方向未改变但符合开仓条件: {not direction_changed}")
+                print(f"       💼 持仓检查: 由实盘脚本处理")
                 
-                    self._execute_entry(current_direction, open_price, signal_info)
-                else:
-                    print(f"  🔍 有持仓，跳过开仓")
+                self._execute_entry(current_direction, open_price, signal_info)
 
     def _execute_entry(self, direction, entry_price, signal_info):
         """执行开仓"""

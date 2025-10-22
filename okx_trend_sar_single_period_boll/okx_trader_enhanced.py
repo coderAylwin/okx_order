@@ -193,23 +193,31 @@ class OKXTraderEnhanced:
             result['entry_order'] = entry_order
             print(f"✅ 开多单成功: {symbol}, 数量: {amount}, 订单ID: {entry_order['id']}")
             
-            # 2. 设置止损单
-            if stop_loss_price:
-                sl_order = self.set_stop_loss(symbol, 'long', stop_loss_price, amount)
-                result['stop_loss_order'] = sl_order
-                self.stop_loss_order_id = sl_order['id'] if sl_order else None
-            
-            # 3. 设置止盈单
-            if take_profit_price:
-                tp_order = self.set_take_profit(symbol, 'long', take_profit_price, amount)
-                result['take_profit_order'] = tp_order
-                self.take_profit_order_id = tp_order['id'] if tp_order else None
-            
-            return result
-            
         except Exception as e:
             print(f"❌ 开多单失败 ({symbol}): {e}")
             return result
+        
+        # 🔴 2. 设置止损单（独立处理，不影响开仓结果）
+        if stop_loss_price:
+            try:
+                sl_order = self.set_stop_loss(symbol, 'long', stop_loss_price, amount)
+                result['stop_loss_order'] = sl_order
+                self.stop_loss_order_id = sl_order['id'] if sl_order else None
+            except Exception as e:
+                print(f"⚠️  止损单设置失败，但开仓已成功: {e}")
+                result['stop_loss_order'] = None
+        
+        # 🔴 3. 设置止盈单（独立处理，不影响开仓结果）
+        if take_profit_price:
+            try:
+                tp_order = self.set_take_profit(symbol, 'long', take_profit_price, amount)
+                result['take_profit_order'] = tp_order
+                self.take_profit_order_id = tp_order['id'] if tp_order else None
+            except Exception as e:
+                print(f"⚠️  止盈单设置失败，但开仓已成功: {e}")
+                result['take_profit_order'] = None
+        
+        return result
     
     def open_short_with_stop_orders(self, symbol, amount, stop_loss_price=None, take_profit_price=None):
         """开空单并设置止损止盈
@@ -246,23 +254,31 @@ class OKXTraderEnhanced:
             result['entry_order'] = entry_order
             print(f"✅ 开空单成功: {symbol}, 数量: {amount}, 订单ID: {entry_order['id']}")
             
-            # 2. 设置止损单
-            if stop_loss_price:
-                sl_order = self.set_stop_loss(symbol, 'short', stop_loss_price, amount)
-                result['stop_loss_order'] = sl_order
-                self.stop_loss_order_id = sl_order['id'] if sl_order else None
-            
-            # 3. 设置止盈单
-            if take_profit_price:
-                tp_order = self.set_take_profit(symbol, 'short', take_profit_price, amount)
-                result['take_profit_order'] = tp_order
-                self.take_profit_order_id = tp_order['id'] if tp_order else None
-            
-            return result
-            
         except Exception as e:
             print(f"❌ 开空单失败 ({symbol}): {e}")
             return result
+        
+        # 🔴 2. 设置止损单（独立处理，不影响开仓结果）
+        if stop_loss_price:
+            try:
+                sl_order = self.set_stop_loss(symbol, 'short', stop_loss_price, amount)
+                result['stop_loss_order'] = sl_order
+                self.stop_loss_order_id = sl_order['id'] if sl_order else None
+            except Exception as e:
+                print(f"⚠️  止损单设置失败，但开仓已成功: {e}")
+                result['stop_loss_order'] = None
+        
+        # 🔴 3. 设置止盈单（独立处理，不影响开仓结果）
+        if take_profit_price:
+            try:
+                tp_order = self.set_take_profit(symbol, 'short', take_profit_price, amount)
+                result['take_profit_order'] = tp_order
+                self.take_profit_order_id = tp_order['id'] if tp_order else None
+            except Exception as e:
+                print(f"⚠️  止盈单设置失败，但开仓已成功: {e}")
+                result['take_profit_order'] = None
+        
+        return result
     
     def set_stop_loss(self, symbol, side, trigger_price, amount):
         """设置止损单（Post-Only限价单）
@@ -281,6 +297,13 @@ class OKXTraderEnhanced:
             return {'id': 'TEST_SL', 'status': 'simulated'}
         
         try:
+            # 🔴 添加调试信息
+            print(f"🔍 设置止损单调试信息:")
+            print(f"   交易对: {symbol}")
+            print(f"   持仓方向: {side}")
+            print(f"   触发价格: ${trigger_price:.2f}")
+            print(f"   数量: {amount}")
+            
             # 🔴 工作流程：先尝试Post-Only限价单（省手续费）
             params = {
                 'tdMode': 'cross',  # 保证金模式：cross（全仓）或 isolated（逐仓）
@@ -290,13 +313,17 @@ class OKXTraderEnhanced:
                 'posSide': 'long' if side == 'long' else 'short',  # 明确指定仓位方向
             }
             
+            print(f"🔍 止损单参数: {params}")
+            
             if side == 'long':
                 # 多单止损 = 向下触发，卖出平仓（限价单）
+                print(f"🔍 多单止损: 卖出 {amount} 张，价格 ${trigger_price:.2f}")
                 order = self.exchange.create_order(
                     symbol, 'limit', 'sell', amount, trigger_price, params
                 )
             else:
                 # 空单止损 = 向上触发，买入平仓（限价单）
+                print(f"🔍 空单止损: 买入 {amount} 张，价格 ${trigger_price:.2f}")
                 order = self.exchange.create_order(
                     symbol, 'limit', 'buy', amount, trigger_price, params
                 )
@@ -312,6 +339,7 @@ class OKXTraderEnhanced:
                 params = {
                     'tdMode': 'cross',
                     'ordType': 'limit',  # 普通限价单
+                    'px': str(trigger_price),
                     'reduceOnly': True,
                     'posSide': 'long' if side == 'long' else 'short',
                 }
@@ -380,6 +408,7 @@ class OKXTraderEnhanced:
                 params = {
                     'tdMode': 'cross',
                     'ordType': 'limit',  # 普通限价单
+                    'px': str(trigger_price),
                     'reduceOnly': True,
                     'posSide': 'long' if side == 'long' else 'short',
                 }

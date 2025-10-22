@@ -269,117 +269,34 @@ class LiveTradingBotWithStopOrders:
         signal_type = signal['type']
         print(f"🔍 执行信号: {signal_type}, 测试模式: {self.test_mode}")
         
-        # 🔴 开仓前检查：直接检查OKX实际持仓，如果有持仓则拒绝开仓
+        # 🔴 开仓前检查：混合方案 - 检查OKX实际持仓 + 同步本地状态
         if signal_type in ['OPEN_LONG', 'OPEN_SHORT']:
-            print(f"🚨🚨🚨 开仓前检查OKX实际持仓 - 防止重复开仓 🚨🚨🚨")
-            print(f"🔍 当前交易对: {self.symbol}")
-            print(f"🔍 信号类型: {signal_type}")
+            print(f"🚨 开仓前检查（混合方案）: {signal_type}")
             
             try:
-                # 直接查询OKX实际持仓
-                print(f"🔍 调用OKX API获取持仓信息...")
+                # 1. 查询OKX实际持仓
                 positions = self.trader.exchange.fetch_positions([self.symbol])
-                print(f"🔍 OKX API返回的持仓数据: {len(positions)}条")
+                has_okx_position = self._check_okx_actual_positions(positions)
                 
-                has_okx_long_position = False
-                has_okx_short_position = False
-                okx_long_contracts = 0
-                okx_short_contracts = 0
-                
-                # 🔍 详细打印所有持仓信息
-                for i, pos in enumerate(positions):
-                    print(f"🔍 持仓 #{i+1}:")
-                    print(f"   symbol: {pos.get('symbol')}")
-                    print(f"   side: {pos.get('side')}")
-                    print(f"   contracts: {pos.get('contracts')}")
-                    print(f"   size: {pos.get('size')}")
-                    print(f"   notional: {pos.get('notional')}")
-                    
-                    # 检查是否匹配当前交易对（支持多种symbol格式）
-                    pos_symbol = pos.get('symbol', '')
-                    pos_inst_id = pos.get('info', {}).get('instId', '')
-                    
-                    # 检查多种可能的symbol格式
-                    symbol_match = (
-                        pos_symbol == self.symbol or 
-                        pos_inst_id == self.symbol or
-                        pos_symbol == self.symbol.replace('-', '/') or
-                        pos_inst_id == self.symbol.replace('-', '/') or
-                        pos_symbol == self.symbol.replace('-', '/') + ':USDT' or
-                        pos_inst_id == self.symbol.replace('-', '/') + ':USDT'
-                    )
-                    
-                    print(f"🔍 Symbol匹配检查:")
-                    print(f"   程序symbol: {self.symbol}")
-                    print(f"   API symbol: {pos_symbol}")
-                    print(f"   API instId: {pos_inst_id}")
-                    print(f"   匹配结果: {symbol_match}")
-                    
-                    if symbol_match:
-                        # 安全地处理可能为None的字段
-                        contracts_raw = pos.get('contracts', 0)
-                        size_raw = pos.get('size', 0)
-                        notional_raw = pos.get('notional', 0)
-                        
-                        contracts = float(contracts_raw) if contracts_raw is not None else 0.0
-                        size = float(size_raw) if size_raw is not None else 0.0
-                        notional = float(notional_raw) if notional_raw is not None else 0.0
-                        
-                        print(f"🔍 匹配的交易对持仓:")
-                        print(f"   contracts: {contracts}")
-                        print(f"   size: {size}")
-                        print(f"   notional: {notional}")
-                        
-                        # 使用contracts、size或notional来判断是否有持仓
-                        if contracts > 0 or size > 0 or notional > 0:
-                            side = pos.get('side', '').lower()
-                            print(f"🔍 检测到有效持仓: {side}, {contracts}张")
-                            
-                            if side == 'long':
-                                has_okx_long_position = True
-                                okx_long_contracts = contracts
-                            elif side == 'short':
-                                has_okx_short_position = True
-                                okx_short_contracts = contracts
-                
-                # 检查是否有任何持仓
-                has_any_okx_position = has_okx_long_position or has_okx_short_position
-                print(f"🔍 持仓检查结果:")
-                print(f"   has_okx_long_position: {has_okx_long_position}")
-                print(f"   has_okx_short_position: {has_okx_short_position}")
-                print(f"   has_any_okx_position: {has_any_okx_position}")
-                
-                if has_any_okx_position:
+                if has_okx_position:
                     signal_direction = 'long' if signal_type == 'OPEN_LONG' else 'short'
+                    print(f"❌ OKX实际有持仓，拒绝{signal_direction}开仓")
                     
-                    # 详细记录持仓信息
-                    position_info = []
-                    if has_okx_long_position:
-                        position_info.append(f"多单{okx_long_contracts}张")
-                    if has_okx_short_position:
-                        position_info.append(f"空单{okx_short_contracts}张")
-                    
-                    print(f"🚨🚨🚨 检测到OKX实际持仓，拒绝开仓 🚨🚨🚨")
-                    self.logger.log_warning(f"⚠️  OKX实际持仓中({', '.join(position_info)})，拒绝新的{signal_direction}开仓信号")
-                    print(f"❌ 拒绝开仓: OKX实际持仓={', '.join(position_info)}, 新信号={signal_direction}")
-                    return  # 🔴 直接返回，不执行开仓
+                    # 🔴 同步OKX状态到本地（确保一致性）
+                    self._sync_okx_to_local(positions)
+                    return
                 
-                # OKX无持仓，检查程序内部状态是否一致
-                if self.current_position:
-                    print(f"⚠️  OKX无持仓但程序内部有持仓记录({self.current_position})，清空程序状态...")
-                    self._clear_position_state()
-                    print(f"✅ 程序状态已清空，可以开新仓")
-                
+                # 2. OKX无持仓，确保本地状态为空
                 print(f"✅ OKX无持仓，可以开仓")
+                if self.current_position:
+                    print(f"🔄 清空本地持仓状态，确保一致性")
+                    self._clear_position_state()
                 
             except Exception as e:
                 print(f"❌ 检查OKX持仓失败: {e}")
-                import traceback
-                traceback.print_exc()
-                # 如果检查失败，为了安全起见，拒绝开仓
+                # 为了安全起见，拒绝开仓
                 signal_direction = 'long' if signal_type == 'OPEN_LONG' else 'short'
                 self.logger.log_warning(f"⚠️  无法检查OKX持仓，拒绝{signal_direction}开仓信号（安全考虑）")
-                print(f"❌ 拒绝开仓: 无法检查OKX持仓，新信号={signal_direction}")
                 return
         
         # 🔴 开仓 - 自动挂止损止盈单
@@ -1384,7 +1301,7 @@ class LiveTradingBotWithStopOrders:
             traceback.print_exc()
     
     def _sync_position_on_startup(self):
-        """启动时同步OKX持仓状态到程序
+        """启动时同步OKX持仓状态到程序（混合方案）
         
         检查OKX是否有当前币种的持仓，如果有：
         1. 从数据库恢复交易记录
@@ -1393,7 +1310,7 @@ class LiveTradingBotWithStopOrders:
         """
         try:
             self.logger.log(f"\n{'='*80}")
-            self.logger.log(f"🔄 启动时同步持仓状态...")
+            self.logger.log(f"🔄 启动时强制同步持仓状态（混合方案）...")
             self.logger.log(f"{'='*80}")
             
             # 1. 查询OKX实际持仓
@@ -1429,25 +1346,269 @@ class LiveTradingBotWithStopOrders:
                         okx_position_side = pos.get('side', '').lower()
                         okx_position_contracts = contracts
                         self.logger.log(f"📊 检测到OKX持仓: {okx_position_side}, {okx_position_contracts}张")
+                        
+                        # 🔴 同步到本地状态
                         self.current_position = okx_position_side
                         self.current_position_side = okx_position_side
                         self.current_position_shares = okx_position_contracts
-                        self.current_trade_id = None
-                        self.current_entry_order_id = None
-                        self.current_stop_loss_order_id = None
-                        self.current_take_profit_order_id = None
+                        
+                        # 🔴 尝试从数据库恢复交易记录
+                        self._restore_trade_from_database(okx_position_side)
+                        
+                        # 🔴 同步策略对象状态
+                        self._sync_strategy_position_state(okx_position_side)
                         break
             
             if not has_okx_position:
                 self.logger.log(f"✅ OKX无持仓，程序从空仓开始")
+                # 🔴 确保本地状态为空
+                self._clear_position_state()
                 self.logger.log(f"{'='*80}\n")
                 return
             
+            self.logger.log(f"✅ 启动时同步完成")
+            self.logger.log(f"{'='*80}\n")
+            
         except Exception as e:
-            self.logger.log_error(f"❌ 同步持仓状态失败: {e}")
+            self.logger.log_error(f"❌ 启动时同步持仓状态失败: {e}")
             import traceback
             traceback.print_exc()
             self.logger.log_warning(f"⚠️  建议检查OKX持仓和数据库状态，必要时手动平仓")
+    
+    def _restore_trade_from_database(self, position_side):
+        """从数据库恢复交易记录"""
+        try:
+            if not self._is_trading_db_available():
+                self.logger.log_warning("⚠️  交易数据库未连接，无法恢复交易记录")
+                return
+            
+            # 查询未平仓的交易记录
+            trade = self.trading_db.get_open_trade(self.symbol)
+            if trade:
+                self.current_trade_id = trade.id
+                self.current_entry_order_id = trade.entry_order_id
+                self.logger.log(f"✅ 从数据库恢复交易记录: ID={trade.id}, 开仓价=${trade.entry_price:.2f}")
+                
+                # 查询止损止盈单记录
+                session = self.trading_db.get_session()
+                try:
+                    from trading_database_models import OKXStopOrder
+                    
+                    stop_orders = session.query(OKXStopOrder).filter_by(
+                        symbol=self.symbol,
+                        trade_id=trade.id,
+                        status='active'
+                    ).all()
+                    
+                    for order in stop_orders:
+                        if order.order_type == 'STOP_LOSS':
+                            self.current_stop_loss_order_id = order.order_id
+                            self.logger.log(f"✅ 恢复止损单: {order.order_id}")
+                        elif order.order_type == 'TAKE_PROFIT':
+                            self.current_take_profit_order_id = order.order_id
+                            self.logger.log(f"✅ 恢复止盈单: {order.order_id}")
+                            
+                finally:
+                    self.trading_db.close_session(session)
+            else:
+                self.logger.log_warning("⚠️  数据库中未找到对应的交易记录")
+                
+        except Exception as e:
+            self.logger.log_error(f"❌ 恢复交易记录失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _sync_strategy_position_state(self, position_side):
+        """同步策略对象的持仓状态"""
+        try:
+            if not self._is_trading_db_available():
+                self.logger.log_warning("⚠️  交易数据库未连接，无法同步策略状态")
+                return
+            
+            # 从数据库获取交易信息
+            trade = self.trading_db.get_open_trade(self.symbol)
+            if trade:
+                # 同步策略对象状态
+                self.strategy.position = position_side
+                self.strategy.entry_price = trade.entry_price
+                self.strategy.position_shares = trade.amount
+                self.strategy.current_invested_amount = trade.invested_amount
+                
+                # 设置止损止盈位（从策略计算）
+                self.strategy.stop_loss_level = self.strategy.sar_indicator.get_stop_loss_level()
+                
+                if self.strategy.fixed_take_profit_pct > 0:
+                    if position_side == 'long':
+                        self.strategy.take_profit_level = trade.entry_price * (1 + self.strategy.fixed_take_profit_pct / 100)
+                    else:
+                        self.strategy.take_profit_level = trade.entry_price * (1 - self.strategy.fixed_take_profit_pct / 100)
+                
+                if self.strategy.max_loss_pct > 0:
+                    if position_side == 'long':
+                        self.strategy.max_loss_level = trade.entry_price * (1 - self.strategy.max_loss_pct / 100)
+                    else:
+                        self.strategy.max_loss_level = trade.entry_price * (1 + self.strategy.max_loss_pct / 100)
+                
+                self.logger.log(f"✅ 策略状态已同步: {position_side}, 开仓价=${trade.entry_price:.2f}")
+            else:
+                self.logger.log_warning("⚠️  无法同步策略状态：未找到交易记录")
+                
+        except Exception as e:
+            self.logger.log_error(f"❌ 同步策略状态失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def periodic_sync_with_okx(self):
+        """定期同步OKX状态（混合方案）
+        
+        每5分钟执行一次，确保本地状态与OKX实际状态一致
+        """
+        try:
+            self.logger.log(f"\n{'='*60}")
+            self.logger.log(f"🔄 定期同步OKX状态（混合方案）...")
+            self.logger.log(f"{'='*60}")
+            
+            # 1. 查询OKX实际持仓
+            positions = self.trader.exchange.fetch_positions([self.symbol])
+            
+            has_okx_position = False
+            okx_position_side = None
+            okx_position_contracts = 0
+            
+            for pos in positions:
+                # 检查是否匹配当前交易对
+                pos_symbol = pos.get('symbol', '')
+                pos_inst_id = pos.get('info', {}).get('instId', '')
+                
+                symbol_match = (
+                    pos_symbol == self.symbol or 
+                    pos_inst_id == self.symbol or
+                    pos_symbol == self.symbol.replace('-', '/') or
+                    pos_inst_id == self.symbol.replace('-', '/') or
+                    pos_symbol == self.symbol.replace('-', '/') + ':USDT' or
+                    pos_inst_id == self.symbol.replace('-', '/') + ':USDT'
+                )
+                
+                if symbol_match:
+                    contracts = self.safe_float(pos.get('contracts'))
+                    size = self.safe_float(pos.get('size'))
+                    notional = self.safe_float(pos.get('notional'))
+                    
+                    if contracts > 0 or size > 0 or notional > 0:
+                        has_okx_position = True
+                        okx_position_side = pos.get('side', '').lower()
+                        okx_position_contracts = contracts
+                        break
+            
+            # 2. 检查本地状态
+            local_has_position = self.current_position is not None
+            
+            self.logger.log(f"📊 状态对比:")
+            self.logger.log(f"   OKX实际持仓: {okx_position_side if has_okx_position else '无'}")
+            self.logger.log(f"   本地持仓状态: {self.current_position if local_has_position else '无'}")
+            
+            # 3. 状态不一致时进行同步
+            if has_okx_position != local_has_position:
+                self.logger.log(f"⚠️  检测到状态不一致，开始同步...")
+                
+                if has_okx_position:
+                    # OKX有持仓，本地无持仓：同步到本地
+                    self.logger.log(f"🔄 同步OKX持仓到本地: {okx_position_side}, {okx_position_contracts}张")
+                    self.current_position = okx_position_side
+                    self.current_position_side = okx_position_side
+                    self.current_position_shares = okx_position_contracts
+                    
+                    # 尝试恢复交易记录
+                    self._restore_trade_from_database(okx_position_side)
+                    self._sync_strategy_position_state(okx_position_side)
+                    
+                else:
+                    # OKX无持仓，本地有持仓：清空本地状态
+                    self.logger.log(f"🔄 清空本地持仓状态（OKX已平仓）")
+                    self._clear_position_state()
+                    
+            elif has_okx_position and local_has_position:
+                # 两边都有持仓，检查数量是否一致
+                if abs(self.current_position_shares - okx_position_contracts) > 0.1:
+                    self.logger.log(f"⚠️  持仓数量不一致: 本地{self.current_position_shares}张 vs OKX{okx_position_contracts}张")
+                    self.logger.log(f"🔄 以OKX为准，更新本地数量")
+                    self.current_position_shares = okx_position_contracts
+                    
+                    # 同步策略对象
+                    if hasattr(self.strategy, 'position_shares'):
+                        self.strategy.position_shares = okx_position_contracts
+            
+            self.logger.log(f"✅ 定期同步完成")
+            self.logger.log(f"{'='*60}\n")
+            
+        except Exception as e:
+            self.logger.log_error(f"❌ 定期同步失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _check_okx_actual_positions(self, positions):
+        """检查OKX实际持仓"""
+        for pos in positions:
+            # 检查是否匹配当前交易对
+            pos_symbol = pos.get('symbol', '')
+            pos_inst_id = pos.get('info', {}).get('instId', '')
+            
+            symbol_match = (
+                pos_symbol == self.symbol or 
+                pos_inst_id == self.symbol or
+                pos_symbol == self.symbol.replace('-', '/') or
+                pos_inst_id == self.symbol.replace('-', '/') or
+                pos_symbol == self.symbol.replace('-', '/') + ':USDT' or
+                pos_inst_id == self.symbol.replace('-', '/') + ':USDT'
+            )
+            
+            if symbol_match:
+                contracts = self.safe_float(pos.get('contracts'))
+                size = self.safe_float(pos.get('size'))
+                notional = self.safe_float(pos.get('notional'))
+                
+                # 使用contracts、size或notional来判断是否有持仓
+                if contracts > 0 or size > 0 or notional > 0:
+                    return True
+        return False
+    
+    def _sync_okx_to_local(self, positions):
+        """同步OKX状态到本地"""
+        try:
+            for pos in positions:
+                # 检查是否匹配当前交易对
+                pos_symbol = pos.get('symbol', '')
+                pos_inst_id = pos.get('info', {}).get('instId', '')
+                
+                symbol_match = (
+                    pos_symbol == self.symbol or 
+                    pos_inst_id == self.symbol or
+                    pos_symbol == self.symbol.replace('-', '/') or
+                    pos_inst_id == self.symbol.replace('-', '/') or
+                    pos_symbol == self.symbol.replace('-', '/') + ':USDT' or
+                    pos_inst_id == self.symbol.replace('-', '/') + ':USDT'
+                )
+                
+                if symbol_match:
+                    contracts = self.safe_float(pos.get('contracts'))
+                    size = self.safe_float(pos.get('size'))
+                    notional = self.safe_float(pos.get('notional'))
+                    
+                    if contracts > 0 or size > 0 or notional > 0:
+                        position_side = pos.get('side', '').lower()
+                        print(f"🔄 同步OKX持仓到本地: {position_side}, {contracts}张")
+                        
+                        # 同步到本地状态
+                        self.current_position = position_side
+                        self.current_position_side = position_side
+                        self.current_position_shares = contracts
+                        
+                        # 尝试恢复交易记录
+                        self._restore_trade_from_database(position_side)
+                        self._sync_strategy_position_state(position_side)
+                        break
+        except Exception as e:
+            print(f"❌ 同步OKX状态到本地失败: {e}")
     
     def sync_open_trades_with_okx(self):
         """同步数据库持仓状态与OKX实际持仓（每1分钟执行 - 测试用）
@@ -2190,13 +2351,13 @@ class LiveTradingBotWithStopOrders:
         self.logger.log(f"⏰ 每分钟01-05秒更新，{self.config['timeframe']}周期整点触发策略")
         self.logger.log(f"🔍 每分钟08-13秒主动检查数据完整性（紧跟正常更新，确保周期末尾数据完整）")
         self.logger.log(f"🔔 每分钟18-23秒检查止损/止盈单状态（有持仓时）")
-        self.logger.log(f"🔄 每1分钟同步数据库持仓状态与OKX（测试模式）")
+        self.logger.log(f"🔄 每5分钟定期同步OKX状态（混合方案）")
         self.logger.log(f"🔄 开始监控市场...\n")
         
         last_update_minute = None
         last_check_minute = None
         last_stop_check_minute = None
-        last_sync_time = None  # 记录上次同步时间
+        last_periodic_sync_time = None  # 记录上次定期同步时间
         
         while self.is_running:
             try:
@@ -2241,15 +2402,15 @@ class LiveTradingBotWithStopOrders:
                 #     self.check_stop_orders_status()
                 #     last_stop_check_minute = current_minute
                 
-                # # 🔄 每1分钟：同步数据库持仓状态与OKX实际持仓（测试模式）
-                # should_sync = (
-                #     not self.is_warmup_phase and
-                #     (last_sync_time is None or (current_time - last_sync_time).total_seconds() >= 60)  # 1分钟 = 60秒
-                # )
+                # 🔄 每5分钟：定期同步OKX状态（混合方案）
+                should_periodic_sync = (
+                    not self.is_warmup_phase and
+                    (last_periodic_sync_time is None or (current_time - last_periodic_sync_time).total_seconds() >= 300)  # 5分钟 = 300秒
+                )
                 
-                # if should_sync:
-                #     self.sync_open_trades_with_okx()
-                #     last_sync_time = current_time
+                if should_periodic_sync:
+                    self.periodic_sync_with_okx()
+                    last_periodic_sync_time = current_time
                 
                 time.sleep(1)
                 
