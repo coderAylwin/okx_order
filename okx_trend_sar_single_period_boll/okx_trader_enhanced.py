@@ -185,11 +185,27 @@ class OKXTraderEnhanced:
             return result
         
         try:
-            # 1. 开仓 - 添加posSide参数
-            params = {
-                'posSide': 'long'  # 明确指定为多仓
-            }
-            entry_order = self.exchange.create_market_buy_order(symbol, amount, params)
+            # 1. 开仓 - 根据持仓模式决定是否添加posSide参数
+            # 双向持仓模式：需要posSide参数
+            # 单向持仓模式（买卖模式）：不需要posSide参数
+            try:
+                # 先尝试双向持仓模式（带posSide参数）
+                params = {
+                    'posSide': 'long'  # 明确指定为多仓
+                }
+                entry_order = self.exchange.create_market_buy_order(symbol, amount, params)
+            except Exception as e1:
+                error_msg = str(e1)
+                # 如果是posSide参数错误，说明是单向持仓模式
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    print(f"🔄 检测到单向持仓模式，重试不带posSide参数...")
+                    # 单向持仓模式：不传posSide参数
+                    params = {}
+                    entry_order = self.exchange.create_market_buy_order(symbol, amount, params)
+                else:
+                    # 其他错误，继续抛出
+                    raise e1
+            
             result['entry_order'] = entry_order
             print(f"✅ 开多单成功: {symbol}, 数量: {amount}, 订单ID: {entry_order['id']}")
             
@@ -246,11 +262,27 @@ class OKXTraderEnhanced:
             return result
         
         try:
-            # 1. 开仓 - 添加posSide参数
-            params = {
-                'posSide': 'short'  # 明确指定为空仓
-            }
-            entry_order = self.exchange.create_market_sell_order(symbol, amount, params)
+            # 1. 开仓 - 根据持仓模式决定是否添加posSide参数
+            # 双向持仓模式：需要posSide参数
+            # 单向持仓模式（买卖模式）：不需要posSide参数
+            try:
+                # 先尝试双向持仓模式（带posSide参数）
+                params = {
+                    'posSide': 'short'  # 明确指定为空仓
+                }
+                entry_order = self.exchange.create_market_sell_order(symbol, amount, params)
+            except Exception as e1:
+                error_msg = str(e1)
+                # 如果是posSide参数错误，说明是单向持仓模式
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    print(f"🔄 检测到单向持仓模式，重试不带posSide参数...")
+                    # 单向持仓模式：不传posSide参数
+                    params = {}
+                    entry_order = self.exchange.create_market_sell_order(symbol, amount, params)
+                else:
+                    # 其他错误，继续抛出
+                    raise e1
+            
             result['entry_order'] = entry_order
             print(f"✅ 开空单成功: {symbol}, 数量: {amount}, 订单ID: {entry_order['id']}")
             
@@ -304,61 +336,65 @@ class OKXTraderEnhanced:
             print(f"   触发价格: ${trigger_price:.2f}")
             print(f"   数量: {amount}")
             
-            # 🔴 工作流程：先尝试Post-Only限价单（省手续费）
+            # 🔴 使用OKX条件单（真正的止损单）
+            # 先尝试双向持仓模式（带posSide参数）
             params = {
                 'tdMode': 'cross',  # 保证金模式：cross（全仓）或 isolated（逐仓）
-                'ordType': 'post_only',  # 🔴 只做Maker单，节省手续费
-                'px': str(trigger_price),  # 委托价格（Post-Only限价单）
+                'ordType': 'conditional',  # ✅ 条件单（真正的止损单）
+                'slTriggerPx': str(trigger_price),  # 止损触发价
+                'slOrdPx': str(trigger_price),  # 止损委托价（触发后以此价格执行）
                 'reduceOnly': True,  # 只减仓
                 'posSide': 'long' if side == 'long' else 'short',  # 明确指定仓位方向
             }
             
             print(f"🔍 止损单参数: {params}")
             
-            if side == 'long':
-                # 多单止损 = 向下触发，卖出平仓（限价单）
-                print(f"🔍 多单止损: 卖出 {amount} 张，价格 ${trigger_price:.2f}")
-                order = self.exchange.create_order(
-                    symbol, 'limit', 'sell', amount, trigger_price, params
-                )
-            else:
-                # 空单止损 = 向上触发，买入平仓（限价单）
-                print(f"🔍 空单止损: 买入 {amount} 张，价格 ${trigger_price:.2f}")
-                order = self.exchange.create_order(
-                    symbol, 'limit', 'buy', amount, trigger_price, params
-                )
-            
-            print(f"✅ 止损单设置成功（Post-Only限价单）: {symbol}, 价格: ${trigger_price:.2f}, 订单ID: {order['id']}")
-            return order
-            
-        except Exception as e:
-            print(f"❌ 设置止损单失败 ({symbol}): {e}")
-            # 如果Post-Only失败，尝试使用普通限价单
-            print(f"🔄 尝试使用普通限价单...")
             try:
-                params = {
-                    'tdMode': 'cross',
-                    'ordType': 'limit',  # 普通限价单
-                    'px': str(trigger_price),
-                    'reduceOnly': True,
-                    'posSide': 'long' if side == 'long' else 'short',
-                }
-                
                 if side == 'long':
+                    # 多单止损 = 向下触发，卖出平仓
+                    print(f"🔍 多单止损: 卖出 {amount} 张，触发价 ${trigger_price:.2f}")
                     order = self.exchange.create_order(
                         symbol, 'limit', 'sell', amount, trigger_price, params
                     )
                 else:
+                    # 空单止损 = 向上触发，买入平仓
+                    print(f"🔍 空单止损: 买入 {amount} 张，触发价 ${trigger_price:.2f}")
                     order = self.exchange.create_order(
                         symbol, 'limit', 'buy', amount, trigger_price, params
                     )
-                
-                print(f"✅ 止损单设置成功（普通限价单）: {symbol}, 价格: ${trigger_price:.2f}, 订单ID: {order['id']}")
-                return order
-                
-            except Exception as e2:
-                print(f"❌ 普通限价单也失败: {e2}")
-                return None
+            except Exception as e1:
+                error_msg = str(e1)
+                # 如果是posSide参数错误，说明是单向持仓模式
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    print(f"🔄 检测到单向持仓模式，重试不带posSide参数...")
+                    # 单向持仓模式：不传posSide参数
+                    params = {
+                        'tdMode': 'cross',
+                        'ordType': 'conditional',
+                        'slTriggerPx': str(trigger_price),
+                        'slOrdPx': str(trigger_price),
+                        'reduceOnly': True,
+                    }
+                    
+                    if side == 'long':
+                        order = self.exchange.create_order(
+                            symbol, 'limit', 'sell', amount, trigger_price, params
+                        )
+                    else:
+                        order = self.exchange.create_order(
+                            symbol, 'limit', 'buy', amount, trigger_price, params
+                        )
+                else:
+                    # 其他错误，继续抛出
+                    raise e1
+            
+            print(f"✅ 止损单设置成功（条件单）: {symbol}, 触发价: ${trigger_price:.2f}, 订单ID: {order['id']}")
+            return order
+            
+        except Exception as e:
+            print(f"❌ 设置止损单失败 ({symbol}): {e}")
+            print(f"   详细错误信息: {str(e)}")
+            return None
     
     def set_take_profit(self, symbol, side, trigger_price, amount):
         """设置止盈单（Post-Only限价单）
@@ -377,57 +413,61 @@ class OKXTraderEnhanced:
             return {'id': 'TEST_TP', 'status': 'simulated'}
         
         try:
-            # 🔴 工作流程：先尝试Post-Only限价单（省手续费）
+            # 🔴 使用OKX条件单（真正的止盈单）
+            # 先尝试双向持仓模式（带posSide参数）
             params = {
                 'tdMode': 'cross',
-                'ordType': 'post_only',  # 🔴 只做Maker单，节省手续费
-                'px': str(trigger_price),  # 委托价格（Post-Only限价单）
+                'ordType': 'conditional',  # ✅ 条件单（真正的止盈单）
+                'tpTriggerPx': str(trigger_price),  # 止盈触发价
+                'tpOrdPx': str(trigger_price),  # 止盈委托价（触发后以此价格执行）
                 'reduceOnly': True,
                 'posSide': 'long' if side == 'long' else 'short',  # 明确指定仓位方向
             }
             
-            if side == 'long':
-                # 多单止盈 = 向上触发，卖出平仓（限价单）
-                order = self.exchange.create_order(
-                    symbol, 'limit', 'sell', amount, trigger_price, params
-                )
-            else:
-                # 空单止盈 = 向下触发，买入平仓（限价单）
-                order = self.exchange.create_order(
-                    symbol, 'limit', 'buy', amount, trigger_price, params
-                )
-            
-            print(f"✅ 止盈单设置成功（Post-Only限价单）: {symbol}, 价格: ${trigger_price:.2f}, 订单ID: {order['id']}")
-            return order
-            
-        except Exception as e:
-            print(f"❌ 设置止盈单失败 ({symbol}): {e}")
-            # 如果Post-Only失败，尝试使用普通限价单
-            print(f"🔄 尝试使用普通限价单...")
             try:
-                params = {
-                    'tdMode': 'cross',
-                    'ordType': 'limit',  # 普通限价单
-                    'px': str(trigger_price),
-                    'reduceOnly': True,
-                    'posSide': 'long' if side == 'long' else 'short',
-                }
-                
                 if side == 'long':
+                    # 多单止盈 = 向上触发，卖出平仓
                     order = self.exchange.create_order(
                         symbol, 'limit', 'sell', amount, trigger_price, params
                     )
                 else:
+                    # 空单止盈 = 向下触发，买入平仓
                     order = self.exchange.create_order(
                         symbol, 'limit', 'buy', amount, trigger_price, params
                     )
-                
-                print(f"✅ 止盈单设置成功（普通限价单）: {symbol}, 价格: ${trigger_price:.2f}, 订单ID: {order['id']}")
-                return order
-                
-            except Exception as e2:
-                print(f"❌ 普通限价单也失败: {e2}")
-                return None
+            except Exception as e1:
+                error_msg = str(e1)
+                # 如果是posSide参数错误，说明是单向持仓模式
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    print(f"🔄 检测到单向持仓模式，重试不带posSide参数...")
+                    # 单向持仓模式：不传posSide参数
+                    params = {
+                        'tdMode': 'cross',
+                        'ordType': 'conditional',
+                        'tpTriggerPx': str(trigger_price),
+                        'tpOrdPx': str(trigger_price),
+                        'reduceOnly': True,
+                    }
+                    
+                    if side == 'long':
+                        order = self.exchange.create_order(
+                            symbol, 'limit', 'sell', amount, trigger_price, params
+                        )
+                    else:
+                        order = self.exchange.create_order(
+                            symbol, 'limit', 'buy', amount, trigger_price, params
+                        )
+                else:
+                    # 其他错误，继续抛出
+                    raise e1
+            
+            print(f"✅ 止盈单设置成功（条件单）: {symbol}, 触发价: ${trigger_price:.2f}, 订单ID: {order['id']}")
+            return order
+            
+        except Exception as e:
+            print(f"❌ 设置止盈单失败 ({symbol}): {e}")
+            print(f"   详细错误信息: {str(e)}")
+            return None
     
     def update_stop_loss(self, symbol, side, new_trigger_price, amount):
         """更新止损单（撤销旧单，挂新单）
