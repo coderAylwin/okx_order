@@ -318,4 +318,150 @@ class DingTalkNotifier:
         
         title = f"【平仓】{result_text} {return_rate:+.2f}%"
         self.send_message(title, content)
+    
+    def send_order_notification(self, order_type, symbol, side, amount, price, 
+                                stop_loss_info=None, take_profit_info=None, 
+                                order_result=None, extra_info=None):
+        """
+        发送订单通知（V2版本 - 支持限价单和条件单）
+        
+        Args:
+            order_type: 订单类型 ('OPEN_LONG', 'OPEN_SHORT', 'STOP_LOSS', 'TAKE_PROFIT')
+            symbol: 交易对
+            side: 方向 ('buy' 或 'sell')
+            amount: 数量
+            price: 价格
+            stop_loss_info: 止损信息 {'price': xxx, 'order_type': 'limit/conditional', 'order_id': xxx}
+            take_profit_info: 止盈信息 {'price': xxx, 'order_type': 'limit/conditional', 'order_id': xxx}
+            order_result: 订单执行结果
+            extra_info: 额外信息 (invested_amount, leverage等)
+        """
+        time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 📊 开仓通知
+        if order_type in ['OPEN_LONG', 'OPEN_SHORT']:
+            position_emoji = "🟢" if order_type == 'OPEN_LONG' else "🔴"
+            position_text = "做多" if order_type == 'OPEN_LONG' else "做空"
+            
+            content = f"## {position_emoji} 开仓成功 - {position_text}\n\n"
+            content += f"**⏰ 时间**: {time_str}\n\n"
+            content += f"---\n\n"
+            
+            # 交易对和订单信息
+            content += f"**📊 交易对**: {symbol}\n\n"
+            content += f"**💰 开仓价格**: ${price:.2f}\n\n"
+            content += f"**📦 合约数量**: {amount} 张\n\n"
+            
+            if extra_info:
+                if 'invested_amount' in extra_info:
+                    content += f"**💵 投入资金**: ${extra_info['invested_amount']:,.2f} USDT\n\n"
+                if 'leverage' in extra_info:
+                    content += f"**⚡ 杠杆倍数**: {extra_info['leverage']}x\n\n"
+            
+            if order_result and order_result.get('entry_order'):
+                entry_order_id = order_result['entry_order'].get('id', 'N/A')
+                content += f"**🆔 订单ID**: `{entry_order_id}`\n\n"
+            
+            content += f"---\n\n"
+            
+            # 🛡️ 止损信息
+            if stop_loss_info:
+                sl_price = stop_loss_info.get('price')
+                sl_type = stop_loss_info.get('order_type', 'unknown')
+                sl_order_id = stop_loss_info.get('order_id')
+                
+                sl_emoji = "🛡️" if sl_type == 'limit' else "⚠️"
+                sl_type_text = "限价单" if sl_type == 'limit' else "条件单"
+                
+                content += f"**{sl_emoji} 止损单**: ${sl_price:.2f} ({sl_type_text})\n\n"
+                
+                if sl_order_id:
+                    content += f"   - 订单ID: `{sl_order_id}`\n\n"
+                
+                if sl_type == 'conditional':
+                    content += f"   - 💡 价格接近时将优化为限价单\n\n"
+            
+            # 💰 止盈信息
+            if take_profit_info:
+                tp_price = take_profit_info.get('price')
+                tp_type = take_profit_info.get('order_type', 'limit')
+                tp_order_id = take_profit_info.get('order_id')
+                
+                content += f"**💰 止盈单**: ${tp_price:.2f} ({tp_type})\n\n"
+                
+                if tp_order_id:
+                    content += f"   - 订单ID: `{tp_order_id}`\n\n"
+            
+            # 风险收益比
+            if stop_loss_info and take_profit_info:
+                sl_pct = abs(price - stop_loss_info['price']) / price * 100
+                tp_pct = abs(take_profit_info['price'] - price) / price * 100
+                r_r_ratio = sl_pct / tp_pct if tp_pct > 0 else 0
+                
+                content += f"---\n\n"
+                content += f"**📊 风险收益比**: {r_r_ratio:.2f}:1\n\n"
+                content += f"   - 止损比例: {sl_pct:.2f}%\n\n"
+                content += f"   - 止盈比例: {tp_pct:.2f}%\n\n"
+            
+            title = f"【开仓】{position_text} ${price:.2f}"
+            self.send_message(title, content)
+        
+        # 🛡️ 止损更新通知
+        elif order_type == 'UPDATE_STOP_LOSS':
+            content = f"## 🛡️ 止损单更新\n\n"
+            content += f"**⏰ 时间**: {time_str}\n\n"
+            content += f"---\n\n"
+            
+            content += f"**📊 交易对**: {symbol}\n\n"
+            
+            if stop_loss_info:
+                old_price = stop_loss_info.get('old_price')
+                new_price = stop_loss_info.get('new_price', price)
+                sl_type = stop_loss_info.get('order_type', 'limit')
+                sl_order_id = stop_loss_info.get('order_id')
+                
+                sl_emoji = "🛡️" if sl_type == 'limit' else "⚠️"
+                sl_type_text = "限价单" if sl_type == 'limit' else "条件单"
+                
+                if old_price:
+                    price_change = ((new_price - old_price) / old_price) * 100
+                    arrow = "⬆️" if price_change > 0 else "⬇️"
+                    content += f"**旧止损价**: ${old_price:.2f}\n\n"
+                    content += f"**新止损价**: ${new_price:.2f} {arrow}\n\n"
+                    content += f"**价格变动**: {price_change:+.2f}%\n\n"
+                else:
+                    content += f"**新止损价**: ${new_price:.2f}\n\n"
+                
+                content += f"**{sl_emoji} 订单类型**: {sl_type_text}\n\n"
+                
+                if sl_order_id:
+                    content += f"**🆔 订单ID**: `{sl_order_id}`\n\n"
+                
+                if sl_type == 'conditional':
+                    content += f"\n💡 **提示**: 当前为条件单（价格限制），价格接近时将自动优化为限价单\n\n"
+            
+            title = f"【止损更新】${price:.2f}"
+            self.send_message(title, content)
+        
+        # 💰 止盈设置通知
+        elif order_type == 'SET_TAKE_PROFIT':
+            content = f"## 💰 止盈单设置\n\n"
+            content += f"**⏰ 时间**: {time_str}\n\n"
+            content += f"---\n\n"
+            
+            content += f"**📊 交易对**: {symbol}\n\n"
+            
+            if take_profit_info:
+                tp_price = take_profit_info.get('price', price)
+                tp_type = take_profit_info.get('order_type', 'limit')
+                tp_order_id = take_profit_info.get('order_id')
+                
+                content += f"**💰 止盈价格**: ${tp_price:.2f}\n\n"
+                content += f"**📋 订单类型**: {tp_type}\n\n"
+                
+                if tp_order_id:
+                    content += f"**🆔 订单ID**: `{tp_order_id}`\n\n"
+            
+            title = f"【止盈设置】${price:.2f}"
+            self.send_message(title, content)
 

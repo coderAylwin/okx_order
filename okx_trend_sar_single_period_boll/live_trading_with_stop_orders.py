@@ -282,6 +282,21 @@ class LiveTradingBotWithStopOrders:
                     signal_direction = 'long' if signal_type == 'OPEN_LONG' else 'short'
                     print(f"❌ OKX实际有持仓，拒绝{signal_direction}开仓")
                     
+                    # 🔴 打印OKX持仓详情
+                    for pos in positions:
+                        pos_symbol = pos.get('symbol', '')
+                        pos_inst_id = pos.get('info', {}).get('instId', '')
+                        contracts = self.safe_float(pos.get('contracts'))
+                        size = self.safe_float(pos.get('size'))
+                        notional = self.safe_float(pos.get('notional'))
+                        side = pos.get('side', '')
+                        
+                        if contracts > 0 or size > 0 or notional > 0:
+                            print(f"   📊 OKX持仓详情: {pos_symbol}/{pos_inst_id}, 方向: {side}, 数量: {contracts}")
+                    
+                    # 🔴 打印策略当前状态
+                    print(f"   🔍 策略当前状态: position={self.strategy.position}, entry_price={self.strategy.entry_price}")
+                    
                     # 🔴 同步OKX状态到本地（确保一致性）
                     self._sync_okx_to_local(positions)
                     return
@@ -379,6 +394,18 @@ class LiveTradingBotWithStopOrders:
                 self.logger.log(f"   止损单: {result['stop_loss_order']['id'] if result['stop_loss_order'] else '未设置'}")
                 self.logger.log(f"   止盈单: {result['take_profit_order']['id'] if result['take_profit_order'] else '未设置'}")
                 
+                # 🔴 同步真实交易数据到策略
+                trade_data = {
+                    'position': 'long',
+                    'entry_price': entry_price,
+                    'position_shares': contract_amount,
+                    'stop_loss_price': stop_loss,
+                    'take_profit_price': take_profit,
+                    'invested_amount': actual_invested,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.strategy.sync_real_trade_data(trade_data)
+                
                 # 🔴 保存开仓订单到数据库
                 if self._is_trading_db_available():
                     try:
@@ -415,6 +442,50 @@ class LiveTradingBotWithStopOrders:
                         self.current_entry_order_id = entry_order_id
                         
                         print(f"💾 已保存: 开仓订单({entry_order_id}) + 交易记录(ID={trade_id})")
+                        
+                        # 🔴 发送钉钉通知：开多单成功
+                        if hasattr(self.strategy, 'dingtalk_notifier') and self.strategy.dingtalk_notifier:
+                            try:
+                                # 准备止损信息
+                                stop_loss_info = None
+                                if result['stop_loss_order']:
+                                    stop_loss_info = {
+                                        'price': stop_loss,
+                                        'order_type': result['stop_loss_order'].get('_order_type', 'unknown'),
+                                        'order_id': result['stop_loss_order']['id']
+                                    }
+                                
+                                # 准备止盈信息
+                                take_profit_info = None
+                                if result['take_profit_order']:
+                                    take_profit_info = {
+                                        'price': take_profit,
+                                        'order_type': result['take_profit_order'].get('_order_type', 'limit'),
+                                        'order_id': result['take_profit_order']['id']
+                                    }
+                                
+                                # 准备额外信息
+                                leverage = TRADING_CONFIG.get('leverage', 1)
+                                extra_info = {
+                                    'invested_amount': actual_invested,
+                                    'leverage': leverage
+                                }
+                                
+                                # 发送通知
+                                self.strategy.dingtalk_notifier.send_order_notification(
+                                    order_type='OPEN_LONG',
+                                    symbol=self.symbol,
+                                    side='buy',
+                                    amount=contract_amount,
+                                    price=entry_price,
+                                    stop_loss_info=stop_loss_info,
+                                    take_profit_info=take_profit_info,
+                                    order_result=result,
+                                    extra_info=extra_info
+                                )
+                                print(f"📱 开多单钉钉通知已发送")
+                            except Exception as e:
+                                self.logger.log_warning(f"⚠️  发送开多单钉钉通知失败: {e}")
                         
                         # 3. 保存止损单到 okx_stop_orders（不保存到 okx_orders）
                         if result['stop_loss_order']:
@@ -539,6 +610,18 @@ class LiveTradingBotWithStopOrders:
                 self.logger.log(f"   止损单: {result['stop_loss_order']['id'] if result['stop_loss_order'] else '未设置'}")
                 self.logger.log(f"   止盈单: {result['take_profit_order']['id'] if result['take_profit_order'] else '未设置'}")
                 
+                # 🔴 同步真实交易数据到策略
+                trade_data = {
+                    'position': 'short',
+                    'entry_price': entry_price,
+                    'position_shares': contract_amount,
+                    'stop_loss_price': stop_loss,
+                    'take_profit_price': take_profit,
+                    'invested_amount': actual_invested,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.strategy.sync_real_trade_data(trade_data)
+                
                 # 🔴 保存开仓订单到数据库
                 if self._is_trading_db_available():
                     try:
@@ -622,18 +705,23 @@ class LiveTradingBotWithStopOrders:
                 else:
                     print(f"⚠️  交易数据库未连接，跳过保存订单")
         
-        # 🔴 平仓 - 主动市价平仓或OKX自动平仓
+        # 🔴 平仓信号 - V2版本不处理（止损止盈单已挂在OKX，由OKX自动执行）
         elif signal_type in ['STOP_LOSS_LONG', 'TAKE_PROFIT_LONG', 'STOP_LOSS_SHORT', 'TAKE_PROFIT_SHORT']:
             profit_loss = signal.get('profit_loss', 0)
             exit_price = signal.get('price', 0)
             exit_timestamp = signal.get('exit_timestamp', datetime.now())
             exit_reason = signal.get('reason', signal_type)
             
-            print(f"\n🔍 ========== 平仓信号处理 ==========")
-            print(f"🔍 信号类型: {signal_type}")
-            print(f"🔍 当前持仓: {self.current_position}")
-            print(f"🔍 持仓数量: {self.current_position_shares}")
-            print(f"🔍 平仓原因: {exit_reason}")
+            print(f"\n📊 ========== 平仓信号（仅记录，不执行） ==========")
+            print(f"📊 信号类型: {signal_type}")
+            print(f"📊 当前持仓: {self.current_position}")
+            print(f"📊 持仓数量: {self.current_position_shares}")
+            print(f"📊 平仓原因: {exit_reason}")
+            print(f"💡 V2版本: 止损止盈单已挂在OKX，由交易所自动执行")
+            print(f"💡 SAR转换信号会主动平仓并反手开仓")
+            
+            # 🔴 直接返回，不执行平仓操作
+            return
             
             # 🔴 判断是否需要主动平仓
             # 如果原因包含"SAR方向转换"，说明不是止损/止盈单触发，需要主动平仓
@@ -863,6 +951,9 @@ class LiveTradingBotWithStopOrders:
                         
                         # 更新当前止损单ID
                         self.current_stop_loss_order_id = new_order_id
+                        
+                        # 🔴 同步止损价格更新到策略
+                        self.strategy.sync_stop_loss_update(new_stop_loss)
                         
                         print(f"💾 ✅ 止损单更新已保存到okx_stop_orders表: new_order_id={new_order_id}")
                     else:
@@ -1272,17 +1363,96 @@ class LiveTradingBotWithStopOrders:
         self.current_stop_loss_order_id = None
         self.current_take_profit_order_id = None
         
-        # 清理策略对象的持仓状态
+        # 🔴 同步持仓平仓到策略
         if hasattr(self, 'strategy'):
-            self.strategy.position = None
-            self.strategy.entry_price = None
-            self.strategy.stop_loss_level = None
-            self.strategy.take_profit_level = None
-            self.strategy.max_loss_level = None
+            self.strategy.sync_position_close("持仓平仓")
             self.strategy.current_invested_amount = None
             self.strategy.position_shares = None
         
         print(f"✅ 持仓状态已清空")
+    
+    def _print_position_status(self):
+        """打印当前持仓状态（调试用）"""
+        print(f"\n{'='*80}")
+        print(f"📊 持仓状态检查 - {datetime.now().strftime('%H:%M:%S')}")
+        print(f"{'='*80}")
+        
+        # 打印机器人持仓状态
+        print(f"🤖 机器人状态:")
+        print(f"   持仓方向: {self.current_position}")
+        print(f"   持仓数量: {self.current_position_shares}")
+        print(f"   交易ID: {self.current_trade_id}")
+        print(f"   开仓订单ID: {self.current_entry_order_id}")
+        print(f"   止损订单ID: {self.current_stop_loss_order_id}")
+        print(f"   止盈订单ID: {self.current_take_profit_order_id}")
+        
+        # 打印策略持仓状态
+        if hasattr(self, 'strategy'):
+            strategy_status = self.strategy.get_current_status()
+            print(f"\n📈 策略状态:")
+            print(f"   策略持仓: {strategy_status.get('position')}")
+            print(f"   策略开仓价: ${strategy_status.get('entry_price', 0):.2f}")
+            print(f"   策略止损位: ${strategy_status.get('stop_loss_level', 0):.2f}")
+            print(f"   策略止盈位: ${strategy_status.get('take_profit_level', 0):.2f}")
+            print(f"   策略最大亏损位: ${strategy_status.get('max_loss_level', 0):.2f}")
+            print(f"   策略投入金额: ${strategy_status.get('current_invested_amount', 0):.2f}")
+            print(f"   策略持仓数量: {strategy_status.get('position_shares', 0)}")
+            
+            # 检查SAR值
+            sar_value = strategy_status.get('sar_value')
+            if sar_value:
+                print(f"   当前SAR值: ${sar_value:.2f}")
+            
+            # 🔴 对比机器人和策略的持仓信息
+            print(f"\n🔍 状态一致性检查:")
+            position_match = (self.current_position == strategy_status.get('position'))
+            shares_match = (abs(self.current_position_shares - strategy_status.get('position_shares', 0)) < 0.001)
+            
+            print(f"   持仓方向一致: {'✅' if position_match else '❌'} (机器人:{self.current_position} vs 策略:{strategy_status.get('position')})")
+            print(f"   持仓数量一致: {'✅' if shares_match else '❌'} (机器人:{self.current_position_shares} vs 策略:{strategy_status.get('position_shares', 0)})")
+            
+            if not position_match or not shares_match:
+                print(f"   ⚠️  状态不一致！需要同步")
+            else:
+                print(f"   ✅ 状态一致")
+        
+        # 检查OKX实际持仓
+        try:
+            if hasattr(self.trader, 'exchange') and self.trader.exchange:
+                positions = self.trader.exchange.fetch_positions([self.symbol])
+                okx_position = None
+                for pos in positions:
+                    if pos.get('symbol') == self.symbol.replace('-', '/') + ':USDT':
+                        okx_position = pos
+                        break
+                
+                print(f"\n🏦 OKX实际持仓:")
+                if okx_position and float(okx_position.get('contracts', 0)) != 0:
+                    print(f"   OKX持仓方向: {okx_position.get('side', 'unknown')}")
+                    print(f"   OKX持仓数量: {okx_position.get('contracts', 0)}")
+                    print(f"   OKX开仓价: ${okx_position.get('entryPrice', 0):.2f}")
+                    print(f"   OKX未实现盈亏: ${okx_position.get('unrealizedPnl', 0):.2f}")
+                    
+                    # 🔴 对比OKX和本地状态
+                    okx_side = 'long' if okx_position.get('side') == 'long' else 'short' if okx_position.get('side') == 'short' else None
+                    okx_contracts = float(okx_position.get('contracts', 0))
+                    
+                    print(f"\n🔍 OKX vs 本地状态对比:")
+                    print(f"   持仓方向一致: {'✅' if self.current_position == okx_side else '❌'} (本地:{self.current_position} vs OKX:{okx_side})")
+                    print(f"   持仓数量一致: {'✅' if abs(self.current_position_shares - okx_contracts) < 0.001 else '❌'} (本地:{self.current_position_shares} vs OKX:{okx_contracts})")
+                    
+                    if self.current_position != okx_side or abs(self.current_position_shares - okx_contracts) >= 0.001:
+                        print(f"   ⚠️  OKX与本地状态不一致！需要同步")
+                else:
+                    print(f"   OKX无持仓")
+                    
+                    # 如果OKX无持仓但本地有持仓
+                    if self.current_position:
+                        print(f"   ⚠️  本地有持仓但OKX无持仓！状态不一致")
+        except Exception as e:
+            print(f"\n🏦 OKX持仓检查失败: {e}")
+        
+        print(f"{'='*80}\n")
     
     def _update_account_balance(self):
         """更新账户余额"""
@@ -1428,11 +1598,15 @@ class LiveTradingBotWithStopOrders:
             # 从数据库获取交易信息
             trade = self.trading_db.get_open_trade(self.symbol)
             if trade:
+                print(f"   🔄 同步策略状态: {position_side}, 开仓价=${trade.entry_price:.2f}, 数量={trade.amount}")
+                
                 # 同步策略对象状态
                 self.strategy.position = position_side
                 self.strategy.entry_price = trade.entry_price
                 self.strategy.position_shares = trade.amount
                 self.strategy.current_invested_amount = trade.invested_amount
+                
+                print(f"   ✅ 策略状态已更新: position={self.strategy.position}, entry_price={self.strategy.entry_price}")
                 
                 # 设置止损止盈位（从策略计算）
                 self.strategy.stop_loss_level = self.strategy.sar_indicator.get_stop_loss_level()
@@ -1451,6 +1625,7 @@ class LiveTradingBotWithStopOrders:
                 
                 self.logger.log(f"✅ 策略状态已同步: {position_side}, 开仓价=${trade.entry_price:.2f}")
             else:
+                print(f"   ⚠️  未找到交易记录，无法同步策略状态")
                 self.logger.log_warning("⚠️  无法同步策略状态：未找到交易记录")
                 
         except Exception as e:
@@ -2352,12 +2527,14 @@ class LiveTradingBotWithStopOrders:
         self.logger.log(f"🔍 每分钟08-13秒主动检查数据完整性（紧跟正常更新，确保周期末尾数据完整）")
         self.logger.log(f"🔔 每分钟18-23秒检查止损/止盈单状态（有持仓时）")
         self.logger.log(f"🔄 每5分钟定期同步OKX状态（混合方案）")
+        self.logger.log(f"🔍 每20秒检查并优化止损单（V2混合方案 - 条件单→限价单）")
         self.logger.log(f"🔄 开始监控市场...\n")
         
         last_update_minute = None
         last_check_minute = None
         last_stop_check_minute = None
         last_periodic_sync_time = None  # 记录上次定期同步时间
+        last_optimize_check_time = None  # 🔴 记录上次止损单优化检查时间
         
         while self.is_running:
             try:
@@ -2411,6 +2588,27 @@ class LiveTradingBotWithStopOrders:
                 if should_periodic_sync:
                     self.periodic_sync_with_okx()
                     last_periodic_sync_time = current_time
+                
+                # 🔴 每20秒：检查并优化止损单（V2混合方案）
+                should_optimize_check = (
+                    not self.is_warmup_phase and
+                    hasattr(self.trader, 'check_and_optimize_stop_orders') and
+                    (last_optimize_check_time is None or (current_time - last_optimize_check_time).total_seconds() >= 20)  # 20秒
+                )
+                
+                if should_optimize_check:
+                    self.trader.check_and_optimize_stop_orders()
+                    last_optimize_check_time = current_time
+                
+                # 📊 每分钟30-35秒：打印持仓信息（调试用）
+                should_print_position = (
+                    not self.is_warmup_phase and
+                    30 <= current_second <= 35 and
+                    (last_update_minute is None or current_minute > last_update_minute)
+                )
+                
+                if should_print_position:
+                    self._print_position_status()
                 
                 time.sleep(1)
                 

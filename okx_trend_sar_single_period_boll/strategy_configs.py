@@ -35,7 +35,7 @@ def get_strategy_config():
         'basis_change_threshold': 50,  # 中轨变化率阈值（低于此值不开仓）
         
         # 止盈止损配置
-        'fixed_take_profit_pct': 0.2,  # 固定止盈百分比（0表示无固定止盈）
+        'fixed_take_profit_pct': 0.55,  # 固定止盈百分比（0表示无固定止盈）
         'max_loss_pct': 0,  # 最大亏损百分比（0表示无最大亏损限制）
         
         # 🔴 钉钉消息推送配置

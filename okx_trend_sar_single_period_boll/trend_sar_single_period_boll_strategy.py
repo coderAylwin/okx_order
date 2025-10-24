@@ -768,6 +768,13 @@ class TrendSarStrategy:
         # 🔴 预热模式标志（预热期间不进行交易）
         self.is_warmup_mode = True
         
+        # 交易统计
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        self.total_pnl = 0.0
+        self.win_rate = 0.0
+        
     def warmup_filter(self, historical_data):
         """使用历史数据预热单周期SAR指标"""
         if not historical_data:
@@ -1035,6 +1042,12 @@ class TrendSarStrategy:
             else: # 这里注释掉后，就是一个方向只开一个仓位（回测不开仓效果还好一些）
                 print(f"  🔍 进入else分支（方向未改变）")
                 print(f"  🔍 self.position is None: {self.position is None}")
+                
+                # 🔴 修复：如果已有持仓且方向相同，不生成重复的开仓信号
+                if self.position is not None and self.position == current_direction:
+                    print(f"  ✅ 已有{current_direction}持仓，跳过重复开仓信号")
+                    return
+                
                 # 🔴 修改：不依赖本地持仓状态，让实盘交易脚本处理持仓检查
                 # 策略只负责生成信号，实盘脚本负责检查OKX实际持仓
                 print(f"  🔍 生成开仓信号（由实盘脚本检查OKX实际持仓）")
@@ -1505,6 +1518,88 @@ class TrendSarStrategy:
         print(f"        💰 部分仓位计算: 现金余额=${self.cash_balance:,.2f} × {position_size*100}% → 投入金额=${invested:,.2f}")
         return invested
     
+    def sync_real_trade_data(self, trade_data):
+        """同步真实交易数据到策略内部状态
+        
+        Args:
+            trade_data: dict 包含以下字段：
+                - position: 'long' 或 'short' 或 None
+                - entry_price: float 开仓价格
+                - position_shares: float 持仓数量
+                - stop_loss_price: float 止损价格
+                - take_profit_price: float 止盈价格
+                - invested_amount: float 投入金额
+                - timestamp: str 交易时间
+        """
+        print(f"\n🔄 同步真实交易数据到策略...")
+        print(f"   持仓方向: {trade_data.get('position', 'None')}")
+        print(f"   开仓价格: ${trade_data.get('entry_price', 0):.2f}")
+        print(f"   持仓数量: {trade_data.get('position_shares', 0):.4f}")
+        print(f"   止损价格: ${trade_data.get('stop_loss_price', 0):.2f}")
+        print(f"   止盈价格: ${trade_data.get('take_profit_price', 0):.2f}")
+        print(f"   投入金额: ${trade_data.get('invested_amount', 0):.2f}")
+        
+        # 同步持仓状态
+        self.position = trade_data.get('position')
+        self.entry_price = trade_data.get('entry_price', 0)
+        self.position_shares = trade_data.get('position_shares', 0)
+        self.current_invested_amount = trade_data.get('invested_amount', 0)
+        
+        # 同步止损止盈价格
+        if trade_data.get('stop_loss_price'):
+            self.stop_loss_level = trade_data['stop_loss_price']
+            self.max_loss_level = trade_data['stop_loss_price']  # 同步到最大亏损位
+        
+        if trade_data.get('take_profit_price'):
+            self.take_profit_level = trade_data['take_profit_price']
+        
+        # 更新现金余额（扣除投入金额）
+        if self.position and trade_data.get('invested_amount'):
+            self.cash_balance -= trade_data['invested_amount']
+        
+        # 更新交易统计
+        if self.position:
+            self.total_trades += 1
+        
+        print(f"✅ 策略状态同步完成")
+        print(f"   策略持仓: {self.position}")
+        print(f"   策略开仓价: ${self.entry_price:.2f}")
+        print(f"   策略止损位: ${self.stop_loss_level:.2f}")
+        print(f"   策略止盈位: ${self.take_profit_level:.2f}")
+    
+    def sync_stop_loss_update(self, new_stop_loss_price):
+        """同步止损价格更新
+        
+        Args:
+            new_stop_loss_price: float 新的止损价格
+        """
+        print(f"\n🔄 同步止损价格更新: ${self.stop_loss_level:.2f} → ${new_stop_loss_price:.2f}")
+        
+        old_stop_loss = self.stop_loss_level
+        self.stop_loss_level = new_stop_loss_price
+        self.max_loss_level = new_stop_loss_price  # 同步到最大亏损位
+        
+        print(f"✅ 止损价格已更新: ${old_stop_loss:.2f} → ${new_stop_loss_price:.2f}")
+    
+    def sync_position_close(self, close_reason="手动平仓"):
+        """同步持仓平仓
+        
+        Args:
+            close_reason: str 平仓原因
+        """
+        print(f"\n🔄 同步持仓平仓: {close_reason}")
+        
+        # 清空持仓状态
+        self.position = None
+        self.entry_price = 0
+        self.position_shares = 0
+        self.stop_loss_level = None
+        self.take_profit_level = None
+        self.max_loss_level = None
+        self.current_invested_amount = 0
+        
+        print(f"✅ 持仓状态已清空")
+
     def get_current_status(self):
         """获取当前单周期策略状态"""
         return {

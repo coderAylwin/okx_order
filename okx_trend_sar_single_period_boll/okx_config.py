@@ -7,28 +7,28 @@ OKX API 配置文件
 """
 
 # OKX API 配置
-# OKX_API_CONFIG = {
-#     'api_key': 'a1ffa3fd-834c-4ed8-8f1a-aa83aceaa892',           # 替换为你的 API Key
-#     'secret': '3968DCAB3420DFEF2110FD451625E61F',          # 替换为你的 Secret Key
-#     'password': 'g:68YsKuPnn4zf)vuAm,CO5J',          # 替换为你的 API Password
-#     'enableRateLimit': True,
-#     # 'proxies': {
-#     #     'https': 'http://127.0.0.1:1087',
-#     # },
-#     'timeout': 60000,
-#     'options': {
-#         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
-#     }
-# }
 OKX_API_CONFIG = {
-    'api_key': '3afaa787-5b41-4662-8a19-d08f593b8cba',           # 替换为你的 API Key
-    'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
-    'password': 'Ayw.72203991',          # 替换为你的 API Password
+    'api_key': 'a1ffa3fd-834c-4ed8-8f1a-aa83aceaa892',           # 替换为你的 API Key
+    'secret': '3968DCAB3420DFEF2110FD451625E61F',          # 替换为你的 Secret Key
+    'password': 'g:68YsKuPnn4zf)vuAm,CO5J',          # 替换为你的 API Password
     'enableRateLimit': True,
+    # 'proxies': {
+    #     'https': 'http://127.0.0.1:1087',
+    # },
+    'timeout': 60000,
     'options': {
         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
     }
 }
+# OKX_API_CONFIG = {
+#     'api_key': '3afaa787-5b41-4662-8a19-d08f593b8cba',           # 替换为你的 API Key
+#     'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
+#     'password': 'Ayw.72203991',          # 替换为你的 API Password
+#     'enableRateLimit': True,
+#     'options': {
+#         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
+#     }
+# }
 
 # 交易配置
 TRADING_CONFIG = {
