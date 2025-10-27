@@ -52,6 +52,7 @@ class OKXTraderV2:
         
         # 记录当前止损止盈单ID
         self.stop_loss_order_id = None
+        self.stop_loss_order_type = None  # 记录订单类型：'limit' 或 'conditional_limit'
         self.take_profit_order_id = None
         
         # 🔴 混合方案：监听待优化的止损止盈单
@@ -65,6 +66,39 @@ class OKXTraderV2:
         except Exception as e:
             print(f"❌ 获取订单簿失败: {e}")
             return None
+    
+    def _cancel_conditional_order(self, order_id, symbol):
+        """取消条件单（使用专用API）
+        
+        Args:
+            order_id: 条件单ID
+            symbol: 交易对
+            
+        Returns:
+            bool: 是否成功
+        """
+        try:
+            # 使用OKX的条件单取消API
+            # 参数格式：params 应该是一个列表，包含订单信息
+            params_list = [{
+                'instId': symbol,
+                'algoId': str(order_id)
+            }]
+            
+            response = self.exchange.private_post_trade_cancel_algos(params_list)
+            
+            if response.get('code') == '0':
+                print(f"✅ 条件单已取消: {order_id}")
+                return True
+            else:
+                error_msg = response.get('msg', 'Unknown error')
+                print(f"❌ 取消条件单失败: {error_msg}")
+                print(f"   响应详情: {response}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ 取消条件单异常: {e}")
+            return False
     
     def _get_bid_price(self, symbol, level=1):
         """获取买盘价格"""
@@ -510,6 +544,7 @@ class OKXTraderV2:
                 if status == 'closed':
                     print(f"   ⚠️  止损单已成交！成交价: ${order_status.get('average', 'unknown')}")
                     self.stop_loss_order_id = order['id']
+                    self.stop_loss_order_type = 'limit'
                     order['_order_type'] = 'limit'
                     return order
                 elif status == 'canceled':
@@ -519,6 +554,7 @@ class OKXTraderV2:
                 else:
                     print(f"   ✅ 止损单状态正常: {status}")
                     self.stop_loss_order_id = order['id']
+                    self.stop_loss_order_type = 'limit'
                     order['_order_type'] = 'limit'
                     return order
                     
@@ -533,6 +569,7 @@ class OKXTraderV2:
                     # 其他错误，继续使用这个订单
                     print(f"   ⚠️  无法确认订单状态，继续使用: {order['id']}")
                     self.stop_loss_order_id = order['id']
+                    self.stop_loss_order_type = 'limit'
                     order['_order_type'] = 'limit'
                     return order
             
@@ -546,6 +583,7 @@ class OKXTraderV2:
                 
                 if conditional_order:
                     self.stop_loss_order_id = conditional_order['id']
+                    self.stop_loss_order_type = 'conditional_limit'
                     print(f"   ✅ 条件止损单已设置: ID={conditional_order['id']}, 触发价=${trigger_price:.2f}")
                     conditional_order['_order_type'] = 'conditional_limit'
                     
@@ -554,7 +592,8 @@ class OKXTraderV2:
                         'conditional_order_id': conditional_order['id'],
                         'trigger_price': trigger_price,
                         'amount': amount,
-                        'side': side
+                        'side': side,
+                        'order_type': 'conditional_limit'  # 记录订单类型
                     }
                     print(f"   🔔 已加入监听队列: 价格到达 ${trigger_price * 0.99:.2f} - ${trigger_price * 1.01:.2f} 时优化为限价单")
                     
@@ -883,6 +922,7 @@ class OKXTraderV2:
             if symbol in self.pending_stop_loss:
                 del self.pending_stop_loss[symbol]
             self.stop_loss_order_id = None
+            self.stop_loss_order_type = None
             return True
         
         try:
@@ -891,24 +931,37 @@ class OKXTraderV2:
             # 🔴 方案1：如果有记录止损单ID，直接取消
             if self.stop_loss_order_id:
                 try:
-                    self.exchange.cancel_order(self.stop_loss_order_id, symbol)
+                    if self.stop_loss_order_type == 'conditional_limit':
+                        # 条件单：使用专用取消方法
+                        self._cancel_conditional_order(self.stop_loss_order_id, symbol)
+                    else:
+                        # 限价单：使用普通取消方法
+                        self.exchange.cancel_order(self.stop_loss_order_id, symbol)
                     print(f"   ✅ 已取消止损单: {self.stop_loss_order_id}")
                     self.stop_loss_order_id = None
+                    self.stop_loss_order_type = None
                     canceled_count += 1
                 except Exception as e:
                     print(f"   ⚠️  取消止损单{self.stop_loss_order_id}失败: {e}")
             
-            # 🔴 方案2：如果有pending队列中的条件单，也取消
+            # 🔴 方案2：如果有pending队列中的订单，也取消
             if symbol in self.pending_stop_loss:
                 pending = self.pending_stop_loss[symbol]
-                conditional_order_id = pending.get('conditional_order_id')
-                if conditional_order_id:
+                order_id = pending.get('conditional_order_id')
+                order_type = pending.get('order_type', 'conditional_limit')
+                
+                if order_id:
                     try:
-                        self.exchange.cancel_order(conditional_order_id, symbol)
-                        print(f"   ✅ 已取消条件止损单: {conditional_order_id}")
+                        if order_type == 'conditional_limit':
+                            # 条件单：使用专用取消方法
+                            self._cancel_conditional_order(order_id, symbol)
+                        else:
+                            # 限价单：使用普通取消方法
+                            self.exchange.cancel_order(order_id, symbol)
+                        print(f"   ✅ 已取消止损单: {order_id}")
                         canceled_count += 1
                     except Exception as e:
-                        print(f"   ⚠️  取消条件止损单失败: {e}")
+                        print(f"   ⚠️  取消止损单失败: {e}")
                 
                 # 清空队列
                 del self.pending_stop_loss[symbol]
@@ -956,35 +1009,96 @@ class OKXTraderV2:
                 
                 print(f"   📊 {symbol}: 当前价${current_price:.2f}, 止损价${trigger_price:.2f}, 价差{price_diff_pct:.2f}%")
                 
-                # 🔴 先检查条件单是否还存在
-                conditional_order_id = pending.get('conditional_order_id')
-                if conditional_order_id:
+                # 🔴 先检查订单是否还存在
+                order_id = pending.get('conditional_order_id')
+                order_type = pending.get('order_type', 'conditional_limit')  # 默认条件单
+                
+                if order_id:
                     try:
-                        print(f"   🔍 查询条件单状态: {conditional_order_id}")
-                        order_status = self.exchange.fetch_order(conditional_order_id, symbol)
-                        print(f"   📊 条件单API返回结果: {order_status}")
+                        print(f"   🔍 查询订单状态: {order_id} (类型: {order_type})")
                         
-                        if order_status.get('status') in ['closed', 'canceled']:
-                            print(f"   ⚠️  条件单已失效（{order_status.get('status')}），从队列移除")
+                        order_exists = False
+                        
+                        if order_type == 'conditional_limit':
+                            # 条件单：根据API文档，ordType是必须参数
+                            # 1. 先获取所有条件单
+                            params = {
+                                'ordType': 'conditional',  # 必须参数：查询止盈止损单
+                            }
+                            
+                            try:
+                                # 获取所有当前活跃的条件单
+                                response = self.exchange.private_get_trade_orders_algo_pending(params)
+                                print(f"   📊 获取到 {len(response.get('data', []))} 个条件单")
+                                
+                                if response.get('code') == '0' and response.get('data'):
+                                    # 在结果中查找匹配的订单ID
+                                    found_order = None
+                                    for algo_data in response['data']:
+                                        algo_id = algo_data.get('algoId', '')
+                                        if str(algo_id) == str(order_id):
+                                            found_order = algo_data
+                                            break
+                                    
+                                    if found_order:
+                                        state = found_order.get('state', 'live')
+                                        print(f"   ✅ 找到条件单，状态: {state}")
+                                        order_exists = True
+                                    else:
+                                        # 在当前委托列表中找不到匹配的订单
+                                        print(f"   ⚠️  条件单不在当前委托列表中")
+                                        # 打印所有条件单ID用于调试
+                                        all_ids = [d.get('algoId') for d in response['data']]
+                                        print(f"   📋 当前条件单ID列表: {all_ids}")
+                                else:
+                                    # 没有条件单
+                                    print(f"   ⚠️  当前没有活跃的条件单")
+                                    print(f"   📊 API响应: {response}")
+                                    
+                            except AttributeError:
+                                print(f"   ⚠️  exchange对象不支持条件单API")
+                            except Exception as e:
+                                print(f"   ⚠️  获取条件单列表失败: {e}")
+                                
+                        elif order_type == 'limit':
+                            # 限价单：使用普通订单API
+                            try:
+                                order_status = self.exchange.fetch_order(order_id, symbol)
+                                print(f"   📊 订单API返回结果: {order_status}")
+                                
+                                if order_status.get('status') in ['open', 'closed']:
+                                    print(f"   ✅ 限价单状态正常: {order_status.get('status')}")
+                                    order_exists = True
+                                elif order_status.get('status') in ['canceled']:
+                                    print(f"   ⚠️  限价单已取消")
+                                else:
+                                    print(f"   📊 限价单状态: {order_status.get('status')}")
+                                    
+                            except Exception as e:
+                                error_msg = str(e)
+                                print(f"   ❌ 限价单查询失败: {error_msg}")
+                                
+                        # 如果订单不存在，从队列移除
+                        if not order_exists:
+                            print(f"   ⚠️  订单不存在，从队列移除")
                             del self.pending_stop_loss[symbol]
                             continue
-                        else:
-                            print(f"   ✅ 条件单状态正常: {order_status.get('status')}")
+                            
                     except Exception as e:
                         error_msg = str(e)
-                        print(f"   ❌ 条件单API错误详情: {error_msg}")
+                        print(f"   ❌ 订单API错误详情: {error_msg}")
                         print(f"   🔍 错误类型: {type(e).__name__}")
                         
-                        if "51603" in error_msg or "Order does not exist" in error_msg:
-                            print(f"   ⚠️  条件单不存在，从队列移除")
+                        if "51603" in error_msg or "Order does not exist" in error_msg or "51600" in error_msg:
+                            print(f"   ⚠️  订单不存在，从队列移除")
                             del self.pending_stop_loss[symbol]
                             continue
                         else:
-                            print(f"   ⚠️  检查条件单状态失败: {e}")
+                            print(f"   ⚠️  检查订单状态失败: {e}")
                             continue
                 
                 # 如果价差 ≤ 1%，尝试优化
-                if price_diff_pct <= 1.0:
+                if price_diff_pct <= 0.5:
                     print(f"   💡 价格接近止损位（≤1%），尝试优化为限价单...")
                     
                     # 🔴 先检查：如果限价单会失败（价格已触发），就不要优化
@@ -1008,17 +1122,22 @@ class OKXTraderV2:
                     if should_skip:
                         continue
                     
-                    # 取消条件单
+                    # 取消订单（根据类型选择方法）
                     cancel_success = False
                     try:
                         if pending['conditional_order_id']:
-                            self.exchange.cancel_order(pending['conditional_order_id'], symbol)
-                            print(f"   ✅ 已取消条件单: {pending['conditional_order_id']}")
+                            if order_type == 'conditional_limit':
+                                # 条件单：使用专用取消方法
+                                self._cancel_conditional_order(pending['conditional_order_id'], symbol)
+                            else:
+                                # 限价单：使用普通取消方法
+                                self.exchange.cancel_order(pending['conditional_order_id'], symbol)
+                            print(f"   ✅ 已取消订单: {pending['conditional_order_id']}")
                             cancel_success = True
                     except Exception as e:
-                        print(f"   ⚠️  取消条件单失败: {e}")
+                        print(f"   ⚠️  取消订单失败: {e}")
                         # 如果取消失败（可能已经被触发了），就不要继续挂单
-                        print(f"   💡 条件单可能已触发，跳过优化")
+                        print(f"   💡 订单可能已触发，跳过优化")
                         del self.pending_stop_loss[symbol]
                         continue
                     
@@ -1037,9 +1156,10 @@ class OKXTraderV2:
                             print(f"   ✅ 优化成功！已替换为限价单")
                             del self.pending_stop_loss[symbol]
                         elif limit_order and limit_order.get('_order_type') == 'conditional_limit':
-                            # 降级为条件单：更新ID，继续监听
+                            # 降级为条件单：更新ID和类型，继续监听
                             print(f"   💡 降级为条件单，继续监听")
                             self.pending_stop_loss[symbol]['conditional_order_id'] = limit_order['id']
+                            self.pending_stop_loss[symbol]['order_type'] = 'conditional_limit'
                         else:
                             # 失败：移除队列（可能已经被触发了）
                             print(f"   ⚠️  挂单失败，从队列移除")
@@ -1057,20 +1177,47 @@ class OKXTraderV2:
         # 🔴 检查当前止损单状态
         if self.stop_loss_order_id:
             try:
-                print(f"   🔍 查询止损单状态: {self.stop_loss_order_id}")
-                order_status = self.exchange.fetch_order(self.stop_loss_order_id, symbol)
-                print(f"   📊 OKX API返回结果: {order_status}")
+                print(f"   🔍 查询止损单状态: {self.stop_loss_order_id} (类型: {self.stop_loss_order_type})")
                 
-                status = order_status.get('status', 'unknown')
-                print(f"   🔍 当前止损单状态: {status}")
-                if status == 'closed':
-                    print(f"   ⚠️  止损单已成交！成交价: ${order_status.get('average', 'unknown')}")
-                    self.stop_loss_order_id = None  # 清空ID
-                elif status == 'canceled':
-                    print(f"   ⚠️  止损单已取消！")
-                    self.stop_loss_order_id = None  # 清空ID
+                if self.stop_loss_order_type == 'conditional_limit':
+                    # 条件单：使用条件单API
+                    params = {'ordType': 'conditional'}
+                    response = self.exchange.private_get_trade_orders_algo_pending(params)
+                    
+                    if response.get('code') == '0' and response.get('data'):
+                        # 查找匹配的订单
+                        found = False
+                        for algo_data in response['data']:
+                            if str(algo_data.get('algoId', '')) == str(self.stop_loss_order_id):
+                                state = algo_data.get('state', 'live')
+                                print(f"   ✅ 条件单状态: {state}")
+                                found = True
+                                break
+                        
+                        if not found:
+                            print(f"   ⚠️  条件单不在当前委托列表中")
+                            self.stop_loss_order_id = None
+                            self.stop_loss_order_type = None
+                    else:
+                        print(f"   ⚠️  查询条件单失败: {response.get('msg')}")
                 else:
-                    print(f"   ✅ 止损单状态正常: {status}")
+                    # 限价单：使用普通订单API
+                    order_status = self.exchange.fetch_order(self.stop_loss_order_id, symbol)
+                    print(f"   📊 OKX API返回结果: {order_status}")
+                    
+                    status = order_status.get('status', 'unknown')
+                    print(f"   🔍 当前止损单状态: {status}")
+                    if status == 'closed':
+                        print(f"   ⚠️  止损单已成交！成交价: ${order_status.get('average', 'unknown')}")
+                        self.stop_loss_order_id = None  # 清空ID
+                        self.stop_loss_order_type = None
+                    elif status == 'canceled':
+                        print(f"   ⚠️  止损单已取消！")
+                        self.stop_loss_order_id = None  # 清空ID
+                        self.stop_loss_order_type = None
+                    else:
+                        print(f"   ✅ 止损单状态正常: {status}")
+                        
             except Exception as e:
                 error_msg = str(e)
                 print(f"   ❌ OKX API错误详情: {error_msg}")
@@ -1079,6 +1226,7 @@ class OKXTraderV2:
                 if "51603" in error_msg or "Order does not exist" in error_msg:
                     print(f"   ⚠️  止损单不存在（可能已触发或取消）: {self.stop_loss_order_id}")
                     self.stop_loss_order_id = None  # 清空ID
+                    self.stop_loss_order_type = None
                 else:
                     print(f"   ⚠️  检查止损单状态失败: {e}")
 

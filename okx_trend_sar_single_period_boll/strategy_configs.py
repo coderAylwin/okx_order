@@ -7,7 +7,7 @@ def get_strategy_config():
         # 基础配置
         'long_coin': 'ETH',
         'initial_capital': 100000,
-        'position_size_percentage': 10,
+        'position_size_percentage': 100,
         
         # 回测时间范围
         'start_date': '2025-09-01 00:00:00',
