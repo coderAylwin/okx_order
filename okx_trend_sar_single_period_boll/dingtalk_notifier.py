@@ -319,6 +319,113 @@ class DingTalkNotifier:
         title = f"【平仓】{result_text} {return_rate:+.2f}%"
         self.send_message(title, content)
     
+    def send_delta_volume_update(self, timestamp, delta_volume_percent, delta_volume_period, 
+                                 stop_loss_threshold, position=None, current_price=None,
+                                 total_buy_volume=None, total_sell_volume=None, 
+                                 current_kline_volume=None, history_count=None):
+        """
+        发送Delta Volume更新消息
+        
+        Args:
+            timestamp: 时间戳
+            delta_volume_percent: Delta Volume百分比
+            delta_volume_period: Delta Volume周期
+            stop_loss_threshold: 止损阈值
+            position: 当前持仓 ('long', 'short', None)
+            current_price: 当前价格（可选）
+            total_buy_volume: 总买入量（可选）
+            total_sell_volume: 总卖出量（可选）
+            current_kline_volume: 当前K线成交量（可选）
+            history_count: 历史K线数量（可选）
+        """
+        time_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 计算绝对值，判断是否接近止损阈值
+        abs_delta = abs(delta_volume_percent)
+        threshold_percent = stop_loss_threshold * 100
+        
+        # 判断市场情绪
+        if delta_volume_percent > 0:
+            sentiment = "📈 买入压力"
+            sentiment_emoji = "🟢"
+        elif delta_volume_percent < 0:
+            sentiment = "📉 卖出压力"
+            sentiment_emoji = "🔴"
+        else:
+            sentiment = "➡️ 中性"
+            sentiment_emoji = "⚪"
+        
+        # 判断是否接近止损阈值
+        if position == 'long':
+            # 多单：关注卖出压力
+            if delta_volume_percent < -stop_loss_threshold * 100:
+                warning = "⚠️ **接近止损阈值！**"
+                warning_emoji = "🚨"
+            elif delta_volume_percent < -stop_loss_threshold * 50:  # 50%阈值
+                warning = "⚠️ 注意卖出压力"
+                warning_emoji = "⚠️"
+            else:
+                warning = "✅ 正常"
+                warning_emoji = "✅"
+        elif position == 'short':
+            # 空单：关注买入压力
+            if delta_volume_percent > stop_loss_threshold * 100:
+                warning = "⚠️ **接近止损阈值！**"
+                warning_emoji = "🚨"
+            elif delta_volume_percent > stop_loss_threshold * 50:  # 50%阈值
+                warning = "⚠️ 注意买入压力"
+                warning_emoji = "⚠️"
+            else:
+                warning = "✅ 正常"
+                warning_emoji = "✅"
+        else:
+            warning = "无持仓"
+            warning_emoji = "⚪"
+        
+        content = f"## 📊 Delta Volume 更新\n\n"
+        content += f"**⏰ 时间**: {time_str}\n\n"
+        content += f"---\n\n"
+        
+        if position:
+            position_text = "做多" if position == 'long' else "做空"
+            content += f"**持仓状态**: {position_text}\n\n"
+        
+        if current_price:
+            content += f"**当前价格**: ${current_price:.2f}\n\n"
+        
+        content += f"**Delta Volume**: {delta_volume_percent:+.2f}%\n\n"
+        content += f"**市场情绪**: {sentiment_emoji} {sentiment}\n\n"
+        
+        # 添加成交量详情
+        if total_buy_volume is not None and total_sell_volume is not None:
+            total_volume = total_buy_volume + total_sell_volume
+            content += f"**成交量详情**:\n"
+            content += f"- 总买入量: {total_buy_volume:,.0f}\n"
+            content += f"- 总卖出量: {total_sell_volume:,.0f}\n"
+            content += f"- 总成交量: {total_volume:,.0f}\n\n"
+        
+        if current_kline_volume is not None and current_kline_volume > 0:
+            content += f"**当前K线成交量**: {current_kline_volume:,.0f}\n\n"
+        
+        if history_count is not None:
+            content += f"**历史K线数**: {history_count}/{delta_volume_period}\n\n"
+        
+        content += f"**周期长度**: {delta_volume_period}个K线\n\n"
+        content += f"**止损阈值**: ±{threshold_percent:.0f}%\n\n"
+        
+        content += f"---\n\n"
+        content += f"**风险提示**: {warning_emoji} {warning}\n\n"
+        
+        # 如果接近止损阈值，添加详细信息
+        if position == 'long' and delta_volume_percent < -stop_loss_threshold * 100:
+            content += f"⚠️ 多单警告：卖出压力{abs_delta:.2f}% ≥ {threshold_percent:.0f}%，可能触发Delta Volume止损\n\n"
+        elif position == 'short' and delta_volume_percent > stop_loss_threshold * 100:
+            content += f"⚠️ 空单警告：买入压力{abs_delta:.2f}% ≥ {threshold_percent:.0f}%，可能触发Delta Volume止损\n\n"
+        
+        title = f"【Delta Volume】{delta_volume_percent:+.2f}%"
+        result = self.send_message(title, content)
+        return result
+    
     def send_order_notification(self, order_type, symbol, side, amount, price, 
                                 stop_loss_info=None, take_profit_info=None, 
                                 order_result=None, extra_info=None):

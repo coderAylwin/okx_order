@@ -468,6 +468,77 @@ class OKXTraderV2:
             print(f"   ❌ 下限价单失败: {e}")
             return None
     
+    def _try_limit_order_only(self, symbol, side, trigger_price, amount):
+        """
+        只尝试挂限价单（不降级为条件单）
+        用于条件单挂成功后，重新尝试挂限价单的场景
+        
+        Returns:
+            dict: 限价单订单信息，或 None
+        """
+        print(f"   🔍 尝试挂限价单（不降级）...")
+        
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            if side == 'long':
+                # 多单止损：卖出 @ trigger_price
+                order_side = 'sell'
+                if current_price <= trigger_price:
+                    print(f"   ⚠️  止损价已触发 (当前价${current_price:.2f} <= 止损价${trigger_price:.2f})")
+                    return None
+            else:
+                # 空单止损：买入 @ trigger_price
+                order_side = 'buy'
+                if current_price >= trigger_price:
+                    print(f"   ⚠️  止损价已触发 (当前价${current_price:.2f} >= 止损价${trigger_price:.2f})")
+                    return None
+            
+            # 尝试 Post-Only 限价单
+            params = {
+                'reduceOnly': True,
+                'postOnly': True
+            }
+            
+            try:
+                params['posSide'] = side
+                order = self.exchange.create_limit_order(symbol, order_side, amount, trigger_price, params)
+            except Exception as e1:
+                error_msg = str(e1)
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    del params['posSide']
+                    order = self.exchange.create_limit_order(symbol, order_side, amount, trigger_price, params)
+                elif '51008' in error_msg or 'post_only' in error_msg.lower() or 'Post only' in error_msg:
+                    print(f"   ⚠️  Post-Only被拒绝（订单会立即成交）")
+                    return None
+                else:
+                    raise e1
+            
+            # 立即检查订单状态
+            try:
+                order_status = self.exchange.fetch_order(order['id'], symbol)
+                status = order_status.get('status', 'unknown')
+                
+                if status == 'closed':
+                    print(f"   ⚠️  限价单已成交！成交价: ${order_status.get('average', 'unknown')}")
+                    return order_status
+                elif status == 'canceled':
+                    print(f"   ⚠️  Post-Only限价单被系统撤销")
+                    return None
+                else:
+                    print(f"   ✅ 限价单状态正常: {status}")
+                    return order_status
+                    
+            except Exception as e:
+                print(f"   ⚠️  检查订单状态失败: {e}")
+                # 如果无法确认状态，返回订单（可能成功）
+                return order
+                
+        except Exception as e:
+            print(f"   ❌ 挂限价单失败: {e}")
+            return None
+    
     def _set_stop_loss_limit(self, symbol, side, trigger_price, amount):
         """
         设置止损限价单（优先限价，失败后降级为条件单）
@@ -582,22 +653,75 @@ class OKXTraderV2:
                 conditional_order = self._set_stop_loss_conditional(symbol, side, trigger_price, amount)
                 
                 if conditional_order:
-                    self.stop_loss_order_id = conditional_order['id']
-                    self.stop_loss_order_type = 'conditional_limit'
-                    print(f"   ✅ 条件止损单已设置: ID={conditional_order['id']}, 触发价=${trigger_price:.2f}")
-                    conditional_order['_order_type'] = 'conditional_limit'
+                    conditional_order_id = conditional_order['id']
+                    print(f"   ✅ 条件止损单已设置: ID={conditional_order_id}, 触发价=${trigger_price:.2f}")
                     
-                    # 🔴 加入监听队列（价格到达 trigger_price ± 1% 时，撤条件单改挂限价单）
-                    self.pending_stop_loss[symbol] = {
-                        'conditional_order_id': conditional_order['id'],
-                        'trigger_price': trigger_price,
-                        'amount': amount,
-                        'side': side,
-                        'order_type': 'conditional_limit'  # 记录订单类型
-                    }
-                    print(f"   🔔 已加入监听队列: 价格到达 ${trigger_price * 0.99:.2f} - ${trigger_price * 1.01:.2f} 时优化为限价单")
-                    
-                    return conditional_order
+                    # 🔴 策略优化：条件单挂成功后，立即尝试取消并重挂限价单
+                    print(f"   🔄 策略优化：取消条件单，重新尝试挂限价单...")
+                    try:
+                        # 取消刚创建的条件单
+                        self._cancel_conditional_order(conditional_order_id, symbol)
+                        print(f"   ✅ 已取消条件单: {conditional_order_id}")
+                        
+                        # 等待一小段时间，确保取消完成
+                        time.sleep(0.5)
+                        
+                        # 重新尝试挂限价单（只尝试限价单，不降级）
+                        print(f"   🔄 重新尝试方案1: 挂限价单（只尝试限价单，不降级）...")
+                        limit_order = self._try_limit_order_only(symbol, side, trigger_price, amount)
+                        
+                        # 如果限价单成功，直接返回
+                        if limit_order:
+                            print(f"   ✅ 重新挂限价单成功！使用限价单（省手续费）")
+                            self.stop_loss_order_id = limit_order['id']
+                            self.stop_loss_order_type = 'limit'
+                            limit_order['_order_type'] = 'limit'
+                            return limit_order
+                        else:
+                            # 如果重新挂限价单失败，重新创建条件单
+                            print(f"   ⚠️  重新挂限价单失败，重新创建条件单...")
+                            conditional_order = self._set_stop_loss_conditional(symbol, side, trigger_price, amount)
+                            if conditional_order:
+                                self.stop_loss_order_id = conditional_order['id']
+                                self.stop_loss_order_type = 'conditional_limit'
+                                conditional_order['_order_type'] = 'conditional_limit'
+                                
+                                # 🔴 加入监听队列（价格到达 trigger_price ± 1% 时，撤条件单改挂限价单）
+                                self.pending_stop_loss[symbol] = {
+                                    'conditional_order_id': conditional_order['id'],
+                                    'trigger_price': trigger_price,
+                                    'amount': amount,
+                                    'side': side,
+                                    'order_type': 'conditional_limit'
+                                }
+                                print(f"   🔔 已加入监听队列: 价格到达 ${trigger_price * 0.997:.2f} - ${trigger_price * 1.003:.2f} 时优化为限价单")
+                                return conditional_order
+                            else:
+                                print(f"   ❌ 重新创建条件单失败")
+                                return None
+                                
+                    except Exception as e_retry:
+                        print(f"   ⚠️  重试挂限价单过程出错: {e_retry}")
+                        # 如果重试过程出错，重新创建条件单
+                        print(f"   💡 重新创建条件单作为兜底")
+                        conditional_order = self._set_stop_loss_conditional(symbol, side, trigger_price, amount)
+                        if conditional_order:
+                            self.stop_loss_order_id = conditional_order['id']
+                            self.stop_loss_order_type = 'conditional_limit'
+                            conditional_order['_order_type'] = 'conditional_limit'
+                            
+                            # 🔴 加入监听队列
+                            self.pending_stop_loss[symbol] = {
+                                'conditional_order_id': conditional_order['id'],
+                                'trigger_price': trigger_price,
+                                'amount': amount,
+                                'side': side,
+                                'order_type': 'conditional_limit'
+                            }
+                            print(f"   🔔 已加入监听队列: 价格到达 ${trigger_price * 0.997:.2f} - ${trigger_price * 1.003:.2f} 时优化为限价单")
+                            return conditional_order
+                        else:
+                            return None
                 else:
                     print(f"   ❌ 条件单也失败了")
                     return None
@@ -609,10 +733,14 @@ class OKXTraderV2:
     def _set_stop_loss_conditional(self, symbol, side, trigger_price, amount):
         """设置条件止损单（兜底方案）
         
+        🎯 触发价策略优化：
+        - 多单止损（卖出）：触发价略高于挂单价，确保可靠触发
+        - 空单止损（买入）：触发价略低于挂单价，确保可靠触发
+        
         Args:
             symbol: 交易对
             side: 'long' 或 'short'
-            trigger_price: 触发价格
+            trigger_price: 策略要求的止损价格（挂单价）
             amount: 数量
         
         Returns:
@@ -623,18 +751,37 @@ class OKXTraderV2:
             return {'id': 'TEST_CONDITIONAL_SL', 'status': 'simulated'}
         
         try:
-            # 🔴 使用条件限价单（触发后以限价单成交，省手续费）
-            # 委托价直接用 trigger_price（触发后挂该价格的限价单）
+            # 🔴 获取当前价格，计算合理的触发价
+            ticker = self.exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            # 🎯 计算触发价和挂单价
+            # 挂单价 = trigger_price（策略要求的止损价）
+            order_price = trigger_price
+            
+            # 触发价设置：给缓冲空间，确保可靠触发
             if side == 'long':
-                # 多单止损：触发后卖出 @ trigger_price
+                # 多单止损（卖出）：价格下跌触发
+                # 触发价应该略高于挂单价（例如：触发价3700，挂单价3690）
+                # 这样价格跌到3700时触发，然后挂3690的卖单，有缓冲空间
+                trigger_buffer = max(trigger_price * 0.001, 0.5)  # 0.1%或最小0.5
+                actual_trigger_price = trigger_price + trigger_buffer
                 order_side = 'sell'
+                print(f"   📊 多单止损策略: 触发价=${actual_trigger_price:.2f} (高于挂单价${order_price:.2f})")
             else:
-                # 空单止损：触发后买入 @ trigger_price
+                # 空单止损（买入）：价格上涨触发
+                # 触发价应该略低于挂单价（例如：触发价3700，挂单价3710）
+                # 这样价格涨到3700时触发，然后挂3710的买单，有缓冲空间
+                trigger_buffer = max(trigger_price * 0.001, 0.5)  # 0.1%或最小0.5
+                actual_trigger_price = trigger_price - trigger_buffer
                 order_side = 'buy'
+                print(f"   📊 空单止损策略: 触发价=${actual_trigger_price:.2f} (低于挂单价${order_price:.2f})")
+            
+            print(f"   💡 执行逻辑: 价格触及${actual_trigger_price:.2f}时触发 → 挂${order_price:.2f}的限价单")
             
             params = {
-                'slTriggerPx': str(trigger_price),  # 止损触发价
-                'slOrdPx': str(trigger_price),      # 🔴 止损委托价（就用trigger_price）
+                'slTriggerPx': str(actual_trigger_price),  # 🎯 触发价（略高于/低于挂单价）
+                'slOrdPx': str(order_price),              # 🎯 挂单价（策略要求的止损价）
                 'reduceOnly': True
             }
             
@@ -642,9 +789,9 @@ class OKXTraderV2:
             try:
                 params['posSide'] = side
                 order = self.exchange.create_order(
-                    symbol, 'limit', order_side, amount, trigger_price, params
+                    symbol, 'limit', order_side, amount, order_price, params
                 )
-                print(f"   ✅ 条件止损限价单已设置: 触发价=${trigger_price:.2f}, 委托价=${trigger_price:.2f}, ID={order['id']}")
+                print(f"   ✅ 条件止损限价单已设置: 触发价=${actual_trigger_price:.2f}, 挂单价=${order_price:.2f}, ID={order['id']}")
                 return order
                 
             except Exception as e1:
@@ -654,9 +801,9 @@ class OKXTraderV2:
                     print(f"   🔄 检测到单向持仓模式，重试不带posSide...")
                     del params['posSide']
                     order = self.exchange.create_order(
-                        symbol, 'limit', order_side, amount, trigger_price, params
+                        symbol, 'limit', order_side, amount, order_price, params
                     )
-                    print(f"   ✅ 条件止损限价单已设置: 触发价=${trigger_price:.2f}, 委托价=${trigger_price:.2f}, ID={order['id']}")
+                    print(f"   ✅ 条件止损限价单已设置: 触发价=${actual_trigger_price:.2f}, 挂单价=${order_price:.2f}, ID={order['id']}")
                     return order
                 else:
                     raise e1
@@ -727,15 +874,33 @@ class OKXTraderV2:
             # Step 2: 降级为条件限价单（兜底方案）
             print(f"   📊 方案2: 使用条件限价单 (触发后Maker手续费0.02%)")
             try:
-                # 🔴 条件单的委托价也用 trigger_price（触发后以该价格限价成交）
+                # 🎯 计算触发价和挂单价（与止损单相同的策略）
+                # 挂单价 = trigger_price（策略要求的止盈价）
+                order_price = trigger_price
+                
+                # 触发价设置：给缓冲空间，确保可靠触发
                 if side == 'long':
+                    # 多单止盈（卖出）：价格上涨触发
+                    # 触发价应该略低于挂单价（例如：触发价3700，挂单价3710）
+                    # 这样价格涨到3700时触发，然后挂3710的卖单，有缓冲空间
+                    trigger_buffer = max(trigger_price * 0.001, 0.5)  # 0.03%或最小0.5
+                    actual_trigger_price = trigger_price - trigger_buffer
                     order_side = 'sell'
+                    print(f"   📊 多单止盈策略: 触发价=${actual_trigger_price:.2f} (低于挂单价${order_price:.2f})")
                 else:
+                    # 空单止盈（买入）：价格下跌触发
+                    # 触发价应该略高于挂单价（例如：触发价3700，挂单价3690）
+                    # 这样价格跌到3700时触发，然后挂3690的买单，有缓冲空间
+                    trigger_buffer = max(trigger_price * 0.001, 0.5)  # 0.03%或最小0.5
+                    actual_trigger_price = trigger_price + trigger_buffer
                     order_side = 'buy'
+                    print(f"   📊 空单止盈策略: 触发价=${actual_trigger_price:.2f} (高于挂单价${order_price:.2f})")
+                
+                print(f"   💡 执行逻辑: 价格触及${actual_trigger_price:.2f}时触发 → 挂${order_price:.2f}的限价单")
                 
                 params = {
-                    'tpTriggerPx': str(trigger_price),  # 止盈触发价
-                    'tpOrdPx': str(trigger_price),      # 🔴 止盈委托价（就用trigger_price）
+                    'tpTriggerPx': str(actual_trigger_price),  # 🎯 触发价（略低于/高于挂单价）
+                    'tpOrdPx': str(order_price),              # 🎯 挂单价（策略要求的止盈价）
                     'reduceOnly': True
                 }
                 
@@ -743,26 +908,190 @@ class OKXTraderV2:
                 try:
                     params['posSide'] = side
                     order = self.exchange.create_order(
-                        symbol, 'limit', order_side, amount, trigger_price, params
+                        symbol, 'limit', order_side, amount, order_price, params
                     )
                 except Exception as e1:
                     if '51000' in str(e1) or 'posSide' in str(e1):
                         print(f"   🔄 检测到单向持仓模式")
                         del params['posSide']
                         order = self.exchange.create_order(
-                            symbol, 'limit', order_side, amount, trigger_price, params
+                            symbol, 'limit', order_side, amount, order_price, params
                         )
                     else:
                         raise e1
                 
-                print(f"   ✅ 条件止盈单已设置: 触发价=${trigger_price:.2f}, 委托价=${trigger_price:.2f}, ID={order['id']}")
-                self.take_profit_order_id = order['id']
-                order['_order_type'] = 'conditional_limit'
-                return order
+                conditional_order_id = order['id']
+                print(f"   ✅ 条件止盈单已设置: 触发价=${actual_trigger_price:.2f}, 挂单价=${order_price:.2f}, ID={conditional_order_id}")
+                
+                # 🔴 策略优化：条件单挂成功后，立即尝试取消并重挂限价单
+                print(f"   🔄 策略优化：取消条件单，重新尝试挂限价单...")
+                try:
+                    # 取消刚创建的条件单
+                    self._cancel_conditional_order(conditional_order_id, symbol)
+                    print(f"   ✅ 已取消条件单: {conditional_order_id}")
+                    
+                    # 等待一小段时间，确保取消完成
+                    time.sleep(0.5)
+                    
+                    # 重新尝试挂限价单（只尝试限价单，不降级）
+                    print(f"   🔄 重新尝试方案1: 挂限价单（只尝试限价单，不降级）...")
+                    limit_order = self._try_take_profit_limit_order_only(symbol, side, trigger_price, amount)
+                    
+                    # 如果限价单成功，直接返回
+                    if limit_order:
+                        print(f"   ✅ 重新挂限价单成功！使用限价单（省手续费）")
+                        self.take_profit_order_id = limit_order['id']
+                        limit_order['_order_type'] = 'limit'
+                        return limit_order
+                    else:
+                        # 如果重新挂限价单失败，重新创建条件单
+                        print(f"   ⚠️  重新挂限价单失败，重新创建条件单...")
+                        conditional_order = self._set_take_profit_conditional(symbol, side, trigger_price, amount)
+                        if conditional_order:
+                            self.take_profit_order_id = conditional_order['id']
+                            conditional_order['_order_type'] = 'conditional_limit'
+                            return conditional_order
+                        else:
+                            print(f"   ❌ 重新创建条件单失败")
+                            return None
+                            
+                except Exception as e_retry:
+                    print(f"   ⚠️  重试挂限价单过程出错: {e_retry}")
+                    # 如果重试过程出错，重新创建条件单
+                    print(f"   💡 重新创建条件单作为兜底")
+                    conditional_order = self._set_take_profit_conditional(symbol, side, trigger_price, amount)
+                    if conditional_order:
+                        self.take_profit_order_id = conditional_order['id']
+                        conditional_order['_order_type'] = 'conditional_limit'
+                        return conditional_order
+                    else:
+                        return None
                 
             except Exception as e2:
                 print(f"   ❌ 条件单失败: {e2}")
                 return None
+    
+    def _try_take_profit_limit_order_only(self, symbol, side, trigger_price, amount):
+        """
+        只尝试挂止盈限价单（不降级为条件单）
+        用于条件单挂成功后，重新尝试挂限价单的场景
+        
+        Returns:
+            dict: 限价单订单信息，或 None
+        """
+        print(f"   🔍 尝试挂止盈限价单（不降级）...")
+        
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            if side == 'long':
+                # 多单止盈：卖出 @ trigger_price
+                order_side = 'sell'
+                if current_price >= trigger_price:
+                    print(f"   ⚠️  止盈价已触发 (当前价${current_price:.2f} >= 止盈价${trigger_price:.2f})")
+                    return None
+            else:
+                # 空单止盈：买入 @ trigger_price
+                order_side = 'buy'
+                if current_price <= trigger_price:
+                    print(f"   ⚠️  止盈价已触发 (当前价${current_price:.2f} <= 止盈价${trigger_price:.2f})")
+                    return None
+            
+            # 尝试 Post-Only 限价单
+            params = {
+                'reduceOnly': True,
+                'postOnly': True
+            }
+            
+            try:
+                params['posSide'] = side
+                order = self.exchange.create_limit_order(symbol, order_side, amount, trigger_price, params)
+            except Exception as e1:
+                error_msg = str(e1)
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    del params['posSide']
+                    order = self.exchange.create_limit_order(symbol, order_side, amount, trigger_price, params)
+                elif '51008' in error_msg or 'post_only' in error_msg.lower() or 'Post only' in error_msg:
+                    print(f"   ⚠️  Post-Only被拒绝（订单会立即成交）")
+                    return None
+                else:
+                    raise e1
+            
+            # 立即检查订单状态
+            try:
+                order_status = self.exchange.fetch_order(order['id'], symbol)
+                status = order_status.get('status', 'unknown')
+                
+                if status == 'closed':
+                    print(f"   ⚠️  限价单已成交！成交价: ${order_status.get('average', 'unknown')}")
+                    return order_status
+                elif status == 'canceled':
+                    print(f"   ⚠️  Post-Only限价单被系统撤销")
+                    return None
+                else:
+                    print(f"   ✅ 限价单状态正常: {status}")
+                    return order_status
+                    
+            except Exception as e:
+                print(f"   ⚠️  检查订单状态失败: {e}")
+                # 如果无法确认状态，返回订单（可能成功）
+                return order
+                
+        except Exception as e:
+            print(f"   ❌ 挂限价单失败: {e}")
+            return None
+    
+    def _set_take_profit_conditional(self, symbol, side, trigger_price, amount):
+        """
+        设置条件止盈单（内部方法，用于重新创建条件单）
+        
+        Returns:
+            dict: 条件单订单信息，或 None
+        """
+        try:
+            # 🎯 计算触发价和挂单价
+            order_price = trigger_price
+            
+            # 触发价设置：给缓冲空间，确保可靠触发
+            if side == 'long':
+                # 多单止盈（卖出）：价格上涨触发
+                trigger_buffer = max(trigger_price * 0.001, 0.5)
+                actual_trigger_price = trigger_price - trigger_buffer
+                order_side = 'sell'
+            else:
+                # 空单止盈（买入）：价格下跌触发
+                trigger_buffer = max(trigger_price * 0.001, 0.5)
+                actual_trigger_price = trigger_price + trigger_buffer
+                order_side = 'buy'
+            
+            params = {
+                'tpTriggerPx': str(actual_trigger_price),
+                'tpOrdPx': str(order_price),
+                'reduceOnly': True
+            }
+            
+            # 动态处理posSide参数
+            try:
+                params['posSide'] = side
+                order = self.exchange.create_order(
+                    symbol, 'limit', order_side, amount, order_price, params
+                )
+            except Exception as e1:
+                if '51000' in str(e1) or 'posSide' in str(e1):
+                    del params['posSide']
+                    order = self.exchange.create_order(
+                        symbol, 'limit', order_side, amount, order_price, params
+                    )
+                else:
+                    raise e1
+            
+            print(f"   ✅ 条件止盈单已重新创建: 触发价=${actual_trigger_price:.2f}, 挂单价=${order_price:.2f}, ID={order['id']}")
+            return order
+            
+        except Exception as e:
+            print(f"   ❌ 创建条件止盈单失败: {e}")
+            return None
     
     # 保留原有方法以兼容现有代码
     def get_latest_klines(self, symbol, timeframe='1m', limit=100):
@@ -1097,9 +1426,9 @@ class OKXTraderV2:
                             print(f"   ⚠️  检查订单状态失败: {e}")
                             continue
                 
-                # 如果价差 ≤ 1%，尝试优化
-                if price_diff_pct <= 0.5:
-                    print(f"   💡 价格接近止损位（≤1%），尝试优化为限价单...")
+                # 如果价差 ≤ 0.3%，尝试优化
+                if price_diff_pct <= 0.3:
+                    print(f"   💡 价格接近止损位（≤0.3%），尝试优化为限价单...")
                     
                     # 🔴 先检查：如果限价单会失败（价格已触发），就不要优化
                     # 获取当前市场价格

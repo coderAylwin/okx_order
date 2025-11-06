@@ -58,6 +58,8 @@ class OKXTraderV2:
         # 🔴 混合方案：监听待优化的止损止盈单
         self.pending_stop_loss = {}  # {symbol: {'side': 'long', 'trigger_price': 3800, 'amount': 1, 'conditional_order_id': 'xxx'}}
         self.pending_take_profit = {}  # 同上
+        # 🔴 监听待优化的开仓条件单
+        self.pending_entry_orders = {}  # {symbol: {'direction': 'long'/'short', 'limit_price': 158.64, 'amount': 1, 'conditional_order_id': 'xxx', 'stop_loss_price': xxx, 'take_profit_price': xxx}}
     
     def _get_orderbook(self, symbol):
         """直接使用ccxt获取订单簿"""
@@ -165,7 +167,7 @@ class OKXTraderV2:
             else:
                 contract_amount = round(contract_amount, 4)
         
-        print(f"💰 合约数量计算: {contract_amount} 张")
+        print(f"💰 合约数量计算: 保证金=${usdt_amount:.2f} × 95% × {leverage}倍杠杆 = 持仓价值=${position_value:.2f} → {contract_amount} 张")
         return contract_amount
     
     def open_long_with_limit_order(self, symbol, amount, stop_loss_price=None, take_profit_price=None):
@@ -217,6 +219,12 @@ class OKXTraderV2:
                 print(f"   买3价: ${bid3:.2f}")
                 entry_order = self._place_limit_order(symbol, 'buy', amount, bid3, timeout=10)
                 
+                # 🔴 检测到保证金不足错误，停止重试
+                if isinstance(entry_order, dict) and entry_order.get('error') == 'insufficient_margin':
+                    print(f"\n❌ 保证金不足，停止开仓")
+                    print(f"   错误: {entry_order.get('message', 'Unknown')}")
+                    break  # 停止循环
+                
                 # 🔴 如果买3会立即成交，尝试买4/买5
                 if not entry_order:
                     print(f"   💡 买3价已穿过，尝试买4价...")
@@ -224,6 +232,12 @@ class OKXTraderV2:
                     if bid4:
                         print(f"   买4价: ${bid4:.2f}")
                         entry_order = self._place_limit_order(symbol, 'buy', amount, bid4, timeout=10)
+                        
+                        # 🔴 检测到保证金不足错误，停止重试
+                        if isinstance(entry_order, dict) and entry_order.get('error') == 'insufficient_margin':
+                            print(f"\n❌ 保证金不足，停止开仓")
+                            print(f"   错误: {entry_order.get('message', 'Unknown')}")
+                            break  # 停止循环
                     
                     if not entry_order:
                         print(f"   💡 买4价已穿过，尝试买5价...")
@@ -231,9 +245,18 @@ class OKXTraderV2:
                         if bid5:
                             print(f"   买5价: ${bid5:.2f}")
                             entry_order = self._place_limit_order(symbol, 'buy', amount, bid5, timeout=10)
+                            
+                            # 🔴 检测到保证金不足错误，停止重试
+                            if isinstance(entry_order, dict) and entry_order.get('error') == 'insufficient_margin':
+                                print(f"\n❌ 保证金不足，停止开仓")
+                                print(f"   错误: {entry_order.get('message', 'Unknown')}")
+                                break  # 停止循环
             
-            # 如果还没成交，等待一小段时间再重试
+            # 如果还没成交，等待一小段时间再重试（但如果是保证金不足，已经break了）
             if not entry_order and attempt < max_attempts:
+                # 🔴 检查是否是保证金不足导致的停止
+                if isinstance(entry_order, dict) and entry_order.get('error') == 'insufficient_margin':
+                    break  # 已经break了，这里不会执行
                 print(f"   ⏳ 未成交，2秒后重试...")
                 time.sleep(2)
         
@@ -402,6 +425,86 @@ class OKXTraderV2:
         print(f"{'='*60}\n")
         return result
     
+    def _try_place_limit_order_immediately(self, symbol, side, amount, price):
+        """
+        立即尝试挂限价单（不等待成交，只检查是否能挂单）
+        
+        Args:
+            symbol: 交易对
+            side: 'buy' 或 'sell'
+            amount: 数量
+            price: 价格
+        
+        Returns:
+            dict: 订单信息（如果成功），或 None（如果失败）
+        """
+        try:
+            # 检查是否会立即成交
+            ticker = self.exchange.fetch_ticker(symbol)
+            
+            if side == 'buy':
+                best_ask = ticker.get('ask', ticker['last'])
+                if price >= best_ask:
+                    print(f"   ⚠️  限价单会立即成交 (限价${price:.2f} >= 卖一${best_ask:.2f})")
+                    print(f"   💡 无法挂限价单，将使用条件单")
+                    return None
+            else:
+                best_bid = ticker.get('bid', ticker['last'])
+                if price <= best_bid:
+                    print(f"   ⚠️  限价单会立即成交 (限价${price:.2f} <= 买一${best_bid:.2f})")
+                    print(f"   💡 无法挂限价单，将使用条件单")
+                    return None
+            
+            # 尝试挂限价单（使用Post-Only，如果会立即成交会被拒绝）
+            params = {
+                'postOnly': True  # 只做Maker
+            }
+            
+            if side == 'buy':
+                params['posSide'] = 'long'
+            else:
+                params['posSide'] = 'short'
+            
+            try:
+                order = self.exchange.create_limit_order(symbol, side, amount, price, params)
+            except Exception as e1:
+                error_msg = str(e1)
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    print(f"   🔄 检测到单向持仓模式，重试不带posSide...")
+                    del params['posSide']
+                    order = self.exchange.create_limit_order(symbol, side, amount, price, params)
+                elif '51008' in error_msg or 'post_only' in error_msg.lower() or 'Post only' in error_msg:
+                    print(f"   ⚠️  Post-Only被拒绝（订单会立即成交）")
+                    print(f"   💡 无法挂限价单，将使用条件单")
+                    return None
+                else:
+                    raise e1
+            
+            # 立即检查订单状态
+            try:
+                order_status = self.exchange.fetch_order(order['id'], symbol)
+                status = order_status.get('status', 'unknown')
+                
+                if status == 'closed':
+                    print(f"   ⚠️  限价单已成交！成交价: ${order_status.get('average', 'unknown')}")
+                    return order_status
+                elif status == 'canceled':
+                    print(f"   ⚠️  Post-Only限价单被系统撤销")
+                    print(f"   💡 无法挂限价单，将使用条件单")
+                    return None
+                else:
+                    print(f"   ✅ 限价单已挂: ID={order['id']}, 状态={status}")
+                    return order_status
+                    
+            except Exception as e:
+                print(f"   ⚠️  检查订单状态失败: {e}")
+                # 如果无法确认状态，返回订单（可能成功）
+                return order
+                
+        except Exception as e:
+            print(f"   ❌ 挂限价单失败: {e}")
+            return None
+    
     def _place_limit_order(self, symbol, side, amount, price, timeout=30, check_immediate_fill=True):
         """
         下限价单并等待成交
@@ -484,6 +587,14 @@ class OKXTraderV2:
             return None
             
         except Exception as e:
+            error_msg = str(e)
+            # 🔴 检测到"保证金不足"错误，停止重试
+            if '51008' in error_msg or 'Insufficient' in error_msg or 'margin' in error_msg.lower():
+                print(f"   ❌ 下限价单失败: 保证金不足")
+                print(f"   💡 错误信息: {error_msg}")
+                print(f"   ⚠️  停止重试，请检查账户可用保证金")
+                # 🔴 返回特殊标记，让上层知道是保证金不足
+                return {'error': 'insufficient_margin', 'message': error_msg}
             print(f"   ❌ 下限价单失败: {e}")
             return None
     
@@ -828,6 +939,374 @@ class OKXTraderV2:
         """兼容性方法：调用open_short_with_limit_order"""
         return self.open_short_with_limit_order(symbol, amount, stop_loss_price, take_profit_price)
     
+    def open_long_with_limit_price(self, symbol, amount, limit_price, stop_loss_price=None, take_profit_price=None):
+        """
+        在指定价格（支撑位/阻力位）挂限价单开多单
+        
+        策略：
+        1. 先尝试在指定价格挂限价单（不等待，立即尝试）
+        2. 如果限价单无法挂单，立即降级为条件单
+        3. 条件单加入监听队列，价格接近时自动优化为限价单
+        
+        Args:
+            symbol: 交易对符号
+            amount: 数量
+            limit_price: 限价单价格（支撑位/阻力位价格）
+            stop_loss_price: 止损价格
+            take_profit_price: 止盈价格
+        
+        Returns:
+            dict: 订单信息
+        """
+        result = {
+            'entry_order': None,
+            'stop_loss_order': None,
+            'take_profit_order': None
+        }
+        
+        if self.test_mode:
+            print(f"🧪 【测试模式】模拟在限价 ${limit_price:.2f} 开多单: {symbol}, 数量: {amount}")
+            result['entry_order'] = {'id': 'TEST_ENTRY_LIMIT', 'status': 'simulated'}
+            return result
+        
+        print(f"\n{'='*60}")
+        print(f"📌 在指定价格挂限价单开多单: {symbol}")
+        print(f"   限价: ${limit_price:.2f}")
+        print(f"{'='*60}")
+        
+        # 🔴 先检查当前价格与支撑位的关系
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            print(f"   📊 当前价格: ${current_price:.2f}, 支撑位: ${limit_price:.2f}")
+            
+            # 🔴 做多：如果当前价格 <= 支撑位，说明价格已经回调到位，可以立即开仓
+            if current_price <= limit_price:
+                print(f"   ✅ 当前价格${current_price:.2f}已经低于/等于支撑位${limit_price:.2f}")
+                print(f"   💡 价格已回调到位，立即开仓（使用买3/买4/买5价格）")
+                # 使用立即开仓模式（买3/买4/买5价格）
+                entry_order_result = self.open_long_with_limit_order(
+                    symbol, amount, stop_loss_price, take_profit_price
+                )
+                if entry_order_result.get('entry_order'):
+                    print(f"{'='*60}\n")
+                    return entry_order_result
+                else:
+                    print(f"   ⚠️  立即开仓失败，降级为条件单")
+                    # 继续执行条件单逻辑
+            else:
+                # 当前价格 > 支撑位，需要挂限价单等待价格回调
+                print(f"   📊 当前价格${current_price:.2f}高于支撑位${limit_price:.2f}")
+                print(f"   💡 需要挂限价单等待价格回调到支撑位")
+        except Exception as e:
+            print(f"   ⚠️  获取当前价格失败: {e}")
+            print(f"   💡 尝试挂限价单...")
+        
+        # Step 1: 当前价格高于支撑位，尝试在支撑位挂限价单（等待价格回调）
+        print(f"   📊 方案1: 尝试限价单 价格=${limit_price:.2f} (Maker手续费0.02%)")
+        
+        # 🔴 尝试立即挂限价单（不等待成交，只检查是否能挂单）
+        entry_order = self._try_place_limit_order_immediately(
+            symbol, 'buy', amount, limit_price
+        )
+        
+        if entry_order:
+            print(f"\n✅ 限价单已挂: 订单ID={entry_order['id']}")
+            result['entry_order'] = entry_order
+            
+            # 只有开仓成功才设置止损止盈
+            if stop_loss_price:
+                result['stop_loss_order'] = self._set_stop_loss_limit(
+                    symbol, 'long', stop_loss_price, amount
+                )
+            
+            if take_profit_price:
+                result['take_profit_order'] = self._set_take_profit_limit(
+                    symbol, 'long', take_profit_price, amount
+                )
+            
+            print(f"{'='*60}\n")
+            return result
+        
+        # Step 2: 限价单无法挂单，立即降级为条件单
+        print(f"\n   ⚠️  限价单无法挂单，立即降级为条件单")
+        print(f"   📊 方案2: 使用条件单 (触发后Maker手续费0.02%)")
+        
+        try:
+            # 获取当前价格，计算触发价
+            ticker = self.exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            # 做多：当价格下跌到支撑位时触发
+            # 触发价应该略高于限价（例如：限价158.64，触发价158.65）
+            # 这样价格跌到158.65时触发，然后挂158.64的买单
+            trigger_buffer = max(limit_price * 0.0005, 0.1)  # 0.05%或最小0.1
+            actual_trigger_price = limit_price + trigger_buffer
+            
+            print(f"   📊 多单条件单策略:")
+            print(f"      触发价: ${actual_trigger_price:.2f} (略高于限价${limit_price:.2f})")
+            print(f"      挂单价: ${limit_price:.2f}")
+            print(f"   💡 执行逻辑: 价格跌至${actual_trigger_price:.2f}时触发 → 挂${limit_price:.2f}的买单")
+            
+            # 🔴 使用OKX的algo_order API创建开仓条件单（计划委托）
+            # 注意：这不是止损止盈条件单，而是开仓条件单
+            algo_params = {
+                'instId': symbol,
+                'tdMode': 'cross',
+                'side': 'buy',
+                'ordType': 'conditional',  # 条件单类型
+                'sz': str(amount),  # 数量
+                'triggerPx': str(actual_trigger_price),  # 触发价
+                'orderPx': str(limit_price),  # 委托价（支撑位价格）
+            }
+            
+            # 动态处理posSide参数
+            try:
+                algo_params['posSide'] = 'long'
+                response = self.exchange.private_post_trade_order_algo(algo_params)
+            except Exception as e1:
+                error_msg = str(e1)
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    print(f"   🔄 检测到单向持仓模式，重试不带posSide...")
+                    if 'posSide' in algo_params:
+                        del algo_params['posSide']
+                    response = self.exchange.private_post_trade_order_algo(algo_params)
+                else:
+                    raise e1
+            
+            # 检查响应
+            if response.get('code') == '0' and response.get('data'):
+                order_data = response['data'][0]
+                conditional_order_id = order_data.get('algoId') or order_data.get('ordId')
+                order = {
+                    'id': conditional_order_id,
+                    'status': 'open',
+                    'type': 'conditional',
+                    'trigger_price': actual_trigger_price,
+                    'limit_price': limit_price
+                }
+            else:
+                error_msg = response.get('msg', 'Unknown error')
+                raise Exception(f"创建条件单失败: {error_msg}")
+            
+            conditional_order_id = order['id']
+            print(f"   ✅ 条件单已设置: 触发价=${actual_trigger_price:.2f}, 挂单价=${limit_price:.2f}, ID={conditional_order_id}")
+            
+            result['entry_order'] = {
+                'id': conditional_order_id,
+                'status': 'open',
+                'type': 'conditional',
+                'trigger_price': actual_trigger_price,
+                'limit_price': limit_price
+            }
+            
+            # 🔴 加入监听队列，价格接近时自动优化为限价单
+            self.pending_entry_orders[symbol] = {
+                'conditional_order_id': conditional_order_id,
+                'limit_price': limit_price,
+                'amount': amount,
+                'direction': 'long',
+                'stop_loss_price': stop_loss_price,
+                'take_profit_price': take_profit_price,
+                'order_type': 'conditional'
+            }
+            print(f"   🔔 已加入监听队列: 价格到达 ${limit_price * 0.997:.2f} - ${limit_price * 1.003:.2f} 时优化为限价单")
+            
+            # 🔴 注意：条件单挂单时，止损止盈暂不设置（需要等订单成交后）
+            # 止损止盈价格已保存在 pending_entry_orders 中，订单成交后会自动设置
+            print(f"   ⏳ 止损止盈将在开仓订单成交后自动设置")
+            
+            print(f"{'='*60}\n")
+            return result
+            
+        except Exception as e:
+            print(f"   ❌ 条件单失败: {e}")
+            print(f"{'='*60}\n")
+            return result
+    
+    def open_short_with_limit_price(self, symbol, amount, limit_price, stop_loss_price=None, take_profit_price=None):
+        """
+        在指定价格（支撑位/阻力位）挂限价单开空单
+        
+        策略：
+        1. 先尝试在指定价格挂限价单（不等待，立即尝试）
+        2. 如果限价单无法挂单，立即降级为条件单
+        3. 条件单加入监听队列，价格接近时自动优化为限价单
+        
+        Args:
+            symbol: 交易对符号
+            amount: 数量
+            limit_price: 限价单价格（支撑位/阻力位价格）
+            stop_loss_price: 止损价格
+            take_profit_price: 止盈价格
+        
+        Returns:
+            dict: 订单信息
+        """
+        result = {
+            'entry_order': None,
+            'stop_loss_order': None,
+            'take_profit_order': None
+        }
+        
+        if self.test_mode:
+            print(f"🧪 【测试模式】模拟在限价 ${limit_price:.2f} 开空单: {symbol}, 数量: {amount}")
+            result['entry_order'] = {'id': 'TEST_ENTRY_LIMIT', 'status': 'simulated'}
+            return result
+        
+        print(f"\n{'='*60}")
+        print(f"📌 在指定价格挂限价单开空单: {symbol}")
+        print(f"   限价: ${limit_price:.2f}")
+        print(f"{'='*60}")
+        
+        # 🔴 先检查当前价格与阻力位的关系
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            print(f"   📊 当前价格: ${current_price:.2f}, 阻力位: ${limit_price:.2f}")
+            
+            # 🔴 做空：如果当前价格 >= 阻力位，说明价格已经反弹到位，可以立即开仓
+            if current_price >= limit_price:
+                print(f"   ✅ 当前价格${current_price:.2f}已经高于/等于阻力位${limit_price:.2f}")
+                print(f"   💡 价格已反弹到位，立即开仓（使用卖3/卖4/卖5价格）")
+                # 使用立即开仓模式（卖3/卖4/卖5价格）
+                entry_order_result = self.open_short_with_limit_order(
+                    symbol, amount, stop_loss_price, take_profit_price
+                )
+                if entry_order_result.get('entry_order'):
+                    print(f"{'='*60}\n")
+                    return entry_order_result
+                else:
+                    print(f"   ⚠️  立即开仓失败，降级为条件单")
+                    # 继续执行条件单逻辑
+            else:
+                # 当前价格 < 阻力位，需要挂限价单等待价格反弹
+                print(f"   📊 当前价格${current_price:.2f}低于阻力位${limit_price:.2f}")
+                print(f"   💡 需要挂限价单等待价格反弹到阻力位")
+        except Exception as e:
+            print(f"   ⚠️  获取当前价格失败: {e}")
+            print(f"   💡 尝试挂限价单...")
+        
+        # Step 1: 当前价格低于阻力位，尝试在阻力位挂限价单（等待价格反弹）
+        print(f"   📊 方案1: 尝试限价单 价格=${limit_price:.2f} (Maker手续费0.02%)")
+        
+        # 🔴 尝试立即挂限价单（不等待成交，只检查是否能挂单）
+        entry_order = self._try_place_limit_order_immediately(
+            symbol, 'sell', amount, limit_price
+        )
+        
+        if entry_order:
+            print(f"\n✅ 限价单已挂: 订单ID={entry_order['id']}")
+            result['entry_order'] = entry_order
+            
+            # 只有开仓成功才设置止损止盈
+            if stop_loss_price:
+                result['stop_loss_order'] = self._set_stop_loss_limit(
+                    symbol, 'short', stop_loss_price, amount
+                )
+            
+            if take_profit_price:
+                result['take_profit_order'] = self._set_take_profit_limit(
+                    symbol, 'short', take_profit_price, amount
+                )
+            
+            print(f"{'='*60}\n")
+            return result
+        
+        # Step 2: 限价单无法挂单，立即降级为条件单
+        print(f"\n   ⚠️  限价单无法挂单，立即降级为条件单")
+        print(f"   📊 方案2: 使用条件单 (触发后Maker手续费0.02%)")
+        
+        try:
+            # 获取当前价格，计算触发价
+            ticker = self.exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            # 做空：当价格上涨到阻力位时触发
+            # 触发价应该略低于限价（例如：限价158.64，触发价158.63）
+            # 这样价格涨到158.63时触发，然后挂158.64的卖单
+            trigger_buffer = max(limit_price * 0.0005, 0.1)  # 0.05%或最小0.1
+            actual_trigger_price = limit_price - trigger_buffer
+            
+            print(f"   📊 空单条件单策略:")
+            print(f"      触发价: ${actual_trigger_price:.2f} (略低于限价${limit_price:.2f})")
+            print(f"      挂单价: ${limit_price:.2f}")
+            print(f"   💡 执行逻辑: 价格涨至${actual_trigger_price:.2f}时触发 → 挂${limit_price:.2f}的卖单")
+            
+            # 🔴 使用OKX的algo_order API创建开仓条件单（计划委托）
+            # 注意：这不是止损止盈条件单，而是开仓条件单
+            algo_params = {
+                'instId': symbol,
+                'tdMode': 'cross',
+                'side': 'sell',
+                'ordType': 'conditional',  # 条件单类型
+                'sz': str(amount),  # 数量
+                'triggerPx': str(actual_trigger_price),  # 触发价
+                'orderPx': str(limit_price),  # 委托价（阻力位价格）
+            }
+            
+            # 动态处理posSide参数
+            try:
+                algo_params['posSide'] = 'short'
+                response = self.exchange.private_post_trade_order_algo(algo_params)
+            except Exception as e1:
+                error_msg = str(e1)
+                if '51000' in error_msg or 'posSide' in error_msg:
+                    print(f"   🔄 检测到单向持仓模式，重试不带posSide...")
+                    if 'posSide' in algo_params:
+                        del algo_params['posSide']
+                    response = self.exchange.private_post_trade_order_algo(algo_params)
+                else:
+                    raise e1
+            
+            # 检查响应
+            if response.get('code') == '0' and response.get('data'):
+                order_data = response['data'][0]
+                conditional_order_id = order_data.get('algoId') or order_data.get('ordId')
+                order = {
+                    'id': conditional_order_id,
+                    'status': 'open',
+                    'type': 'conditional',
+                    'trigger_price': actual_trigger_price,
+                    'limit_price': limit_price
+                }
+            else:
+                error_msg = response.get('msg', 'Unknown error')
+                raise Exception(f"创建条件单失败: {error_msg}")
+            
+            conditional_order_id = order['id']
+            print(f"   ✅ 条件单已设置: 触发价=${actual_trigger_price:.2f}, 挂单价=${limit_price:.2f}, ID={conditional_order_id}")
+            
+            result['entry_order'] = {
+                'id': conditional_order_id,
+                'status': 'open',
+                'type': 'conditional',
+                'trigger_price': actual_trigger_price,
+                'limit_price': limit_price
+            }
+            
+            # 🔴 加入监听队列，价格接近时自动优化为限价单
+            self.pending_entry_orders[symbol] = {
+                'conditional_order_id': conditional_order_id,
+                'limit_price': limit_price,
+                'amount': amount,
+                'direction': 'short',
+                'stop_loss_price': stop_loss_price,
+                'take_profit_price': take_profit_price,
+                'order_type': 'conditional'
+            }
+            print(f"   🔔 已加入监听队列: 价格到达 ${limit_price * 0.997:.2f} - ${limit_price * 1.003:.2f} 时优化为限价单")
+            
+            print(f"{'='*60}\n")
+            return result
+            
+        except Exception as e:
+            print(f"   ❌ 条件单失败: {e}")
+            print(f"{'='*60}\n")
+            return result
+    
     def update_stop_loss(self, symbol, position_side, new_stop_loss, amount):
         """兼容性方法：更新止损单（混合方案）
         
@@ -996,18 +1475,201 @@ class OKXTraderV2:
             print(f"   ❌ 取消止损单失败: {e}")
             return False
     
+    def check_and_optimize_entry_orders(self):
+        """检查监听队列，优化开仓条件单为限价单（每10秒调用）
+        
+        遍历pending_entry_orders队列：
+        - 检查当前价格与目标限价的差距
+        - 如果 ≤ 0.3%，取消条件单，重新执行挂单逻辑（先挂限价单，失败就挂条件单）
+        """
+        if not self.pending_entry_orders:
+            return
+        
+        current_time = datetime.now().strftime('%H:%M:%S')
+        print(f"\n[{current_time}] 🔍 检查待优化的开仓条件单（队列：{len(self.pending_entry_orders)}个）")
+        
+        for symbol, pending in list(self.pending_entry_orders.items()):
+            try:
+                # 获取当前价格
+                ticker = self.exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+                limit_price = pending['limit_price']
+                
+                # 计算价差百分比
+                price_diff_pct = abs(current_price - limit_price) / current_price * 100
+                
+                print(f"   📊 {symbol}: 当前价${current_price:.2f}, 目标价${limit_price:.2f}, 价差{price_diff_pct:.2f}%")
+                
+                # 🔴 先检查订单是否还存在
+                order_id = pending.get('conditional_order_id')
+                
+                if order_id:
+                    try:
+                        # 查询条件单状态
+                        params = {'ordType': 'conditional'}
+                        response = self.exchange.private_get_trade_orders_algo_pending(params)
+                        
+                        order_exists = False
+                        if response.get('code') == '0' and response.get('data'):
+                            for algo_data in response['data']:
+                                if str(algo_data.get('algoId', '')) == str(order_id):
+                                    state = algo_data.get('state', 'live')
+                                    print(f"   ✅ 找到条件单，状态: {state}")
+                                    order_exists = True
+                                    break
+                        
+                        if not order_exists:
+                            print(f"   ⚠️  条件单不存在（可能已触发成交），检查是否已持仓...")
+                            
+                            # 🔴 检查是否有持仓（如果条件单已触发成交，应该已经有持仓了）
+                            try:
+                                positions = self.exchange.fetch_positions([symbol])
+                                has_position = False
+                                for pos in positions:
+                                    try:
+                                        contracts = float(pos.get('contracts', 0) or 0)
+                                        size = float(pos.get('size', 0) or 0)
+                                    except (ValueError, TypeError):
+                                        contracts = 0
+                                        size = 0
+                                    
+                                    if contracts > 0 or size > 0:
+                                        has_position = True
+                                        print(f"   ✅ 检测到持仓，条件单已成交！立即设置止损止盈...")
+                                        
+                                        # 🔴 设置止损止盈
+                                        stop_loss_price = pending.get('stop_loss_price')
+                                        take_profit_price = pending.get('take_profit_price')
+                                        amount = pending.get('amount')
+                                        direction = pending.get('direction')
+                                        
+                                        if stop_loss_price:
+                                            print(f"   🛡️  设置止损单: ${stop_loss_price:.2f}")
+                                            self._set_stop_loss_limit(
+                                                symbol, direction, stop_loss_price, amount
+                                            )
+                                        
+                                        if take_profit_price:
+                                            print(f"   🎯 设置止盈单: ${take_profit_price:.2f}")
+                                            self._set_take_profit_limit(
+                                                symbol, direction, take_profit_price, amount
+                                            )
+                                        
+                                        print(f"   ✅ 止损止盈单已设置完成")
+                                        break
+                            except Exception as e:
+                                print(f"   ⚠️  检查持仓失败: {e}")
+                            
+                            # 从队列移除（无论是否成功设置止损止盈）
+                            del self.pending_entry_orders[symbol]
+                            continue
+                            
+                    except Exception as e:
+                        error_msg = str(e)
+                        if "51603" in error_msg or "Order does not exist" in error_msg or "51600" in error_msg:
+                            print(f"   ⚠️  条件单不存在，从队列移除")
+                            del self.pending_entry_orders[symbol]
+                            continue
+                        else:
+                            print(f"   ⚠️  检查条件单状态失败: {e}")
+                            continue
+                
+                # 如果价差 ≤ 0.3%，尝试优化
+                if price_diff_pct <= 0.3:
+                    print(f"   💡 价格接近目标价（≤0.3%），尝试优化为限价单...")
+                    
+                    # 🔴 先检查：如果限价单会失败（价格已触发），就不要优化
+                    direction = pending['direction']
+                    should_skip = False
+                    
+                    if direction == 'long':
+                        # 做多：如果当前价 <= 目标价，已经触发了
+                        if current_price <= limit_price:
+                            print(f"   ⚠️  价格已触发 (当前价${current_price:.2f} <= 目标价${limit_price:.2f})")
+                            print(f"   💡 保持条件单，不优化")
+                            should_skip = True
+                    else:
+                        # 做空：如果当前价 >= 目标价，已经触发了
+                        if current_price >= limit_price:
+                            print(f"   ⚠️  价格已触发 (当前价${current_price:.2f} >= 目标价${limit_price:.2f})")
+                            print(f"   💡 保持条件单，不优化")
+                            should_skip = True
+                    
+                    if should_skip:
+                        continue
+                    
+                    # 取消条件单
+                    cancel_success = False
+                    try:
+                        if pending['conditional_order_id']:
+                            self._cancel_conditional_order(pending['conditional_order_id'], symbol)
+                            print(f"   ✅ 已取消条件单: {pending['conditional_order_id']}")
+                            cancel_success = True
+                    except Exception as e:
+                        print(f"   ⚠️  取消条件单失败: {e}")
+                        print(f"   💡 条件单可能已触发，跳过优化")
+                        del self.pending_entry_orders[symbol]
+                        continue
+                    
+                    # 🔴 只有取消成功才重新执行挂单逻辑
+                    if cancel_success:
+                        # 重新执行挂单逻辑（先挂限价单，失败就挂条件单）
+                        amount = pending['amount']
+                        stop_loss_price = pending.get('stop_loss_price')
+                        take_profit_price = pending.get('take_profit_price')
+                        
+                        if direction == 'long':
+                            result = self.open_long_with_limit_price(
+                                symbol, amount, limit_price, stop_loss_price, take_profit_price
+                            )
+                        else:
+                            result = self.open_short_with_limit_price(
+                                symbol, amount, limit_price, stop_loss_price, take_profit_price
+                            )
+                        
+                        # 检查结果
+                        if result.get('entry_order'):
+                            entry_order = result['entry_order']
+                            if entry_order.get('type') == 'conditional':
+                                # 仍然是条件单，更新队列中的ID
+                                print(f"   💡 降级为条件单，继续监听")
+                                self.pending_entry_orders[symbol]['conditional_order_id'] = entry_order['id']
+                                self.pending_entry_orders[symbol]['order_type'] = 'conditional'
+                            else:
+                                # 成功挂上限价单：从队列移除
+                                print(f"   ✅ 优化成功！已替换为限价单")
+                                if symbol in self.pending_entry_orders:
+                                    del self.pending_entry_orders[symbol]
+                        else:
+                            # 失败：移除队列（可能已经被触发了）
+                            print(f"   ⚠️  挂单失败，从队列移除")
+                            if symbol in self.pending_entry_orders:
+                                del self.pending_entry_orders[symbol]
+                
+            except Exception as e:
+                print(f"   ❌ 检查{symbol}失败: {e}")
+                continue
+        
+        if self.pending_entry_orders:
+            print(f"   📋 待优化开仓队列: {len(self.pending_entry_orders)}个")
+        else:
+            print(f"   ✅ 待优化开仓队列为空")
+    
     def check_and_optimize_stop_orders(self):
-        """检查监听队列，优化条件单为限价单（每20秒调用）
+        """检查监听队列，优化条件单为限价单（每10秒调用）
         
         遍历pending_stop_loss队列：
         - 检查当前价格与止损价的差距
-        - 如果 ≤ 1%，取消条件单，挂限价单
+        - 如果 ≤ 0.3%，取消条件单，挂限价单
         """
+        # 🔴 同时检查开仓条件单队列
+        self.check_and_optimize_entry_orders()
+        
         # 🔴 即使队列为空也打印（让用户知道在运行）
         current_time = datetime.now().strftime('%H:%M:%S')
         
         if not self.pending_stop_loss:
-            print(f"[{current_time}] 🔍 监听检查：待优化队列为空")
+            print(f"[{current_time}] 🔍 监听检查：待优化止损队列为空")
             return
         
         print(f"\n[{current_time}] 🔍 检查待优化的止损单（队列：{len(self.pending_stop_loss)}个）")

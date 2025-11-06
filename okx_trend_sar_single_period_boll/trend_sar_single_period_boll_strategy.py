@@ -690,7 +690,7 @@ class TrendSarStrategy:
     def __init__(self, timeframe='30m', length=14, damping=0.9, bands=1.0,
                  sar_start=0.02, sar_increment=0.02, sar_maximum=0.2,
                  mult=2.0, initial_capital=100000, position_size_percentage=100, 
-                 fixed_take_profit_pct=2.0, max_loss_pct=4.0, 
+                 fixed_take_profit_pct=2.0, max_stop_loss_pct=0,
                  volatility_timeframe='6h', volatility_length=14, volatility_mult=2.0, 
                  volatility_ema_period=90, volatility_threshold=0.8, **kwargs):
         """初始化单周期SAR策略"""
@@ -724,6 +724,21 @@ class TrendSarStrategy:
         # 初始化ATR计算器
         self.atr_calculator = ATRCalculator()
         
+        # 🔴 初始化Delta Volume相关属性（固定周期）
+        delta_volume_period = kwargs.get('delta_volume_period', 14)  # 默认14个周期
+        self.delta_volume_period = delta_volume_period
+        self.buy_volume_history = []   # 每根完整周期K线的买入量历史（按整个周期K线涨跌判断）
+        self.sell_volume_history = []  # 每根完整周期K线的卖出量历史（按整个周期K线涨跌判断）
+        self.current_kline_volume = 0  # 当前周期K线累积的总成交量（每周期重置）
+        self.current_period_buy_volume = 0   # 当前周期内按分钟实时分类的买入量（未完成周期使用）
+        self.current_period_sell_volume = 0  # 当前周期内按分钟实时分类的卖出量（未完成周期使用）
+        self.delta_volume_fixed = 0    # 固定周期Delta Volume值
+        self.delta_volume_percent_fixed = 0  # 固定周期Delta Volume百分比
+        
+        # 🔴 Delta Volume止损阈值配置
+        self.delta_volume_stop_loss_threshold = kwargs.get('delta_volume_stop_loss_threshold', 0.6)  # 默认60%
+        print(f"📊 Delta Volume配置: 周期={delta_volume_period}, 止损阈值={self.delta_volume_stop_loss_threshold*100:.0f}%")
+        
         # 🔴 初始化钉钉推送器
         dingtalk_webhook = kwargs.get('dingtalk_webhook', None)
         dingtalk_secret = kwargs.get('dingtalk_secret', None)
@@ -750,14 +765,13 @@ class TrendSarStrategy:
         
         # 止盈止损配置
         self.fixed_take_profit_pct = fixed_take_profit_pct
-        self.max_loss_pct = max_loss_pct
+        self.max_stop_loss_pct = max_stop_loss_pct  # 最大止损百分比（与SAR止损对比选择更近的，同时也作为硬性保护位）
         
         # 单周期交易状态
         self.position = None
         self.entry_price = None
         self.stop_loss_level = None
         self.take_profit_level = None
-        self.max_loss_level = None
         self.current_invested_amount = None
         self.position_shares = None
         
@@ -803,12 +817,70 @@ class TrendSarStrategy:
             
             # 预热主周期（volume 可能没有，使用 0）
             volume = data.get('volume', 0)
+            
+            # 🔴 预热阶段也累积成交量并按分钟分类（用于Delta Volume计算）
+            if volume > 0:
+                self.current_kline_volume += volume
+                # 预热阶段也按1分钟K线涨跌实时分类
+                if close_price > open_price:
+                    self.current_period_buy_volume += volume
+                elif close_price < open_price:
+                    self.current_period_sell_volume += volume
+            
+            # 🔴 预热阶段：每条1分钟数据都计算Delta Volume（模拟正式交易逻辑）
+            # 这样预热和正式交易可以无缝衔接
+            self._update_fixed_delta_volume(timestamp=timestamp, current_price=close_price)
+            
             new_kline = self.timeframe_manager.update_kline_data(
                 timestamp, open_price, high_price, low_price, close_price, volume
             )
             
             if new_kline is not None:
                 kline_count += 1
+                
+                # 🔴 在周期K线生成时，保存上一根K线的成交量（按涨跌分类到Delta Volume历史）
+                prev_volume = self.current_kline_volume if self.current_kline_volume > 0 else new_kline.get('volume', 0)
+                if prev_volume > 0:
+                    # 从new_kline中获取上一根K线的数据（new_kline就是刚保存的上一根K线）
+                    prev_open = new_kline['open']
+                    prev_close = new_kline['close']
+                    
+                    if prev_close > prev_open:
+                        # 阳线：总成交量归为买入量
+                        self.buy_volume_history.append(prev_volume)
+                        self.sell_volume_history.append(0)
+                        kline_type = "阳线(买入)"
+                    elif prev_close < prev_open:
+                        # 阴线：总成交量归为卖出量
+                        self.buy_volume_history.append(0)
+                        self.sell_volume_history.append(prev_volume)
+                        kline_type = "阴线(卖出)"
+                    else:
+                        # 十字星：不计入买卖量
+                        self.buy_volume_history.append(0)
+                        self.sell_volume_history.append(0)
+                        kline_type = "十字星(不计)"
+                    
+                    # 只保留最近N个周期
+                    if len(self.buy_volume_history) > self.delta_volume_period:
+                        self.buy_volume_history = self.buy_volume_history[-self.delta_volume_period:]
+                        self.sell_volume_history = self.sell_volume_history[-self.delta_volume_period:]
+                    
+                    # 🔴 预热阶段调试信息（仅显示前5个和后5个K线，避免刷屏）
+                    if kline_count <= 5 or (kline_count > 5 and len(self.buy_volume_history) <= 5):
+                        print(f"    📊 【预热-Delta Volume】K线#{kline_count}完成，保存: {kline_type} Open={prev_open:.2f}, Close={prev_close:.2f}, Vol={prev_volume:,.0f} | 历史长度={len(self.buy_volume_history)}")
+                elif new_kline.get('volume', 0) == 0:
+                    # 如果成交量为0，也保存（十字星）
+                    self.buy_volume_history.append(0)
+                    self.sell_volume_history.append(0)
+                    if len(self.buy_volume_history) > self.delta_volume_period:
+                        self.buy_volume_history = self.buy_volume_history[-self.delta_volume_period:]
+                        self.sell_volume_history = self.sell_volume_history[-self.delta_volume_period:]
+                
+                # 重置当前周期K线累积和分类（开始新的聚合周期）
+                self.current_kline_volume = 0
+                self.current_period_buy_volume = 0
+                self.current_period_sell_volume = 0
                 
                 # 🔴 在周期K线生成时更新ATR计算
                 self.atr_calculator.update_kline_end(
@@ -844,6 +916,18 @@ class TrendSarStrategy:
         print(f"\n✅ 单周期预热完成！")
         print(f"  📊 {self.timeframe}周期: {kline_count}个K线")
         
+        # 🔴 显示Delta Volume预热结果
+        print(f"\n  📊 Delta Volume预热结果:")
+        print(f"    历史K线数: {len(self.buy_volume_history)}/{self.delta_volume_period}")
+        if len(self.buy_volume_history) > 0:
+            total_buy_prewarm = sum(self.buy_volume_history)
+            total_sell_prewarm = sum(self.sell_volume_history)
+            print(f"    总买入量: {total_buy_prewarm:,.0f}")
+            print(f"    总卖出量: {total_sell_prewarm:,.0f}")
+            print(f"    当前K线累积成交量: {self.current_kline_volume:,.0f}")
+        else:
+            print(f"    ⚠️  警告: Delta Volume历史数据为空，请检查预热数据是否包含成交量字段")
+        
         # 显示最后一个K线的信息
         if self.timeframe_manager.current_period is not None:
             timeframe_minutes = self.timeframe_manager.get_timeframe_minutes()
@@ -862,9 +946,152 @@ class TrendSarStrategy:
         print(f"   当前趋势方向: {self.current_trend_direction}")
         print(f"   当前持仓状态: {self.position} (预热期间未进行交易)")
         print(f"\n📊 单周期SAR策略已准备好，当前趋势={self.current_trend_direction}，等待开仓机会！")
+    
+    def _update_fixed_delta_volume(self, timestamp=None, current_price=None):
+        """
+        每1分钟更新固定周期Delta Volume计算
+        
+        计算逻辑：
+        - Delta Volume周期 = delta_volume_period（例如14个周期）
+        - 取前(N-1)个完整周期K线的成交量（例如前13个完整15m K线）
+        - 加上当前第N个周期K线内按分钟实时分类的买卖量（未完成周期）
+        - 公式：Delta% = (买入总量 - 卖出总量) / 平均成交量 × 100
+        - 当第N个周期K线完成后，该K线的成交量会按整个周期K线涨跌保存到历史中
+        
+        注意：
+        - timestamp参数是显示时间（当前实际时间，例如14:58的数据显示为14:59）
+        - 已完成的周期K线：按整个周期K线涨跌判断（收盘>开盘=买入，收盘<开盘=卖出）
+        - 当前未完成的周期K线：按每分钟的1分钟K线涨跌实时分类
+        """
+        # 🔴 明显的打印：每次调用都打印，方便观察
+        # 预热期间简化日志，正式交易期间详细日志
+        time_str = timestamp.strftime('%H:%M:%S') if timestamp else 'N/A'
+        if not self.is_warmup_mode:
+            # 正式交易模式：详细日志
+            print(f"\n{'='*60}")
+            print(f"📊 【Delta Volume计算】开始 - 时间: {time_str}")
+            print(f"{'='*60}")
+        # 预热模式：不打印分隔线，减少日志输出
+        
+        # 1. 计算前(N-1)个完整周期K线的买卖量（固定值）
+        if len(self.buy_volume_history) > 0:
+            # 取前N-1个完整K线（例如：14个周期 = 前13个完整K线 + 当前第14个K线）
+            history_count = min(self.delta_volume_period - 1, 
+                              len(self.buy_volume_history))
+            # 取最后N-1个（即最新的N-1个完整周期）
+            total_buy_history = sum(self.buy_volume_history[-history_count:])
+            total_sell_history = sum(self.sell_volume_history[-history_count:])
+        else:
+            total_buy_history = 0
+            total_sell_history = 0
+            history_count = 0
+        
+        # 2. 当前第N个周期K线内按分钟实时分类的买卖量（未完成周期使用）
+        # 注意：当前周期未完成时，使用按分钟分类的买卖量；周期完成后会按整个周期K线涨跌保存到历史
+        
+        # 3. 计算总买卖量：历史(N-1)个完整周期（固定） + 当前周期内按分钟分类的买卖量（实时）
+        total_buy = total_buy_history + self.current_period_buy_volume
+        total_sell = total_sell_history + self.current_period_sell_volume
+        
+        # 计算Delta Volume
+        avg_volume = (total_buy + total_sell) / 2
+        if avg_volume > 0:
+            self.delta_volume_fixed = total_buy - total_sell
+            self.delta_volume_percent_fixed = (total_buy - total_sell) / avg_volume * 100
+        else:
+            self.delta_volume_fixed = 0
+            self.delta_volume_percent_fixed = 0
+        
+        # 🔴 打印计算结果（预热期间简化，正式交易期间详细）
+        if self.is_warmup_mode:
+            # 预热模式：只打印关键信息
+            print(f"📊 【预热-Delta Volume】时间: {time_str} | Delta%: {self.delta_volume_percent_fixed:+.2f}% | 历史K线: {len(self.buy_volume_history)}/{self.delta_volume_period}")
+        else:
+            # 正式交易模式：详细日志
+            print(f"📊 【Delta Volume计算结果】")
+            print(f"   Delta%: {self.delta_volume_percent_fixed:+.2f}%")
+            print(f"   Delta值: {self.delta_volume_fixed:,.0f}")
+            
+            # 🔴 区分显示历史成交量和当前周期按分钟分类的买卖量
+            print(f"   📊 历史成交量（固定，前{history_count}个完整周期K线）:")
+            print(f"      - 历史买入量: {total_buy_history:,.0f}")
+            print(f"      - 历史卖出量: {total_sell_history:,.0f}")
+            print(f"      - 历史总成交量: {total_buy_history + total_sell_history:,.0f}")
+            
+            if self.current_kline_volume > 0:
+                print(f"   📊 当前周期（未完成，按分钟实时分类）:")
+                print(f"      - 当前周期总成交量: {self.current_kline_volume:,.0f} (累积中)")
+                print(f"      - 按分钟分类买入量: {self.current_period_buy_volume:,.0f} (上涨1分钟K线的成交量)")
+                print(f"      - 按分钟分类卖出量: {self.current_period_sell_volume:,.0f} (下跌1分钟K线的成交量)")
+            
+            print(f"   📊 合计（用于Delta计算）:")
+            print(f"      - 总买入量: {total_buy:,.0f} (历史{total_buy_history:,.0f} + 当前周期{self.current_period_buy_volume:,.0f})")
+            print(f"      - 总卖出量: {total_sell:,.0f} (历史{total_sell_history:,.0f} + 当前周期{self.current_period_sell_volume:,.0f})")
+            print(f"      - 平均成交量: {avg_volume:,.0f}")
+            print(f"   历史K线数: {len(self.buy_volume_history)}/{self.delta_volume_period}")
+            print(f"   持仓状态: {self.position if self.position else '无持仓'}")
+            price_str = f"${current_price:.2f}" if current_price is not None else "N/A"
+            print(f"   当前价格: {price_str}")
+        
+        # 🔴 推送Delta Volume更新（每分钟都推送，只要有钉钉推送器和时间戳，且不在预热模式）
+        # 即使没有成交量数据也推送，可以告诉用户当前状态
+        
+        # 🔴 预热模式不推送，正式交易模式才推送
+        if self.is_warmup_mode:
+            # 预热模式：不推送，不打印推送状态（减少日志）
+            pass
+        elif self.dingtalk_notifier and timestamp is not None:
+            # 🔴 推送状态检查（只在正式交易模式）
+            print(f"\n📤 【Delta Volume推送状态检查】")
+            print(f"   钉钉推送器: ✅ 已初始化")
+            print(f"   时间戳: ✅ 有效")
+            try:
+                print(f"\n📤 【Delta Volume推送】开始推送钉钉消息...")
+                result = self.dingtalk_notifier.send_delta_volume_update(
+                    timestamp=timestamp,
+                    delta_volume_percent=self.delta_volume_percent_fixed,
+                    delta_volume_period=self.delta_volume_period,
+                    stop_loss_threshold=self.delta_volume_stop_loss_threshold,
+                    position=self.position,
+                    current_price=current_price,
+                    total_buy_volume=total_buy,
+                    total_sell_volume=total_sell,
+                    current_kline_volume=self.current_kline_volume,
+                    history_count=len(self.buy_volume_history)
+                )
+                # 检查推送结果
+                if result and isinstance(result, dict) and result.get('errcode') == 0:
+                    print(f"✅ 【Delta Volume推送】✅✅✅ 推送成功！✅✅✅ (errcode=0)")
+                elif result is None:
+                    print(f"⚠️  【Delta Volume推送】❌ 推送返回None，可能失败")
+                else:
+                    errcode = result.get('errcode', 'unknown') if isinstance(result, dict) else 'unknown'
+                    errmsg = result.get('errmsg', '未知错误') if isinstance(result, dict) else '未知错误'
+                    print(f"⚠️  【Delta Volume推送】❌ 推送可能失败: errcode={errcode}, errmsg={errmsg}")
+            except Exception as e:
+                print(f"❌ 【Delta Volume推送】❌❌❌ 推送异常: {e}")
+                import traceback
+                traceback.print_exc()
+        elif timestamp is None:
+            print(f"⚠️  【Delta Volume推送】❌ 跳过推送: timestamp为None")
+        elif not self.dingtalk_notifier:
+            print(f"⚠️  【Delta Volume推送】❌ 跳过推送: 钉钉推送器未初始化")
+        
+        # 只在正式交易模式打印结束分隔线
+        if not self.is_warmup_mode:
+            print(f"{'='*60}\n")
         
     def update(self, timestamp, open_price, high_price, low_price, close_price, volume=0, silent=False):
         """处理1分钟K线数据 - 单周期模式"""
+        # 🔴 调试：打印第一条数据的接收情况
+        if not hasattr(self, '_first_update_logged'):
+            self._first_update_logged = True
+            print(f"\n🔔 【策略更新】收到第一条数据:")
+            print(f"    时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else 'None'}")
+            print(f"    价格: ${close_price:.2f}")
+            print(f"    成交量: {volume:,.0f}")
+            print(f"    钉钉推送器状态: {'✅ 已初始化' if self.dingtalk_notifier else '❌ 未初始化'}")
+        
         signal_info = {
             'timestamp': timestamp,
             'timeframe': self.timeframe,
@@ -883,7 +1110,25 @@ class TrendSarStrategy:
         # 1.6. 更新ATR计算器累积数据（每分钟数据都记录，但不计算）
         self.atr_calculator.update_accumulate(close_price, high_price, low_price)
         
+        # 🔴 1.7. 每1分钟根据涨跌实时分类成交量（用于固定周期Delta Volume）
+        # 逻辑：当前周期未完成时，按每分钟的1分钟K线涨跌实时分类
+        #       - 上涨（收盘>开盘）：成交量计入买入量
+        #       - 下跌（收盘<开盘）：成交量计入卖出量
+        #       - 十字星（收盘=开盘）：不计入买卖量
+        if volume > 0:
+            self.current_kline_volume += volume
+            # 当前周期未完成时，按1分钟K线涨跌实时分类
+            if close_price > open_price:
+                # 上涨：计入买入量
+                self.current_period_buy_volume += volume
+            elif close_price < open_price:
+                # 下跌：计入卖出量
+                self.current_period_sell_volume += volume
+            # 如果收盘=开盘（十字星），不计入买卖量（保持原值）
+        
         # 2. 更新单时间周期聚合数据（SAR的4小时周期）
+        # 🔴 注意：先更新K线数据，如果生成新K线，会保存上一周期到历史
+        # 这样计算Delta Volume时可以使用最新的历史数据
         new_kline = self.timeframe_manager.update_kline_data(
             timestamp, open_price, high_price, low_price, close_price, volume
         )
@@ -893,7 +1138,14 @@ class TrendSarStrategy:
         
         sar_result = None
         
-        # 3. 更新SAR指标（当新K线生成时）
+        # 🔴 1.8. 每1分钟计算固定周期Delta Volume（并推送钉钉消息）
+        # 注意：在新K线生成之后计算，这样可以使用最新的历史数据
+        # 时间戳加1分钟显示当前实际时间（例如14:58:00的数据显示为14:59:00）
+        display_timestamp = timestamp + timedelta(minutes=1) if timestamp else None
+        print(f"\n🔄 【策略Update】正在调用 Delta Volume 计算... (显示时间: {display_timestamp.strftime('%H:%M:%S') if display_timestamp else 'N/A'})")
+        self._update_fixed_delta_volume(timestamp=display_timestamp, current_price=close_price)
+        
+                    # 3. 更新SAR指标（当新K线生成时）
         if new_kline is not None:
             
             timeframe_minutes = self.timeframe_manager.get_timeframe_minutes()
@@ -904,6 +1156,44 @@ class TrendSarStrategy:
             print(f"      📅 周期: {new_kline['timestamp'].strftime('%H:%M')} - {kline_end_time.strftime('%H:%M')}")
             print(f"      📊 开:${new_kline['open']:.2f} 高:${new_kline['high']:.2f} "
                   f"低:${new_kline['low']:.2f} 收:${new_kline['close']:.2f} 量:{new_kline.get('volume', 0):.2f}")
+            
+            # 🔴 3.0. 在新K线生成时，保存上一根完整周期K线的成交量（按整个周期K线涨跌分类）
+            # 逻辑：已完成的周期K线，按整个周期K线的涨跌判断（收盘>开盘=买入，收盘<开盘=卖出）
+            # 注意：在update_kline_data返回new_kline时，current_kline_volume还没有被重置（重置在下一行）
+            prev_volume = self.current_kline_volume if self.current_kline_volume > 0 else new_kline.get('volume', 0)
+            if prev_volume > 0:
+                # 从new_kline中获取上一根完整周期K线的数据（new_kline就是刚保存的上一根K线）
+                prev_open = new_kline['open']
+                prev_close = new_kline['close']
+                
+                # 按整个周期K线的涨跌判断（不是按分钟分类）
+                if prev_close > prev_open:
+                    # 阳线：整个周期K线的总成交量归为买入量
+                    self.buy_volume_history.append(prev_volume)
+                    self.sell_volume_history.append(0)
+                    kline_type = "阳线(买入)"
+                elif prev_close < prev_open:
+                    # 阴线：整个周期K线的总成交量归为卖出量
+                    self.buy_volume_history.append(0)
+                    self.sell_volume_history.append(prev_volume)
+                    kline_type = "阴线(卖出)"
+                else:
+                    # 十字星：不计入买卖量
+                    self.buy_volume_history.append(0)
+                    self.sell_volume_history.append(0)
+                    kline_type = "十字星(不计)"
+                
+                # 只保留最近N个周期
+                if len(self.buy_volume_history) > self.delta_volume_period:
+                    self.buy_volume_history = self.buy_volume_history[-self.delta_volume_period:]
+                    self.sell_volume_history = self.sell_volume_history[-self.delta_volume_period:]
+                
+                print(f"    📊 【Delta Volume】周期K线完成，保存: {kline_type} Open={prev_open:.2f}, Close={prev_close:.2f}, Vol={prev_volume:,.0f} | 历史长度={len(self.buy_volume_history)}")
+            
+            # 重置当前周期K线累积和分类（开始新的聚合周期）
+            self.current_kline_volume = 0
+            self.current_period_buy_volume = 0   # 重置当前周期的买入量
+            self.current_period_sell_volume = 0  # 重置当前周期的卖出量
             
             # 3.1. 在新K线生成时计算ATR（整个周期结束时）
             self.atr_calculator.update_kline_end(
@@ -921,6 +1211,7 @@ class TrendSarStrategy:
             
             print(f"  📊 {self.timeframe} SAR: {sar_result['sar_value']:.2f} | 方向: {'上升' if sar_result['sar_rising'] else '下降'}")
             print(f"  📊 {self.timeframe} RSI: {sar_result['rsi']:.2f} (周期{self.sar_indicator.rsi_period})")
+            print(f"  📊 {self.timeframe} Delta Volume: {self.delta_volume_percent_fixed:+.2f}% (周期{self.delta_volume_period}, 止损阈值{self.delta_volume_stop_loss_threshold*100:.0f}%)")
             print(f"  🎯 {self.timeframe}指标可用时间: {indicator_available_time.strftime('%H:%M')} (K线完成后)")
             
             # 3. 检查SAR方向改变（开仓信号或平仓反转信号）
@@ -978,6 +1269,43 @@ class TrendSarStrategy:
             signal_info['kline_timestamp'] = new_kline['timestamp']
         
         return signal_info
+    
+    def _calculate_optimal_stop_loss(self, sar_stop_loss, entry_price, position):
+        """
+        计算最优止损价格（对比SAR止损和最大止损，选择距离开仓价更近的）
+        
+        Args:
+            sar_stop_loss: float SAR止损价格
+            entry_price: float 开仓价格
+            position: str 'long' 或 'short'
+            
+        Returns:
+            tuple: (最优止损价格, 使用的止损类型描述)
+        """
+        if sar_stop_loss is None:
+            return None, None
+        
+        # 如果没有配置最大止损，直接使用SAR止损
+        if self.max_stop_loss_pct <= 0:
+            return sar_stop_loss, 'SAR止损'
+        
+        # 计算最大止损价格
+        if position == 'long':
+            # 多单：最大止损在开仓价下方
+            max_stop_loss = entry_price * (1 - self.max_stop_loss_pct / 100)
+            # 选择更高的止损（更接近开仓价，更宽松）
+            if max_stop_loss > sar_stop_loss:
+                return max_stop_loss, f'最大止损({self.max_stop_loss_pct}%)'
+            else:
+                return sar_stop_loss, 'SAR止损'
+        else:  # short
+            # 空单：最大止损在开仓价上方
+            max_stop_loss = entry_price * (1 + self.max_stop_loss_pct / 100)
+            # 选择更低的止损（更接近开仓价，更宽松）
+            if max_stop_loss < sar_stop_loss:
+                return max_stop_loss, f'最大止损({self.max_stop_loss_pct}%)'
+            else:
+                return sar_stop_loss, 'SAR止损'
     
     def _check_trend_change(self, sar_result, open_price, signal_info):
         """检查SAR方向改变，触发平仓反转信号"""
@@ -1187,8 +1515,19 @@ class TrendSarStrategy:
         
         print(f"        💰 合约仓位计算: 投入${actual_invested_amount:.2f} × {leverage}倍杠杆 ÷ ${contract_face_value}合约面值 = {self.position_shares:.1f}张合约")
         
-        # 初始止损设为当前SAR值
-        self.stop_loss_level = self.sar_indicator.get_stop_loss_level()
+        # 🔴 双重止损机制：对比SAR止损和最大止损，选择距离开仓价更近的
+        sar_stop_loss = self.sar_indicator.get_stop_loss_level()
+        self.stop_loss_level, stop_loss_type = self._calculate_optimal_stop_loss(
+            sar_stop_loss, entry_price, 'long'
+        )
+        
+        # 打印止损对比信息
+        if self.max_stop_loss_pct > 0:
+            max_stop_loss_price = entry_price * (1 - self.max_stop_loss_pct / 100)
+            print(f"        🛡️  SAR止损: ${sar_stop_loss:.2f} | 最大止损: ${max_stop_loss_price:.2f} ({self.max_stop_loss_pct}%)")
+            print(f"        ✅ 选择止损: ${self.stop_loss_level:.2f} ({stop_loss_type})")
+        else:
+            print(f"        🛡️  止损: ${self.stop_loss_level:.2f} (SAR止损)")
         
         # 计算固定止盈位
         if self.fixed_take_profit_pct > 0:
@@ -1196,27 +1535,20 @@ class TrendSarStrategy:
         else:
             self.take_profit_level = None
         
-        # 计算最大亏损位
-        if self.max_loss_pct > 0:
-            self.max_loss_level = self.entry_price * (1 - self.max_loss_pct / 100)
-        else:
-            self.max_loss_level = None
-        
         signal_info['signals'].append({
             'type': 'OPEN_LONG',
             'price': self.entry_price,
             'stop_loss': self.stop_loss_level,
             'take_profit': self.take_profit_level,
-            'max_loss': self.max_loss_level,
             'invested_amount': self.current_invested_amount,
             'position_shares': self.position_shares,
             'cash_balance': self.cash_balance,
             'transaction_fee': transactionFee,
-            'reason': f"{reason} | 投入${self.current_invested_amount:,.2f} | 止损${self.stop_loss_level:.2f}(SAR) | 止盈{f'${self.take_profit_level:.2f}' if self.take_profit_level is not None else '无'}(固定{self.fixed_take_profit_pct}%) | 最大亏损{f'${self.max_loss_level:.2f}' if self.max_loss_level is not None else '无'}({self.max_loss_pct}%)"
+            'reason': f"{reason} | 投入${self.current_invested_amount:,.2f} | 止损${self.stop_loss_level:.2f}({stop_loss_type}) | 止盈{f'${self.take_profit_level:.2f}' if self.take_profit_level is not None else '无'}(固定{self.fixed_take_profit_pct}%)"
         })
         
         print(f"  🟢 【开多】{reason} | 价格: ${entry_price:.2f} | 投入: ${actual_invested_amount:,.2f} | 份额: {self.position_shares:.4f}")
-        print(f"       止损: ${self.stop_loss_level:.2f} (SAR) | 止盈: {f'${self.take_profit_level:.2f}' if self.take_profit_level else '无'} | 最大亏损: {f'${self.max_loss_level:.2f}' if self.max_loss_level else '无'}")
+        print(f"       止损: ${self.stop_loss_level:.2f} ({stop_loss_type}) | 止盈: {f'${self.take_profit_level:.2f}' if self.take_profit_level else '无'}")
         print(f"        现金更新: 余额=${self.cash_balance:,.2f}")
         
         # 🔴 推送开仓消息
@@ -1226,8 +1558,7 @@ class TrendSarStrategy:
                 'invested_amount': self.current_invested_amount,
                 'position_shares': self.position_shares,
                 'stop_loss': self.stop_loss_level,
-                'take_profit': self.take_profit_level,
-                'max_loss': self.max_loss_level
+                'take_profit': self.take_profit_level
             }
             result = self.dingtalk_notifier.send_open_position(
                 timestamp=signal_info.get('timestamp'),
@@ -1281,8 +1612,19 @@ class TrendSarStrategy:
         
         print(f"        💰 合约仓位计算: 投入${actual_invested_amount:.2f} × {leverage}倍杠杆 ÷ ${contract_face_value}合约面值 = {self.position_shares:.1f}张合约")
         
-        # 初始止损设为当前SAR值
-        self.stop_loss_level = self.sar_indicator.get_stop_loss_level()
+        # 🔴 双重止损机制：对比SAR止损和最大止损，选择距离开仓价更近的
+        sar_stop_loss = self.sar_indicator.get_stop_loss_level()
+        self.stop_loss_level, stop_loss_type = self._calculate_optimal_stop_loss(
+            sar_stop_loss, entry_price, 'short'
+        )
+        
+        # 打印止损对比信息
+        if self.max_stop_loss_pct > 0:
+            max_stop_loss_price = entry_price * (1 + self.max_stop_loss_pct / 100)
+            print(f"        🛡️  SAR止损: ${sar_stop_loss:.2f} | 最大止损: ${max_stop_loss_price:.2f} ({self.max_stop_loss_pct}%)")
+            print(f"        ✅ 选择止损: ${self.stop_loss_level:.2f} ({stop_loss_type})")
+        else:
+            print(f"        🛡️  止损: ${self.stop_loss_level:.2f} (SAR止损)")
         
         # 计算固定止盈位
         if self.fixed_take_profit_pct > 0:
@@ -1290,27 +1632,20 @@ class TrendSarStrategy:
         else:
             self.take_profit_level = None
         
-        # 计算最大亏损位
-        if self.max_loss_pct > 0:
-            self.max_loss_level = self.entry_price * (1 + self.max_loss_pct / 100)
-        else:
-            self.max_loss_level = None
-        
         signal_info['signals'].append({
             'type': 'OPEN_SHORT',
             'price': self.entry_price,
             'stop_loss': self.stop_loss_level,
             'take_profit': self.take_profit_level,
-            'max_loss': self.max_loss_level,
             'invested_amount': self.current_invested_amount,
             'position_shares': self.position_shares,
             'cash_balance': self.cash_balance,
             'transaction_fee': transactionFee,
-            'reason': f"{reason} | 投入${self.current_invested_amount:,.2f} | 止损${self.stop_loss_level:.2f}(SAR) | 止盈{f'${self.take_profit_level:.2f}' if self.take_profit_level is not None else '无'}(固定{self.fixed_take_profit_pct}%) | 最大亏损{f'${self.max_loss_level:.2f}' if self.max_loss_level is not None else '无'}({self.max_loss_pct}%)"
+            'reason': f"{reason} | 投入${self.current_invested_amount:,.2f} | 止损${self.stop_loss_level:.2f}({stop_loss_type}) | 止盈{f'${self.take_profit_level:.2f}' if self.take_profit_level is not None else '无'}(固定{self.fixed_take_profit_pct}%)"
         })
         
         print(f"  🔴 【开空】{reason} | 价格: ${entry_price:.2f} | 投入: ${actual_invested_amount:,.2f} | 份额: {self.position_shares:.4f}")
-        print(f"       止损: ${self.stop_loss_level:.2f} (SAR) | 止盈: {f'${self.take_profit_level:.2f}' if self.take_profit_level else '无'}")
+        print(f"       止损: ${self.stop_loss_level:.2f} ({stop_loss_type}) | 止盈: {f'${self.take_profit_level:.2f}' if self.take_profit_level else '无'}")
         print(f"        现金更新: 余额=${self.cash_balance:,.2f}")
         
         # 🔴 推送开仓消息
@@ -1320,8 +1655,7 @@ class TrendSarStrategy:
                 'invested_amount': self.current_invested_amount,
                 'position_shares': self.position_shares,
                 'stop_loss': self.stop_loss_level,
-                'take_profit': self.take_profit_level,
-                'max_loss': self.max_loss_level
+                'take_profit': self.take_profit_level
             }
             result = self.dingtalk_notifier.send_open_position(
                 timestamp=signal_info.get('timestamp'),
@@ -1335,42 +1669,57 @@ class TrendSarStrategy:
             print(f"  ❌ dingtalk_notifier为None，跳过开空仓推送")
     
     def _update_sar_stop_loss(self, sar_result, signal_info):
-        """更新动态SAR止损"""
-        if self.position is None:
+        """更新动态SAR止损（双重止损机制：对比SAR止损和最大止损，选择距离开仓价更近的）"""
+        if self.position is None or self.entry_price is None:
             return
         
         new_sar_value = sar_result['sar_value']
         old_stop_loss = self.stop_loss_level
         
-        # 动态更新止损为当前SAR值
+        # 🔴 使用双重止损机制：对比SAR止损和最大止损，选择更近的
+        optimal_stop_loss, stop_loss_type = self._calculate_optimal_stop_loss(
+            new_sar_value, self.entry_price, self.position
+        )
+        
+        # 检查止损是否需要更新（只允许向有利方向移动）
         if self.position == 'long':
-            # 多单：SAR值只能向上移动（更有利）
-            if new_sar_value > old_stop_loss:
-                self.stop_loss_level = new_sar_value
-                print(f"    🔄 【动态SAR止损更新】多单止损: ${old_stop_loss:.2f} → ${new_sar_value:.2f} (向上移动)")
+            # 多单：止损只能向上移动（更有利，更接近开仓价）
+            if optimal_stop_loss > old_stop_loss:
+                self.stop_loss_level = optimal_stop_loss
+                print(f"    🔄 【动态止损更新】多单止损: ${old_stop_loss:.2f} → ${optimal_stop_loss:.2f} ({stop_loss_type})")
+                
+                # 🔴 打印止损对比信息
+                if self.max_stop_loss_pct > 0:
+                    max_stop_loss_price = self.entry_price * (1 - self.max_stop_loss_pct / 100)
+                    print(f"         🛡️  SAR止损: ${new_sar_value:.2f} | 最大止损: ${max_stop_loss_price:.2f} ({self.max_stop_loss_pct}%) | 选择: ${optimal_stop_loss:.2f}")
                 
                 # 🔴 生成止损更新信号，通知实盘交易脚本调用OKX接口
                 signal_info['signals'].append({
                     'type': 'UPDATE_STOP_LOSS',
-                    'new_stop_loss': new_sar_value,
+                    'new_stop_loss': optimal_stop_loss,
                     'old_stop_loss': old_stop_loss,
                     'position': self.position,
-                    'reason': f"多单SAR止损动态更新 | 旧止损${old_stop_loss:.2f} → 新止损${new_sar_value:.2f}"
+                    'reason': f"多单双重止损更新 | 旧止损${old_stop_loss:.2f} → 新止损${optimal_stop_loss:.2f} ({stop_loss_type})"
                 })
                 
         elif self.position == 'short':
-            # 空单：SAR值只能向下移动（更有利）
-            if new_sar_value < old_stop_loss:
-                self.stop_loss_level = new_sar_value
-                print(f"    🔄 【动态SAR止损更新】空单止损: ${old_stop_loss:.2f} → ${new_sar_value:.2f} (向下移动)")
+            # 空单：止损只能向下移动（更有利，更接近开仓价）
+            if optimal_stop_loss < old_stop_loss:
+                self.stop_loss_level = optimal_stop_loss
+                print(f"    🔄 【动态止损更新】空单止损: ${old_stop_loss:.2f} → ${optimal_stop_loss:.2f} ({stop_loss_type})")
+                
+                # 🔴 打印止损对比信息
+                if self.max_stop_loss_pct > 0:
+                    max_stop_loss_price = self.entry_price * (1 + self.max_stop_loss_pct / 100)
+                    print(f"         🛡️  SAR止损: ${new_sar_value:.2f} | 最大止损: ${max_stop_loss_price:.2f} ({self.max_stop_loss_pct}%) | 选择: ${optimal_stop_loss:.2f}")
                 
                 # 🔴 生成止损更新信号，通知实盘交易脚本调用OKX接口
                 signal_info['signals'].append({
                     'type': 'UPDATE_STOP_LOSS',
-                    'new_stop_loss': new_sar_value,
+                    'new_stop_loss': optimal_stop_loss,
                     'old_stop_loss': old_stop_loss,
                     'position': self.position,
-                    'reason': f"空单SAR止损动态更新 | 旧止损${old_stop_loss:.2f} → 新止损${new_sar_value:.2f}"
+                    'reason': f"空单双重止损更新 | 旧止损${old_stop_loss:.2f} → 新止损${optimal_stop_loss:.2f} ({stop_loss_type})"
                 })
     
     def _check_stop_position_trigger_1min(self, timestamp, open_price, high_price, low_price, close_price, signal_info):
@@ -1380,7 +1729,38 @@ class TrendSarStrategy:
             
         stop_loss_triggered = False
         
-        # 检查平仓触发
+        # 🔴 优先检查Delta Volume止损（市场情绪强烈反转）
+        current_dv_percent = self.delta_volume_percent_fixed / 100.0  # 转换为小数（例如60% = 0.6）
+        
+        if self.position == 'long':
+            # 持有多单：如果Delta% < -threshold（卖出压力过大），立即止损
+            if current_dv_percent < -self.delta_volume_stop_loss_threshold:
+                stop_loss_triggered = True
+                exit_price = close_price
+                reason = f"多单Delta Volume止损 | Delta%={current_dv_percent*100:.2f}% < -{self.delta_volume_stop_loss_threshold*100:.0f}%（卖出压力过大）"
+                print(f"  ❌ 【Delta Volume止损】多单：卖出压力{abs(current_dv_percent)*100:.2f}% > {self.delta_volume_stop_loss_threshold*100:.0f}%，触发止损")
+                self._close_position(exit_price, signal_info, timestamp, False, reason)
+                return  # 已触发止损，直接返回
+        
+        elif self.position == 'short':
+            # 持有空单：如果Delta% > +threshold（买入压力过大），立即止损
+            if current_dv_percent > self.delta_volume_stop_loss_threshold:
+                stop_loss_triggered = True
+                exit_price = close_price
+                reason = f"空单Delta Volume止损 | Delta%={current_dv_percent*100:.2f}% > +{self.delta_volume_stop_loss_threshold*100:.0f}%（买入压力过大）"
+                print(f"  ❌ 【Delta Volume止损】空单：买入压力{abs(current_dv_percent)*100:.2f}% > {self.delta_volume_stop_loss_threshold*100:.0f}%，触发止损")
+                self._close_position(exit_price, signal_info, timestamp, False, reason)
+                return  # 已触发止损，直接返回
+        
+        # 计算硬性保护位（如果设置了max_stop_loss_pct）
+        max_stop_loss_hard_level = None
+        if self.max_stop_loss_pct > 0 and self.entry_price is not None:
+            if self.position == 'long':
+                max_stop_loss_hard_level = self.entry_price * (1 - self.max_stop_loss_pct / 100)
+            elif self.position == 'short':
+                max_stop_loss_hard_level = self.entry_price * (1 + self.max_stop_loss_pct / 100)
+        
+        # 检查其他平仓触发
         if self.position == 'long':
             # 优先检查固定止盈
             if self.take_profit_level is not None and high_price >= self.take_profit_level:
@@ -1388,19 +1768,19 @@ class TrendSarStrategy:
                 exit_price = self.take_profit_level
                 reason = f"多单固定止盈 | 条件：价格${high_price:.2f}≥止盈位${self.take_profit_level:.2f} | 价格来源：1分钟最高价触及固定止盈位"
                 self._close_position(exit_price, signal_info, timestamp, False, reason)
-            # 检查最大亏损
-            elif self.max_loss_level is not None and low_price <= self.max_loss_level:
+            # 检查硬性保护位（最大止损）
+            elif max_stop_loss_hard_level is not None and low_price <= max_stop_loss_hard_level:
                 stop_loss_triggered = True
-                exit_price = self.max_loss_level
-                reason = f"多单最大亏损 | 条件：价格${low_price:.2f}≤最大亏损位${self.max_loss_level:.2f} | 价格来源：1分钟最低价触及最大亏损位"
+                exit_price = max_stop_loss_hard_level
+                reason = f"多单硬性保护位触发 | 条件：价格${low_price:.2f}≤硬性保护位${max_stop_loss_hard_level:.2f}({self.max_stop_loss_pct}%) | 价格来源：1分钟最低价触及硬性保护位"
                 self._close_position(exit_price, signal_info, timestamp, False, reason)
-            # 检查SAR止损
+            # 检查止损（已包含双重止损机制的选择）
             elif low_price <= self.stop_loss_level:
                 stop_loss_triggered = True
                 exit_price = self.stop_loss_level
                 profit_loss = self.position_shares * (exit_price - self.entry_price)
                 result_type = "盈利平仓" if profit_loss > 0 else "亏损平仓"
-                reason = f"多单SAR{result_type} | 条件：价格${low_price:.2f}≤SAR止损${self.stop_loss_level:.2f} | 价格来源：1分钟最低价触及SAR止损线"
+                reason = f"多单止损{result_type} | 条件：价格${low_price:.2f}≤止损位${self.stop_loss_level:.2f} | 价格来源：1分钟最低价触及止损线"
                 self._close_position(exit_price, signal_info, timestamp, False, reason)
         
         elif self.position == 'short':
@@ -1410,19 +1790,19 @@ class TrendSarStrategy:
                 exit_price = self.take_profit_level
                 reason = f"空单固定止盈 | 条件：价格${low_price:.2f}≤止盈位${self.take_profit_level:.2f} | 价格来源：1分钟最低价触及固定止盈位"
                 self._close_position(exit_price, signal_info, timestamp, False, reason)
-            # 检查最大亏损
-            elif self.max_loss_level is not None and high_price >= self.max_loss_level:
+            # 检查硬性保护位（最大止损）
+            elif max_stop_loss_hard_level is not None and high_price >= max_stop_loss_hard_level:
                 stop_loss_triggered = True
-                exit_price = self.max_loss_level
-                reason = f"空单最大亏损 | 条件：价格${high_price:.2f}≥最大亏损位${self.max_loss_level:.2f} | 价格来源：1分钟最高价触及最大亏损位"
+                exit_price = max_stop_loss_hard_level
+                reason = f"空单硬性保护位触发 | 条件：价格${high_price:.2f}≥硬性保护位${max_stop_loss_hard_level:.2f}({self.max_stop_loss_pct}%) | 价格来源：1分钟最高价触及硬性保护位"
                 self._close_position(exit_price, signal_info, timestamp, False, reason)
-            # 检查SAR止损
+            # 检查止损（已包含双重止损机制的选择）
             elif high_price >= self.stop_loss_level:
                 stop_loss_triggered = True
                 exit_price = self.stop_loss_level
                 profit_loss = self.position_shares * (self.entry_price - exit_price)
                 result_type = "盈利平仓" if profit_loss > 0 else "亏损平仓"
-                reason = f"空单SAR{result_type} | 条件：价格${high_price:.2f}≥SAR止损${self.stop_loss_level:.2f} | 价格来源：1分钟最高价触及SAR止损线"
+                reason = f"空单止损{result_type} | 条件：价格${high_price:.2f}≥止损位${self.stop_loss_level:.2f} | 价格来源：1分钟最高价触及止损线"
                 self._close_position(exit_price, signal_info, timestamp, False, reason)
     
     def _close_position(self, exit_price, signal_info, exit_timestamp,isEatOrder, reason):
@@ -1500,7 +1880,6 @@ class TrendSarStrategy:
         self.entry_price = None
         self.stop_loss_level = None
         self.take_profit_level = None
-        self.max_loss_level = None
         self.current_invested_amount = None
         self.position_shares = None
     
@@ -1548,7 +1927,6 @@ class TrendSarStrategy:
         # 同步止损止盈价格
         if trade_data.get('stop_loss_price'):
             self.stop_loss_level = trade_data['stop_loss_price']
-            self.max_loss_level = trade_data['stop_loss_price']  # 同步到最大亏损位
         
         if trade_data.get('take_profit_price'):
             self.take_profit_level = trade_data['take_profit_price']
@@ -1577,7 +1955,6 @@ class TrendSarStrategy:
         
         old_stop_loss = self.stop_loss_level
         self.stop_loss_level = new_stop_loss_price
-        self.max_loss_level = new_stop_loss_price  # 同步到最大亏损位
         
         print(f"✅ 止损价格已更新: ${old_stop_loss:.2f} → ${new_stop_loss_price:.2f}")
     
@@ -1595,7 +1972,6 @@ class TrendSarStrategy:
         self.position_shares = 0
         self.stop_loss_level = None
         self.take_profit_level = None
-        self.max_loss_level = None
         self.current_invested_amount = 0
         
         print(f"✅ 持仓状态已清空")
@@ -1604,14 +1980,15 @@ class TrendSarStrategy:
         """获取当前单周期策略状态"""
         return {
             'position': self.position,
-            'entry_price': self.entry_price,
-            'stop_loss_level': self.stop_loss_level,
-            'take_profit_level': self.take_profit_level,
-            'max_loss_level': self.max_loss_level,
+            'entry_price': self.entry_price if self.entry_price is not None else 0,
+            'stop_loss_level': self.stop_loss_level if self.stop_loss_level is not None else 0,
+            'take_profit_level': self.take_profit_level if self.take_profit_level is not None else 0,
             'sar_value': self.sar_indicator.get_stop_loss_level(),
             'timeframe': self.timeframe,
             'current_trend_direction': self.current_trend_direction,
             'previous_trend_direction': self.previous_trend_direction,
-            'position_shares': self.position_shares,
+            'position_shares': self.position_shares if self.position_shares is not None else 0,
+            'current_invested_amount': self.current_invested_amount if self.current_invested_amount is not None else 0,
+            'max_stop_loss_pct': self.max_stop_loss_pct,
             'volatility_info': self.volatility_calculator.get_volatility_info()
         }

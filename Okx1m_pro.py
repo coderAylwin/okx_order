@@ -370,7 +370,7 @@ symbols = [
      'ETH/USDT:USDT',
     # 'ETH/USD:ETH',
     # 'SOL/USDT',
-     # 'SOL/USDT:USDT',
+     'SOL/USDT:USDT',
     # 'SOL/USD:SOL',
     # 'DOGE/USDT',
     # 'DOGE/USDT:USDT',

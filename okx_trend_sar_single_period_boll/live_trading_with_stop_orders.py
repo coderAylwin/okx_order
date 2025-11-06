@@ -98,13 +98,15 @@ class LiveTradingBotWithStopOrders:
             initial_capital=config['initial_capital'],
             position_size_percentage=config['position_size_percentage'],
             fixed_take_profit_pct=config['fixed_take_profit_pct'],
-            max_loss_pct=config['max_loss_pct'],
+            max_stop_loss_pct=config.get('max_stop_loss_pct', 0),
             volatility_timeframe=config['volatility_timeframe'],
             volatility_length=config['volatility_length'],
             volatility_mult=config['volatility_mult'],
             volatility_ema_period=config['volatility_ema_period'],
             volatility_threshold=config['volatility_threshold'],
             basis_change_threshold=config['basis_change_threshold'],
+            delta_volume_period=config.get('delta_volume_period', 14),
+            delta_volume_stop_loss_threshold=config.get('delta_volume_stop_loss_threshold', 0.6),
             dingtalk_webhook=config.get('dingtalk_webhook'),
             dingtalk_secret=config.get('dingtalk_secret')
         )
@@ -176,12 +178,15 @@ class LiveTradingBotWithStopOrders:
         
         warmup_data = []
         for _, row in df.iterrows():
+            # 🔴 检查字段名（可能是 'vol' 或 'volume'）
+            volume = row.get('volume', 0) if 'volume' in row else row.get('vol', 0)
             warmup_data.append({
                 'timestamp': row['timestamp'],
                 'open': row['open'],
                 'high': row['high'],
                 'low': row['low'],
-                'close': row['close']
+                'close': row['close'],
+                'volume': volume  # 🔴 添加成交量字段
             })
         
         self.strategy.warmup_filter(warmup_data)
@@ -1391,12 +1396,22 @@ class LiveTradingBotWithStopOrders:
             strategy_status = self.strategy.get_current_status()
             print(f"\n📈 策略状态:")
             print(f"   策略持仓: {strategy_status.get('position')}")
-            print(f"   策略开仓价: ${strategy_status.get('entry_price', 0):.2f}")
-            print(f"   策略止损位: ${strategy_status.get('stop_loss_level', 0):.2f}")
-            print(f"   策略止盈位: ${strategy_status.get('take_profit_level', 0):.2f}")
-            print(f"   策略最大亏损位: ${strategy_status.get('max_loss_level', 0):.2f}")
-            print(f"   策略投入金额: ${strategy_status.get('current_invested_amount', 0):.2f}")
-            print(f"   策略持仓数量: {strategy_status.get('position_shares', 0)}")
+            
+            # 安全格式化价格（处理 None 值）
+            entry_price = strategy_status.get('entry_price') or 0
+            stop_loss = strategy_status.get('stop_loss_level') or 0
+            take_profit = strategy_status.get('take_profit_level') or 0
+            position_shares = strategy_status.get('position_shares') or 0
+            
+            print(f"   策略开仓价: ${entry_price:.2f}")
+            print(f"   策略止损位: ${stop_loss:.2f}")
+            print(f"   策略止盈位: ${take_profit:.2f}")
+            max_stop_loss_pct = strategy_status.get('max_stop_loss_pct', 0)
+            if max_stop_loss_pct > 0:
+                print(f"   最大止损比例: {max_stop_loss_pct}% (双重止损机制)")
+            invested_amount = strategy_status.get('current_invested_amount', 0) or 0
+            print(f"   策略投入金额: ${invested_amount:.2f}")
+            print(f"   策略持仓数量: {position_shares}")
             
             # 检查SAR值
             sar_value = strategy_status.get('sar_value')
@@ -1406,10 +1421,11 @@ class LiveTradingBotWithStopOrders:
             # 🔴 对比机器人和策略的持仓信息
             print(f"\n🔍 状态一致性检查:")
             position_match = (self.current_position == strategy_status.get('position'))
-            shares_match = (abs(self.current_position_shares - strategy_status.get('position_shares', 0)) < 0.001)
+            strategy_shares = strategy_status.get('position_shares') or 0
+            shares_match = (abs(self.current_position_shares - strategy_shares) < 0.001)
             
             print(f"   持仓方向一致: {'✅' if position_match else '❌'} (机器人:{self.current_position} vs 策略:{strategy_status.get('position')})")
-            print(f"   持仓数量一致: {'✅' if shares_match else '❌'} (机器人:{self.current_position_shares} vs 策略:{strategy_status.get('position_shares', 0)})")
+            print(f"   持仓数量一致: {'✅' if shares_match else '❌'} (机器人:{self.current_position_shares} vs 策略:{strategy_shares})")
             
             if not position_match or not shares_match:
                 print(f"   ⚠️  状态不一致！需要同步")
@@ -1617,11 +1633,7 @@ class LiveTradingBotWithStopOrders:
                     else:
                         self.strategy.take_profit_level = trade.entry_price * (1 - self.strategy.fixed_take_profit_pct / 100)
                 
-                if self.strategy.max_loss_pct > 0:
-                    if position_side == 'long':
-                        self.strategy.max_loss_level = trade.entry_price * (1 - self.strategy.max_loss_pct / 100)
-                    else:
-                        self.strategy.max_loss_level = trade.entry_price * (1 + self.strategy.max_loss_pct / 100)
+                # max_stop_loss_pct 已合并到双重止损机制中，无需单独设置
                 
                 self.logger.log(f"✅ 策略状态已同步: {position_side}, 开仓价=${trade.entry_price:.2f}")
             else:
@@ -2188,8 +2200,9 @@ class LiveTradingBotWithStopOrders:
                 return
             
             # 检查最近3分钟的数据
+            # 🔴 标准化缓存中的时间戳（去掉秒和微秒）
             recent_klines = list(self.kline_buffer.klines)[-3:] if len(self.kline_buffer.klines) >= 3 else list(self.kline_buffer.klines)
-            cached_times = {kline['timestamp'] for kline in recent_klines}
+            cached_times = {kline['timestamp'].replace(second=0, microsecond=0) for kline in recent_klines}
             
             # 计算应该存在的时间点（最近3分钟）
             expected_times = []
@@ -2200,8 +2213,10 @@ class LiveTradingBotWithStopOrders:
             # 找出缺失的时间点
             missing_times = []
             for expected_time in expected_times:
-                if expected_time not in cached_times:
-                    missing_times.append(expected_time)
+                # 🔴 确保时间戳标准化后再比较
+                normalized_expected = expected_time.replace(second=0, microsecond=0)
+                if normalized_expected not in cached_times:
+                    missing_times.append(normalized_expected)
             
             if not missing_times:
                 # self.logger.log("✅ 数据完整性检查通过")
@@ -2233,11 +2248,13 @@ class LiveTradingBotWithStopOrders:
                     added_count = 0
                     for kline in api_klines:
                         kline_time = datetime.fromtimestamp(kline[0] / 1000)
+                        # 🔴 标准化时间戳（去掉秒和微秒，只保留到分钟）
+                        normalized_kline_time = kline_time.replace(second=0, microsecond=0)
                         
-                        # 只补充缺失的时间点
-                        if kline_time in missing_times:
+                        # 只补充缺失的时间点（使用标准化后的时间戳比较）
+                        if normalized_kline_time in missing_times:
                             buffer_size = self.kline_buffer.add_kline(
-                                kline_time,
+                                normalized_kline_time,  # 使用标准化后的时间戳
                                 kline[1],  # open
                                 kline[2],  # high
                                 kline[3],  # low
@@ -2248,7 +2265,7 @@ class LiveTradingBotWithStopOrders:
                             # 🔴 无论是否成功添加到缓存（可能重复），都记录这条数据
                             # 因为后续需要检查是否为周期末尾并触发策略
                             filled_klines.append({
-                                'timestamp': kline_time,
+                                'timestamp': normalized_kline_time,  # 使用标准化后的时间戳
                                 'open': kline[1],
                                 'high': kline[2],
                                 'low': kline[3],
@@ -2258,10 +2275,10 @@ class LiveTradingBotWithStopOrders:
                             
                             if buffer_size != -1:  # 成功添加
                                 added_count += 1
-                                self.logger.log(f"✅ 补充数据: {kline_time.strftime('%H:%M')} "
+                                self.logger.log(f"✅ 补充数据: {normalized_kline_time.strftime('%H:%M')} "
                                               f"收盘:${kline[4]:.2f}")
                             else:
-                                self.logger.log(f"ℹ️  数据已存在: {kline_time.strftime('%H:%M')} "
+                                self.logger.log(f"ℹ️  数据已存在: {normalized_kline_time.strftime('%H:%M')} "
                                               f"收盘:${kline[4]:.2f} (将检查是否需要触发策略)")
                     
                     # 🔴 只要找到了缺失数据（无论是否重复），就检查是否需要触发策略
@@ -2271,9 +2288,7 @@ class LiveTradingBotWithStopOrders:
                         else:
                             self.logger.log(f"ℹ️  缺失数据已存在于缓存，检查是否需要触发策略...")
                         
-                        # 🔴 检查补充的数据中是否包含周期末尾数据
-                        # 例如：5分钟周期，如果补充的是11:39的数据，才触发策略计算
-                        # 如果补充的是11:37或11:38，则不触发（等到周期完整后再触发）
+                        # 🔴 处理补充的数据：无论是否是周期末尾，都要更新策略（包括Delta Volume计算）
                         for filled_kline in filled_klines:
                             minute = filled_kline['timestamp'].minute
                             is_period_last_minute = (minute + 1) % self.period_minutes == 0
@@ -2284,27 +2299,39 @@ class LiveTradingBotWithStopOrders:
                             print(f"   是周期末尾: {is_period_last_minute}")
                             print(f"   首周期完成: {self.first_period_completed}")
                             
-                            if is_period_last_minute:
-                                # 🔴 如果是首周期，先设置首周期完成标志
-                                if not self.first_period_completed:
-                                    self.first_period_completed = True
-                                    self.logger.log(f"\n🎯 首个完整周期完成（通过数据补充检测）")
-                                    self.logger.log(f"✅ 从下一个周期开始处理交易信号\n")
+                            # 🔴 如果是首周期且是周期末尾，先设置首周期完成标志
+                            if is_period_last_minute and not self.first_period_completed:
+                                self.first_period_completed = True
+                                self.logger.log(f"\n🎯 首个完整周期完成（通过数据补充检测）")
+                                self.logger.log(f"✅ 从下一个周期开始处理交易信号\n")
+                            
+                            # 🔴 无论是否是周期末尾，都要调用策略更新（计算Delta Volume等）
+                            if self.first_period_completed:
+                                if is_period_last_minute:
+                                    # 周期末尾：触发K线生成和策略计算
+                                    self.logger.log(f"🎯 补充了周期末尾数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 立即触发K线聚合和指标计算...")
+                                    next_minute = filled_kline['timestamp'] + timedelta(minutes=1)
+                                    result = self.strategy.update(
+                                        next_minute,
+                                        filled_kline['close'],
+                                        filled_kline['close'],
+                                        filled_kline['close'],
+                                        filled_kline['close'],
+                                        0
+                                    )
+                                else:
+                                    # 非周期末尾：正常更新策略（主要是Delta Volume计算）
+                                    self.logger.log(f"📊 补充了非周期末尾数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 更新策略（包括Delta Volume计算）...")
+                                    result = self.strategy.update(
+                                        filled_kline['timestamp'],
+                                        filled_kline['open'],
+                                        filled_kline['high'],
+                                        filled_kline['low'],
+                                        filled_kline['close'],
+                                        filled_kline.get('volume', 0)
+                                    )
                                 
-                                self.logger.log(f"🎯 补充了周期末尾数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 立即触发K线聚合和指标计算...")
-                                
-                                # 触发K线生成和策略计算
-                                next_minute = filled_kline['timestamp'] + timedelta(minutes=1)
-                                result = self.strategy.update(
-                                    next_minute,
-                                    filled_kline['close'],
-                                    filled_kline['close'],
-                                    filled_kline['close'],
-                                    filled_kline['close'],
-                                    0
-                                )
-                                
-                                # 保存指标信号到数据库
+                                # 保存指标信号到数据库（只在有SAR结果时）
                                 if result and 'sar_result' in result:
                                     kline_timestamp = result.get('kline_timestamp', filled_kline['timestamp'])
                                     self._save_indicator_signal(
@@ -2314,13 +2341,39 @@ class LiveTradingBotWithStopOrders:
                                         filled_kline['high'], 
                                         filled_kline['low'], 
                                         filled_kline['close'], 
-                                        filled_kline['volume']
+                                        filled_kline.get('volume', 0)
                                     )
                                 
-                                # 处理交易信号
+                                # 处理交易信号（只在首个完整周期完成后）
                                 if result and result.get('signals'):
                                     for signal in result['signals']:
                                         self.execute_signal(signal)
+                            else:
+                                # 🔴 首个完整周期未完成时，也要更新策略（计算Delta Volume，但不处理交易信号）
+                                self.logger.log(f"📊 补充了数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 更新策略（计算Delta Volume，等待首个完整周期）...")
+                                result = self.strategy.update(
+                                    filled_kline['timestamp'],
+                                    filled_kline['open'],
+                                    filled_kline['high'],
+                                    filled_kline['low'],
+                                    filled_kline['close'],
+                                    filled_kline.get('volume', 0)
+                                )
+                        
+                        # 🔴 补充数据后，验证数据是否已正确添加到缓存
+                        # 避免下次检查时再次发现"缺失"
+                        if added_count > 0:
+                            # 重新获取缓存中的时间戳（标准化后）
+                            updated_recent_klines = list(self.kline_buffer.klines)[-3:] if len(self.kline_buffer.klines) >= 3 else list(self.kline_buffer.klines)
+                            updated_cached_times = {kline['timestamp'].replace(second=0, microsecond=0) for kline in updated_recent_klines}
+                            
+                            # 验证补充的数据是否真的在缓存中
+                            for filled_kline in filled_klines:
+                                filled_time = filled_kline['timestamp'].replace(second=0, microsecond=0)
+                                if filled_time not in updated_cached_times:
+                                    self.logger.log_warning(f"⚠️  警告: 补充的数据 {filled_time.strftime('%H:%M')} 未正确添加到缓存")
+                                else:
+                                    self.logger.log(f"✅ 验证: 补充的数据 {filled_time.strftime('%H:%M')} 已正确添加到缓存")
                         
                         return  # 补充成功，退出
                     else:
@@ -2373,8 +2426,11 @@ class LiveTradingBotWithStopOrders:
             close_price = kline[4]
             volume = kline[5] if len(kline) > 5 else 0
             
+            # 🔴 标准化时间戳（去掉秒和微秒，只保留到分钟）
+            normalized_timestamp = timestamp.replace(second=0, microsecond=0)
+            
             buffer_size = self.kline_buffer.add_kline(
-                timestamp, open_price, high_price, low_price, close_price, volume
+                normalized_timestamp, open_price, high_price, low_price, close_price, volume
             )
             
             if buffer_size == -1:
@@ -2398,6 +2454,7 @@ class LiveTradingBotWithStopOrders:
             # 🔴 策略更新（交易所会自动监控止损止盈，程序只负责更新SAR止损位）
             result = {'signals': []}
             
+            # 🔴 预热完成后就开始计算Delta Volume（但首个完整周期完成前不处理交易信号）
             if self.first_period_completed:
                 # 🔴 周期末尾：只触发K线生成，不做两次update
                 if is_period_last_minute:
@@ -2413,7 +2470,7 @@ class LiveTradingBotWithStopOrders:
                         0
                     )
                 else:
-                    # 🔴 非周期末尾：正常更新（主要是持仓期间的止损更新）
+                    # 🔴 非周期末尾：正常更新（主要是持仓期间的止损更新和Delta Volume计算）
                     result = self.strategy.update(
                         timestamp,
                         open_price,
@@ -2433,8 +2490,8 @@ class LiveTradingBotWithStopOrders:
                 if result and result.get('signals'):
                     for signal in result['signals']:
                         self.execute_signal(signal)
-                        
             elif is_period_last_minute:
+                # 🔴 首个完整周期完成前的周期末尾：只触发K线生成，不处理交易信号
                 result = self.strategy.update(
                     timestamp,
                     open_price,
@@ -2443,17 +2500,19 @@ class LiveTradingBotWithStopOrders:
                     close_price,
                     volume
                 )
-                
-                next_minute = timestamp + timedelta(minutes=1)
-                self.logger.log(f"⏰ 周期末尾，立即触发K线生成...")
+                # 注意：这里不处理交易信号，只计算Delta Volume
+            else:
+                # 🔴 预热完成后，首个完整周期完成前：每分钟都调用update计算Delta Volume（但不处理交易信号）
+                # 这样Delta Volume计算可以无缝衔接，从预热到正式交易
                 result = self.strategy.update(
-                    next_minute,
+                    timestamp,
+                    open_price,
+                    high_price,
+                    low_price,
                     close_price,
-                    close_price,
-                    close_price,
-                    close_price,
-                    0
+                    volume
                 )
+                # 注意：这里不处理交易信号，只计算Delta Volume和更新指标
                 
                 if result['signals']:
                     self.logger.log(f"⚠️  等待首个完整周期结束，暂不处理信号")

@@ -758,7 +758,7 @@ class PerformanceAnalyzer:
             <div style="margin-top: 15px;">
                 <h4>💰 止盈止损配置</h4>
                 <p><strong>固定止盈:</strong> {config.get('fixed_take_profit_pct', 'N/A') if config else 'N/A'}%</p>
-                <p><strong>最大亏损:</strong> {config.get('max_loss_pct', 'N/A') if config else 'N/A'}%</p>
+                <p><strong>最大止损:</strong> {config.get('max_stop_loss_pct', 'N/A') if config else 'N/A'}% (双重止损机制)</p>
             </div>
         </div>
         

@@ -38,15 +38,17 @@ class KlineBuffer:
         Returns:
             int: 当前缓存大小，如果重复返回 -1
         """
-        # 🔴 检查是否已存在相同时间的K线
-        if len(self.klines) > 0:
-            last_kline = self.klines[-1]
-            if last_kline['timestamp'] == timestamp:
+        # 🔴 标准化时间戳（去掉秒和微秒，只保留到分钟）
+        normalized_timestamp = timestamp.replace(second=0, microsecond=0)
+        
+        # 🔴 检查是否已存在相同时间的K线（检查所有K线，不只是最后一条）
+        for kline in self.klines:
+            if kline['timestamp'] == normalized_timestamp:
                 # 时间重复，不添加
                 return -1
         
         kline = {
-            'timestamp': timestamp,
+            'timestamp': normalized_timestamp,  # 使用标准化后的时间戳
             'open': open_price,
             'high': high_price,
             'low': low_price,

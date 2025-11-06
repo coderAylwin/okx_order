@@ -91,13 +91,15 @@ class LiveTradingBotV2(LiveTradingBotWithStopOrders):
             initial_capital=config['initial_capital'],
             position_size_percentage=config['position_size_percentage'],
             fixed_take_profit_pct=config['fixed_take_profit_pct'],
-            max_loss_pct=config['max_loss_pct'],
+            max_stop_loss_pct=config.get('max_stop_loss_pct', 0),
             volatility_timeframe=config['volatility_timeframe'],
             volatility_length=config['volatility_length'],
             volatility_mult=config['volatility_mult'],
             volatility_ema_period=config['volatility_ema_period'],
             volatility_threshold=config['volatility_threshold'],
             basis_change_threshold=config['basis_change_threshold'],
+            delta_volume_period=config.get('delta_volume_period', 14),
+            delta_volume_stop_loss_threshold=config.get('delta_volume_stop_loss_threshold', 0.6),
             dingtalk_webhook=config.get('dingtalk_webhook'),
             dingtalk_secret=config.get('dingtalk_secret')
         )

@@ -806,13 +806,15 @@ def main():
         initial_capital=config['initial_capital'],
         position_size_percentage=config['position_size_percentage'],
         fixed_take_profit_pct=config['fixed_take_profit_pct'],
-        max_loss_pct=config['max_loss_pct'],
+        max_stop_loss_pct=config.get('max_stop_loss_pct', 0),
         volatility_timeframe=config['volatility_timeframe'],
         volatility_length=config['volatility_length'],
         volatility_mult=config['volatility_mult'],
         volatility_ema_period=config['volatility_ema_period'],
         volatility_threshold=config['volatility_threshold'],
         basis_change_threshold=config['basis_change_threshold'],
+        delta_volume_period=config.get('delta_volume_period', 14),
+        delta_volume_stop_loss_threshold=config.get('delta_volume_stop_loss_threshold', 0.6),
         dingtalk_webhook=dingtalk_webhook,
         dingtalk_secret=dingtalk_secret
     )
@@ -857,12 +859,15 @@ def main():
         # 准备预热数据（包含完整的OHLC和时间戳）
         warmup_data = []
         for _, row in warmup_df.iterrows():
+            # 🔴 检查字段名（可能是 'vol' 或 'volume'）
+            volume = row.get('volume', 0) if 'volume' in row else row.get('vol', 0)
             warmup_data.append({
                 'timestamp': row['timestamp'],
                 'open': row['open'],
                 'high': row['high'],
                 'low': row['low'],
-                'close': row['close']
+                'close': row['close'],
+                'volume': volume  # 🔴 添加成交量字段
             })
         
         # 执行预热

@@ -5,16 +5,16 @@ def get_strategy_config():
     """获取纯VIDYA策略配置"""
     config = {
         # 基础配置
-        'long_coin': 'ETH',
+        'long_coin': 'SOL',
         'initial_capital': 100000,
-        'position_size_percentage': 30,  # 全仓模式
+        'position_size_percentage': 20,  # 全仓模式
         
         # 回测时间范围
         'start_date': '2025-01-01 00:00:00',
         'end_date': '2025-10-22 23:59:59',
         
         # 时间周期
-        'timeframe': '30m',
+        'timeframe': '5m',
         
         # 🔴 标准VIDYA指标参数
         'vidya_length': 18,           # VIDYA基础周期（类似EMA周期）
@@ -26,7 +26,7 @@ def get_strategy_config():
         'vidya_pivot_right': 3,        # 枢轴点右侧K线数量
         
         # 🔴 固定周期Delta Volume配置
-        'delta_volume_period': 10,     # 固定周期长度（使用最近N个K线）
+        'delta_volume_period': 14,     # 固定周期长度（使用最近N个K线）
         
         # 🔴 开仓条件配置（独立开关，开启的条件必须全部满足）
         'entry_condition_trend_breakthrough': False,   # 趋势突破（价格突破上下轨）
@@ -41,7 +41,7 @@ def get_strategy_config():
         'bb_midline_period': 14,                    # EMA中轨周期 = 7根K线(3.5小时@30m) - 快速响应
         'bb_angle_window_size': 10,                 # 角度窗口 = 7根K线(3.5小时@30m) - 短期趋势
         'bb_angle_threshold': 0.04,                # 角度阈值 = 0.05° - 更敏感（3.5小时≈0.6%涨幅）
-        'bb_r_squared_threshold': 0.75,            # R²阈值 = 0.45 - 允许波动，大行情初期也能抓住
+        'bb_r_squared_threshold': 0.65,            # R²阈值 = 0.45 - 允许波动，大行情初期也能抓住
         'bb_stop_loss_lock_periods': 3,            # 止损后锁定周期数（包含当前周期，实际等待4个完整周期=2小时）
         
         # 波动率计算器参数
@@ -53,12 +53,12 @@ def get_strategy_config():
         'basis_change_threshold': 50,  # 中轨变化率阈值（低于此值不开仓）
         
         # 止盈止损配置
-        'fixed_take_profit_pct': 1.4,  # 固定止盈百分比（0表示无固定止盈）
+        'fixed_take_profit_pct': 1.5,  # 固定止盈百分比（0表示无固定止盈）
         'max_loss_pct': 2.5,  # 最大亏损百分比（0表示无最大亏损限制）
         
         # 🔴 钉钉消息推送配置
-        'dingtalk_webhook': 'https://oapi.dingtalk.com/robot/send?access_token=8eecf36111e7448c7dc26244f33e69d0bdd12cfb7b53457882ea725069d74cc1',
-        'dingtalk_secret': 'SEC8f4556064e9c31374422530eab63a65561f2bac0b8d1c3e7cfcaa2b8b4d44686',  # 加签密钥
+        'dingtalk_webhook': 'https://oapi.dingtalk.com/robot/send?access_token=75a73d165e1bb67a0ac6ff47562c67f8fcefda96375f39bab551e5bcd64b182d',
+        'dingtalk_secret': 'SECbb23c0e4a7fc5b9fcaf8ea16fd1138a9e4194073f13faca083a3caf990a300a0',  # 加签密钥
     }
     
     return config

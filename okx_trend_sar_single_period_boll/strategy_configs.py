@@ -7,14 +7,14 @@ def get_strategy_config():
         # 基础配置
         'long_coin': 'ETH',
         'initial_capital': 100000,
-        'position_size_percentage': 100,
+        'position_size_percentage': 30,
         
         # 回测时间范围
-        'start_date': '2025-09-01 00:00:00',
-        'end_date': '2025-10-21 19:10:00',
+        'start_date': '2025-10-01 00:00:00',
+        'end_date': '2025-10-31 23:59:59',
         
         # 单周期SAR策略参数
-        'timeframe': '15m',
+        'timeframe': '5m',
         'length': 14,
         'damping': 0.9,
         
@@ -36,7 +36,11 @@ def get_strategy_config():
         
         # 止盈止损配置
         'fixed_take_profit_pct': 0.55,  # 固定止盈百分比（0表示无固定止盈）
-        'max_loss_pct': 0,  # 最大亏损百分比（0表示无最大亏损限制）
+        'max_stop_loss_pct': 2,  # 最大止损百分比（0表示无最大止损限制，与SAR止损对比选择更近的，同时也作为硬性保护位）
+        
+        # 🔴 Delta Volume配置（用于止损）
+        'delta_volume_period': 14,  # 固定周期Delta Volume长度（使用最近N个K线）
+        'delta_volume_stop_loss_threshold': 0.6,  # Delta Volume止损阈值（0.6表示60%，持有多单时Delta%<-60%止损，持有空单时Delta%>+60%止损）
         
         # 🔴 钉钉消息推送配置
         'dingtalk_webhook': 'https://oapi.dingtalk.com/robot/send?access_token=8eecf36111e7448c7dc26244f33e69d0bdd12cfb7b53457882ea725069d74cc1',
@@ -83,11 +87,15 @@ def print_config_info():
         print(f"  🎯 固定止盈: {config['fixed_take_profit_pct']}%")
     else:
         print(f"  🎯 固定止盈: 禁用")
-    if config['max_loss_pct'] > 0:
-        print(f"  🛑 最大亏损: {config['max_loss_pct']}%")
+    if config['max_stop_loss_pct'] > 0:
+        print(f"  🛡️  最大止损: {config['max_stop_loss_pct']}% (与SAR止损对比选择更近的，同时作为硬性保护位)")
     else:
-        print(f"  🛑 最大亏损: 禁用")
-    print(f"  🛡️  动态止损: SAR线跟随")
+        print(f"  🛡️  最大止损: 禁用")
+    print(f"  📊 动态止损: SAR线跟随（双重止损机制）")
+    
+    print(f"\n📊 Delta Volume配置:")
+    print(f"  📏 周期长度: {config.get('delta_volume_period', 14)}个K线")
+    print(f"  🎯 止损阈值: {config.get('delta_volume_stop_loss_threshold', 0.6)*100:.0f}% (多单Delta%<-{config.get('delta_volume_stop_loss_threshold', 0.6)*100:.0f}%止损，空单Delta%>+{config.get('delta_volume_stop_loss_threshold', 0.6)*100:.0f}%止损)")
     
     print(f"\n📱 消息推送配置:")
     if config.get('dingtalk_webhook'):

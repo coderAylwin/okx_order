@@ -43,7 +43,7 @@ TRADING_CONFIG = {
     },
     
     # 杠杆配置
-    'leverage': 3,              # 杠杆倍数（1-125），建议1-5倍
+    'leverage': 1,              # 杠杆倍数（1-125），建议1-5倍
     'margin_mode': 'cross',     # 保证金模式：'cross'=全仓, 'isolated'=逐仓
     
     # 风险控制

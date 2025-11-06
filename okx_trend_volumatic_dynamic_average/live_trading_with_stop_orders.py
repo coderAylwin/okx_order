@@ -109,8 +109,14 @@ class LiveTradingBotWithStopOrders:
         self.current_stop_loss_order_id = None  # 🔴 当前止损单ID
         self.current_take_profit_order_id = None  # 🔴 当前止盈单ID
         
-        # 🔴 账户余额（直接使用账户余额而非配置中的initial_capital）
-        self.account_balance = 0.0
+        # 🔴 从数据库恢复的止损止盈价格（用于同步到策略）
+        self._restored_stop_loss_price = None
+        self._restored_take_profit_price = None
+        
+        # 🔴 账户余额（使用可用余额，而不是总余额）
+        self.account_balance = 0.0  # 可用余额（free）
+        self.account_total_balance = 0.0  # 总余额（total）
+        self.account_used_balance = 0.0  # 已用余额（used）
         
         self.logger.log(f"{'='*80}")
         self.logger.log(f"🛡️  实盘交易机器人 - 止损止盈挂单版")
@@ -118,7 +124,7 @@ class LiveTradingBotWithStopOrders:
         self.logger.log(f"📊 交易对: {self.symbol}")
         self.logger.log(f"⏰ 策略周期: {config['timeframe']}")
         self.logger.log(f"🧪 测试模式: {'是' if self.test_mode else '否'}")
-        self.logger.log(f"🛡️  特性: 开仓自动挂止损止盈单 | SAR止损动态更新")
+        self.logger.log(f"🛡️  特性: 开仓自动挂止损止盈单")
         self.logger.log(f"{'='*80}\n")
     
     def warmup_strategy(self, warmup_days=60):
@@ -201,7 +207,8 @@ class LiveTradingBotWithStopOrders:
                 try:
                     account_info = self.trader.get_account_info()
                     if account_info and 'balance' in account_info:
-                        current_balance = account_info['balance']['total']
+                        # 🔴 使用可用余额（free），而不是总余额（total）
+                        current_balance = account_info['balance']['free']
                     else:
                         current_balance = self.account_balance  # 使用缓存的余额
                 except Exception as e:
@@ -227,7 +234,7 @@ class LiveTradingBotWithStopOrders:
                 content += f"**📦 缓存数据**: {cache_count} 条K线数据\n\n"
                 content += f"---\n\n"
                 content += f"✅ **系统已准备就绪，开始监控市场并执行交易策略**\n\n"
-                content += f"🛡️ **特性**: 开仓自动挂止损止盈单 | SAR止损动态更新\n\n"
+                content += f"🛡️ **特性**: 开仓自动挂止损止盈单\n\n"
                 
                 # 发送消息
                 result = self.strategy.dingtalk_notifier.send_message(title, content)
@@ -300,11 +307,13 @@ class LiveTradingBotWithStopOrders:
             invested_amount = signal.get('invested_amount', 0)
             
             entry_price = signal.get('price', 0)
+            entry_type = signal.get('entry_type', 'immediate')  # 🔴 获取开仓类型：'limit' 或 'immediate'
             stop_loss = round(signal.get('stop_loss'), 1)  # SAR 止损位，保留1位小数
             take_profit = round(signal.get('take_profit'), 1)  # 固定止盈位，保留1位小数
             
             print(f"\n🔍 ========== OPEN_LONG 信号处理 ==========")
             print(f"🔍 信号价格: ${entry_price:.2f}")
+            print(f"🔍 开仓类型: {entry_type} ({'支撑位/阻力位限价单' if entry_type == 'limit' else '立即挂单(买3/卖3)'})")
             print(f"🔍 止损价格: ${stop_loss:.1f}")
             print(f"🔍 止盈价格: ${take_profit:.1f}")
             
@@ -328,18 +337,45 @@ class LiveTradingBotWithStopOrders:
             # 🔴 开仓前更新账户余额，确保使用最新数据
             self._update_account_balance()
             
-            # 🔴 直接使用账户余额，而不是配置中的固定资金量
+            # 🔴 position_size_percentage 表示使用的保证金占账户余额的百分比
+            # 例如：20% 表示使用账户余额的20%作为保证金
+            # 注意：calculate_contract_amount 内部会使用 95% 的安全缓冲，并乘以杠杆
             position_size_pct = self.config.get('position_size_percentage', 100) / 100
+            leverage = TRADING_CONFIG.get('leverage', 1)
+            
+            # 🔴 检查可用保证金是否足够
+            if self.account_balance <= 0:
+                self.logger.log_error(f"❌ 可用保证金不足: ${self.account_balance:.2f} <= 0")
+                self.logger.log_error(f"   总余额: ${getattr(self, 'account_total_balance', 0):.2f}")
+                self.logger.log_error(f"   已用余额: ${getattr(self, 'account_used_balance', 0):.2f}")
+                self.logger.log_error(f"   请检查账户余额或释放已占用的保证金")
+                return
+            
+            # 直接使用账户余额的百分比作为保证金
             actual_invested = self.account_balance * position_size_pct
             
-            print(f"💰 账户余额: ${self.account_balance:.2f}")
-            print(f"💰 实际投入金额: ${actual_invested:.2f} (账户余额${self.account_balance:.2f} × {position_size_pct*100}%)")
+            # 🔴 再次检查：确保需要的保证金不超过可用余额
+            if actual_invested > self.account_balance:
+                self.logger.log_warning(f"⚠️  需要的保证金${actual_invested:.2f}超过可用余额${self.account_balance:.2f}")
+                self.logger.log_warning(f"   自动调整为可用余额的100%: ${self.account_balance:.2f}")
+                actual_invested = self.account_balance * 0.99  # 使用99%避免边界问题
+            
+            # 计算实际持仓价值（用于显示）
+            # calculate_contract_amount 内部：safe_margin = actual_invested * 0.95, position_value = safe_margin * leverage
+            safe_margin = actual_invested * 0.95
+            actual_position_value = safe_margin * leverage
+            
+            print(f"💰 账户余额: 可用=${self.account_balance:.2f} | 总余额=${getattr(self, 'account_total_balance', 0):.2f} | 已用=${getattr(self, 'account_used_balance', 0):.2f}")
+            print(f"💰 使用保证金: ${actual_invested:.2f} (可用余额${self.account_balance:.2f} × {position_size_pct*100}%)")
+            print(f"💰 实际持仓价值: ${actual_position_value:.2f} (保证金${actual_invested:.2f} × 95% × {leverage}倍杠杆 = {actual_position_value/self.account_balance*100:.1f}%可用余额)")
             
             # 🔴 重新计算合约数量（从OKX获取合约规格）
+            # 🔴 显式传入杠杆，确保使用配置的杠杆倍数
             contract_amount = self.trader.calculate_contract_amount(
                 self.symbol,
                 actual_invested,
-                entry_price
+                entry_price,
+                leverage=leverage  # 🔴 显式传入杠杆，确保使用配置的杠杆倍数
             )
             
             print(f"🔍 准备开多单:")
@@ -351,13 +387,26 @@ class LiveTradingBotWithStopOrders:
             print(f"   止盈价格: ${take_profit:.2f}")
             print(f"🔍 开始调用OKX接口开多单...")
             
-            # 调用增强版接口：开仓 + 挂单一次完成
-            result = self.trader.open_long_with_stop_orders(
-                self.symbol, 
-                contract_amount,
-                stop_loss_price=stop_loss,
-                take_profit_price=take_profit
-            )
+            # 🔴 根据开仓类型选择不同的挂单方式
+            if entry_type == 'limit':
+                # 支撑位/阻力位限价单：在指定价格挂限价单
+                print(f"📌 【限价单模式】在支撑位/阻力位价格 ${entry_price:.2f} 挂限价单")
+                result = self.trader.open_long_with_limit_price(
+                    self.symbol,
+                    contract_amount,
+                    entry_price,  # 使用指定的支撑位/阻力位价格
+                    stop_loss_price=stop_loss,
+                    take_profit_price=take_profit
+                )
+            else:
+                # 立即挂单模式：使用买3/卖3价格
+                print(f"⚡ 【立即挂单模式】使用买3/卖3价格挂单")
+                result = self.trader.open_long_with_stop_orders(
+                    self.symbol, 
+                    contract_amount,
+                    stop_loss_price=stop_loss,
+                    take_profit_price=take_profit
+                )
             
             print(f"\n🔍 OKX开多单返回结果:")
             print(f"   入场订单: {result.get('entry_order')}")
@@ -517,11 +566,13 @@ class LiveTradingBotWithStopOrders:
             position_shares = signal.get('position_shares', 0)
             invested_amount = signal.get('invested_amount', 0)
             entry_price = signal.get('price', 0)
+            entry_type = signal.get('entry_type', 'immediate')  # 🔴 获取开仓类型：'limit' 或 'immediate'
             stop_loss = round(signal.get('stop_loss'), 1)  # SAR 止损位，保留1位小数
             take_profit = round(signal.get('take_profit'), 1)  # 固定止盈位，保留1位小数
             
             print(f"\n🔍 ========== OPEN_SHORT 信号处理 ==========")
             print(f"🔍 信号价格: ${entry_price:.2f}")
+            print(f"🔍 开仓类型: {entry_type} ({'支撑位/阻力位限价单' if entry_type == 'limit' else '立即挂单(买3/卖3)'})")
             print(f"🔍 止损价格: ${stop_loss:.1f}")
             print(f"🔍 止盈价格: ${take_profit:.1f}")
             
@@ -545,18 +596,45 @@ class LiveTradingBotWithStopOrders:
             # 🔴 开仓前更新账户余额，确保使用最新数据
             self._update_account_balance()
             
-            # 🔴 直接使用账户余额，而不是配置中的固定资金量
+            # 🔴 position_size_percentage 表示使用的保证金占账户余额的百分比
+            # 例如：20% 表示使用账户余额的20%作为保证金
+            # 注意：calculate_contract_amount 内部会使用 95% 的安全缓冲，并乘以杠杆
             position_size_pct = self.config.get('position_size_percentage', 100) / 100
+            leverage = TRADING_CONFIG.get('leverage', 1)
+            
+            # 🔴 检查可用保证金是否足够
+            if self.account_balance <= 0:
+                self.logger.log_error(f"❌ 可用保证金不足: ${self.account_balance:.2f} <= 0")
+                self.logger.log_error(f"   总余额: ${getattr(self, 'account_total_balance', 0):.2f}")
+                self.logger.log_error(f"   已用余额: ${getattr(self, 'account_used_balance', 0):.2f}")
+                self.logger.log_error(f"   请检查账户余额或释放已占用的保证金")
+                return
+            
+            # 直接使用账户余额的百分比作为保证金
             actual_invested = self.account_balance * position_size_pct
             
-            print(f"💰 账户余额: ${self.account_balance:.2f}")
-            print(f"💰 实际投入金额: ${actual_invested:.2f} (账户余额${self.account_balance:.2f} × {position_size_pct*100}%)")
+            # 🔴 再次检查：确保需要的保证金不超过可用余额
+            if actual_invested > self.account_balance:
+                self.logger.log_warning(f"⚠️  需要的保证金${actual_invested:.2f}超过可用余额${self.account_balance:.2f}")
+                self.logger.log_warning(f"   自动调整为可用余额的100%: ${self.account_balance:.2f}")
+                actual_invested = self.account_balance * 0.99  # 使用99%避免边界问题
+            
+            # 计算实际持仓价值（用于显示）
+            # calculate_contract_amount 内部：safe_margin = actual_invested * 0.95, position_value = safe_margin * leverage
+            safe_margin = actual_invested * 0.95
+            actual_position_value = safe_margin * leverage
+            
+            print(f"💰 账户余额: 可用=${self.account_balance:.2f} | 总余额=${getattr(self, 'account_total_balance', 0):.2f} | 已用=${getattr(self, 'account_used_balance', 0):.2f}")
+            print(f"💰 使用保证金: ${actual_invested:.2f} (可用余额${self.account_balance:.2f} × {position_size_pct*100}%)")
+            print(f"💰 实际持仓价值: ${actual_position_value:.2f} (保证金${actual_invested:.2f} × 95% × {leverage}倍杠杆 = {actual_position_value/self.account_balance*100:.1f}%可用余额)")
             
             # 🔴 重新计算合约数量（从OKX获取合约规格）
+            # 🔴 显式传入杠杆，确保使用配置的杠杆倍数
             contract_amount = self.trader.calculate_contract_amount(
                 self.symbol,
                 actual_invested,
-                entry_price
+                entry_price,
+                leverage=leverage  # 🔴 显式传入杠杆，确保使用配置的杠杆倍数
             )
             
             print(f"🔍 准备开空单:")
@@ -568,12 +646,26 @@ class LiveTradingBotWithStopOrders:
             print(f"   止盈价格: ${take_profit:.2f}")
             print(f"🔍 开始调用OKX接口开空单...")
             
-            result = self.trader.open_short_with_stop_orders(
-                self.symbol,
-                contract_amount,
-                stop_loss_price=stop_loss,
-                take_profit_price=take_profit
-            )
+            # 🔴 根据开仓类型选择不同的挂单方式
+            if entry_type == 'limit':
+                # 支撑位/阻力位限价单：在指定价格挂限价单
+                print(f"📌 【限价单模式】在支撑位/阻力位价格 ${entry_price:.2f} 挂限价单")
+                result = self.trader.open_short_with_limit_price(
+                    self.symbol,
+                    contract_amount,
+                    entry_price,  # 使用指定的支撑位/阻力位价格
+                    stop_loss_price=stop_loss,
+                    take_profit_price=take_profit
+                )
+            else:
+                # 立即挂单模式：使用买3/卖3价格
+                print(f"⚡ 【立即挂单模式】使用买3/卖3价格挂单")
+                result = self.trader.open_short_with_stop_orders(
+                    self.symbol,
+                    contract_amount,
+                    stop_loss_price=stop_loss,
+                    take_profit_price=take_profit
+                )
             
             print(f"\n🔍 OKX开空单返回结果:")
             print(f"   入场订单: {result.get('entry_order')}")
@@ -874,10 +966,23 @@ class LiveTradingBotWithStopOrders:
             
             self.logger.log(f"✅ 平仓完成: 盈亏 ${profit_loss:+,.2f}")
         
-        # 🔴 更新 SAR 止损位
+        # 🔴 更新止损位
         elif signal_type == 'UPDATE_STOP_LOSS':
-            new_stop_loss = round(signal.get('new_stop_loss'), 1) if signal.get('new_stop_loss') else None  # 保留1位小数
-            old_stop_loss = round(signal.get('old_stop_loss'), 1) if signal.get('old_stop_loss') else None  # 保留1位小数
+            # 🔴 从信号中获取新止损价（优先使用 new_stop_loss，兼容 price 字段）
+            new_stop_loss = signal.get('new_stop_loss') or signal.get('price')
+            new_stop_loss = round(new_stop_loss, 1) if new_stop_loss is not None else None  # 保留1位小数
+            
+            # 🔴 获取旧止损价（优先从信号，其次从策略）
+            old_stop_loss = signal.get('old_stop_loss')
+            if old_stop_loss is None:
+                # 从策略获取当前止损价
+                if hasattr(self.strategy, 'stop_loss_level') and self.strategy.stop_loss_level is not None:
+                    old_stop_loss = self.strategy.stop_loss_level
+                    print(f"   📊 从策略获取旧止损价: ${old_stop_loss:.2f}")
+                else:
+                    print(f"   ⚠️  策略中无止损价记录")
+            
+            old_stop_loss = round(old_stop_loss, 1) if old_stop_loss is not None else None  # 保留1位小数
             
             print(f"\n🔍 ========== UPDATE_STOP_LOSS 信号处理 ==========")
             print(f"🔍 当前持仓: {self.current_position}")
@@ -886,6 +991,24 @@ class LiveTradingBotWithStopOrders:
             print(f"🔍 current_trade_id: {self.current_trade_id}")
             print(f"🔍 current_entry_order_id: {self.current_entry_order_id}")
             print(f"🔍 current_stop_loss_order_id: {self.current_stop_loss_order_id}")
+            
+            if not self.current_position:
+                print(f"❌ 跳过止损更新: 当前无持仓")
+                return
+            
+            if not new_stop_loss:
+                print(f"❌ 跳过止损更新: 新止损价格为空")
+                return
+            
+            # 🔴 比较新旧止损价，如果有变化才更新
+            if old_stop_loss is not None and abs(new_stop_loss - old_stop_loss) < 0.01:  # 价格差异小于0.01，认为是相同价格
+                print(f"✅ 跳过止损更新: 新止损价${new_stop_loss:.2f}与旧止损价${old_stop_loss:.2f}相同，无需更新")
+                return
+            
+            if old_stop_loss is not None:
+                print(f"🔄 止损价变化: ${old_stop_loss:.2f} → ${new_stop_loss:.2f}")
+            else:
+                print(f"🔄 首次设置止损价: ${new_stop_loss:.2f}")
             
             if self.current_position and new_stop_loss:
                 print(f"🔍 开始调用OKX接口更新止损...")
@@ -900,6 +1023,12 @@ class LiveTradingBotWithStopOrders:
                 print(f"🔍 OKX接口返回结果: {result}")
                 print(f"🔍 result类型: {type(result)}")
                 
+                # 🔴 先同步止损价格更新到策略（无论是否保存到数据库）
+                if result:
+                    # 更新策略中的止损价
+                    self.strategy.sync_stop_loss_update(new_stop_loss)
+                    print(f"✅ 策略止损价已更新: ${new_stop_loss:.2f}")
+                
                 # 🔴 保存止损单更新记录到数据库（只保存到okx_stop_orders，不保存到okx_orders）
                 try:
                     print(f"🔍 检查保存条件:")
@@ -907,11 +1036,19 @@ class LiveTradingBotWithStopOrders:
                     print(f"   - 'id' in result: {'id' in result if result else False}")
                     print(f"   - current_trade_id存在: {self.current_trade_id is not None}")
                     
-                    if result and 'id' in result and self.current_trade_id:
+                    # 🔴 获取订单ID（优先从 result 的 id 字段，如果没有则尝试从 result 本身获取）
+                    order_id = None
+                    if result:
+                        if isinstance(result, dict):
+                            order_id = result.get('id')
+                        elif hasattr(result, 'id'):
+                            order_id = result.id
+                    
+                    if order_id and self.current_trade_id:
                         print(f"💾 更新止损单记录: 旧止损=${old_stop_loss:.1f} → 新止损=${new_stop_loss:.1f}")
                         print(f"💾 trade_id={self.current_trade_id}, old_order_id={self.current_stop_loss_order_id}")
                         
-                        new_order_id = result['id']
+                        new_order_id = order_id
                         
                         # 保存止损单更新记录到okx_stop_orders表
                         # 注意：okx_orders只记录实际成交的订单（开仓/平仓），不记录条件单
@@ -926,14 +1063,11 @@ class LiveTradingBotWithStopOrders:
                             amount=self.current_position_shares,
                             status='active',
                             old_trigger_price=old_stop_loss,
-                            update_reason=signal.get('reason', 'SAR动态止损更新')
+                            update_reason=signal.get('reason', '周期结束更新止损单')
                         )
                         
                         # 更新当前止损单ID
                         self.current_stop_loss_order_id = new_order_id
-                        
-                        # 🔴 同步止损价格更新到策略
-                        self.strategy.sync_stop_loss_update(new_stop_loss)
                         
                         print(f"💾 ✅ 止损单更新已保存到okx_stop_orders表: new_order_id={new_order_id}")
                     else:
@@ -1348,6 +1482,7 @@ class LiveTradingBotWithStopOrders:
             self.strategy.sync_position_close("持仓平仓")
             self.strategy.current_invested_amount = None
             self.strategy.position_shares = None
+            self.strategy.position = None
         
         print(f"✅ 持仓状态已清空")
     
@@ -1435,13 +1570,17 @@ class LiveTradingBotWithStopOrders:
         print(f"{'='*80}\n")
     
     def _update_account_balance(self):
-        """更新账户余额"""
+        """更新账户余额（使用可用余额free，而不是总余额total）"""
         try:
             account_info = self.trader.get_account_info()
             if account_info:
                 old_balance = self.account_balance
-                self.account_balance = account_info['balance']['total']
-                self.logger.log(f"💰 账户余额已更新: ${old_balance:.2f} → ${self.account_balance:.2f} "
+                # 🔴 使用可用余额（free），而不是总余额（total）
+                # 总余额 = 可用余额 + 已用余额（已占用的保证金）
+                self.account_balance = account_info['balance']['free']  # 可用余额
+                self.account_total_balance = account_info['balance']['total']  # 总余额
+                self.account_used_balance = account_info['balance']['used']  # 已用余额
+                self.logger.log(f"💰 账户余额已更新: 可用=${self.account_balance:.2f} | 总余额=${self.account_total_balance:.2f} | 已用=${self.account_used_balance:.2f} "
                               f"(变化: ${self.account_balance - old_balance:+,.2f})")
             else:
                 self.logger.log_warning("⚠️  获取账户信息失败，余额未更新")
@@ -1550,13 +1689,24 @@ class LiveTradingBotWithStopOrders:
                         status='active'
                     ).all()
                     
+                    stop_loss_price = None
+                    take_profit_price = None
+                    
                     for order in stop_orders:
                         if order.order_type == 'STOP_LOSS':
                             self.current_stop_loss_order_id = order.order_id
-                            self.logger.log(f"✅ 恢复止损单: {order.order_id}")
+                            stop_loss_price = order.trigger_price  # 🔴 获取止损价格
+                            self.logger.log(f"✅ 恢复止损单: {order.order_id}, 止损价=${stop_loss_price:.2f}")
                         elif order.order_type == 'TAKE_PROFIT':
                             self.current_take_profit_order_id = order.order_id
-                            self.logger.log(f"✅ 恢复止盈单: {order.order_id}")
+                            take_profit_price = order.trigger_price  # 🔴 获取止盈价格
+                            self.logger.log(f"✅ 恢复止盈单: {order.order_id}, 止盈价=${take_profit_price:.2f}")
+                    
+                    # 🔴 保存止损止盈价格，供后续同步策略使用
+                    if stop_loss_price is not None:
+                        self._restored_stop_loss_price = stop_loss_price
+                    if take_profit_price is not None:
+                        self._restored_take_profit_price = take_profit_price
                             
                 finally:
                     self.trading_db.close_session(session)
@@ -1588,22 +1738,38 @@ class LiveTradingBotWithStopOrders:
                 
                 print(f"   ✅ 策略状态已更新: position={self.strategy.position}, entry_price={self.strategy.entry_price}")
                 
-                # 设置止损止盈位（VIDYA策略没有SAR，使用基本配置）
-                # self.strategy.stop_loss_level = None  # VIDYA策略会在开仓时设置止损位
+                # 🔴 优先使用从数据库恢复的止损止盈价格（如果存在）
+                # 如果数据库中有止损止盈单记录，使用实际的触发价格
+                if hasattr(self, '_restored_stop_loss_price') and self._restored_stop_loss_price is not None:
+                    self.strategy.stop_loss_level = self._restored_stop_loss_price
+                    print(f"   ✅ 使用数据库止损价: ${self._restored_stop_loss_price:.2f}")
+                else:
+                    # 如果没有数据库记录，使用固定百分比计算
+                    if self.strategy.max_loss_pct > 0:
+                        if position_side == 'long':
+                            self.strategy.stop_loss_level = trade.entry_price * (1 - self.strategy.max_loss_pct / 100)
+                        else:
+                            self.strategy.stop_loss_level = trade.entry_price * (1 + self.strategy.max_loss_pct / 100)
+                        print(f"   ⚠️  数据库无止损单记录，使用固定百分比计算: ${self.strategy.stop_loss_level:.2f}")
                 
-                if self.strategy.fixed_take_profit_pct > 0:
-                    if position_side == 'long':
-                        self.strategy.take_profit_level = trade.entry_price * (1 + self.strategy.fixed_take_profit_pct / 100)
-                    else:
-                        self.strategy.take_profit_level = trade.entry_price * (1 - self.strategy.fixed_take_profit_pct / 100)
+                # 🔴 同步最大亏损位（与止损位相同）
+                if self.strategy.stop_loss_level is not None:
+                    self.strategy.max_loss_level = self.strategy.stop_loss_level
                 
-                if self.strategy.max_loss_pct > 0:
-                    if position_side == 'long':
-                        self.strategy.max_loss_level = trade.entry_price * (1 - self.strategy.max_loss_pct / 100)
-                    else:
-                        self.strategy.max_loss_level = trade.entry_price * (1 + self.strategy.max_loss_pct / 100)
+                # 🔴 优先使用从数据库恢复的止盈价格（如果存在）
+                if hasattr(self, '_restored_take_profit_price') and self._restored_take_profit_price is not None:
+                    self.strategy.take_profit_level = self._restored_take_profit_price
+                    print(f"   ✅ 使用数据库止盈价: ${self._restored_take_profit_price:.2f}")
+                else:
+                    # 如果没有数据库记录，使用固定百分比计算
+                    if self.strategy.fixed_take_profit_pct > 0:
+                        if position_side == 'long':
+                            self.strategy.take_profit_level = trade.entry_price * (1 + self.strategy.fixed_take_profit_pct / 100)
+                        else:
+                            self.strategy.take_profit_level = trade.entry_price * (1 - self.strategy.fixed_take_profit_pct / 100)
+                        print(f"   ⚠️  数据库无止盈单记录，使用固定百分比计算: ${self.strategy.take_profit_level:.2f}")
                 
-                self.logger.log(f"✅ 策略状态已同步: {position_side}, 开仓价=${trade.entry_price:.2f}")
+                self.logger.log(f"✅ 策略状态已同步: {position_side}, 开仓价=${trade.entry_price:.2f}, 止损=${self.strategy.stop_loss_level:.2f}, 止盈=${self.strategy.take_profit_level:.2f}")
             else:
                 print(f"   ⚠️  未找到交易记录，无法同步策略状态")
                 self.logger.log_warning("⚠️  无法同步策略状态：未找到交易记录")
@@ -2168,8 +2334,9 @@ class LiveTradingBotWithStopOrders:
                 return
             
             # 检查最近3分钟的数据
+            # 🔴 标准化缓存中的时间戳（去掉秒和微秒）
             recent_klines = list(self.kline_buffer.klines)[-3:] if len(self.kline_buffer.klines) >= 3 else list(self.kline_buffer.klines)
-            cached_times = {kline['timestamp'] for kline in recent_klines}
+            cached_times = {kline['timestamp'].replace(second=0, microsecond=0) for kline in recent_klines}
             
             # 计算应该存在的时间点（最近3分钟）
             expected_times = []
@@ -2180,8 +2347,10 @@ class LiveTradingBotWithStopOrders:
             # 找出缺失的时间点
             missing_times = []
             for expected_time in expected_times:
-                if expected_time not in cached_times:
-                    missing_times.append(expected_time)
+                # 🔴 确保时间戳标准化后再比较
+                normalized_expected = expected_time.replace(second=0, microsecond=0)
+                if normalized_expected not in cached_times:
+                    missing_times.append(normalized_expected)
             
             if not missing_times:
                 # self.logger.log("✅ 数据完整性检查通过")
@@ -2213,11 +2382,13 @@ class LiveTradingBotWithStopOrders:
                     added_count = 0
                     for kline in api_klines:
                         kline_time = datetime.fromtimestamp(kline[0] / 1000)
+                        # 🔴 标准化时间戳（去掉秒和微秒，只保留到分钟）
+                        normalized_kline_time = kline_time.replace(second=0, microsecond=0)
                         
-                        # 只补充缺失的时间点
-                        if kline_time in missing_times:
+                        # 只补充缺失的时间点（使用标准化后的时间戳比较）
+                        if normalized_kline_time in missing_times:
                             buffer_size = self.kline_buffer.add_kline(
-                                kline_time,
+                                normalized_kline_time,  # 使用标准化后的时间戳
                                 kline[1],  # open
                                 kline[2],  # high
                                 kline[3],  # low
@@ -2228,7 +2399,7 @@ class LiveTradingBotWithStopOrders:
                             # 🔴 无论是否成功添加到缓存（可能重复），都记录这条数据
                             # 因为后续需要检查是否为周期末尾并触发策略
                             filled_klines.append({
-                                'timestamp': kline_time,
+                                'timestamp': normalized_kline_time,  # 使用标准化后的时间戳
                                 'open': kline[1],
                                 'high': kline[2],
                                 'low': kline[3],
@@ -2238,10 +2409,10 @@ class LiveTradingBotWithStopOrders:
                             
                             if buffer_size != -1:  # 成功添加
                                 added_count += 1
-                                self.logger.log(f"✅ 补充数据: {kline_time.strftime('%H:%M')} "
+                                self.logger.log(f"✅ 补充数据: {normalized_kline_time.strftime('%H:%M')} "
                                               f"收盘:${kline[4]:.2f}")
                             else:
-                                self.logger.log(f"ℹ️  数据已存在: {kline_time.strftime('%H:%M')} "
+                                self.logger.log(f"ℹ️  数据已存在: {normalized_kline_time.strftime('%H:%M')} "
                                               f"收盘:${kline[4]:.2f} (将检查是否需要触发策略)")
                     
                     # 🔴 只要找到了缺失数据（无论是否重复），就检查是否需要触发策略
@@ -2251,9 +2422,7 @@ class LiveTradingBotWithStopOrders:
                         else:
                             self.logger.log(f"ℹ️  缺失数据已存在于缓存，检查是否需要触发策略...")
                         
-                        # 🔴 检查补充的数据中是否包含周期末尾数据
-                        # 例如：5分钟周期，如果补充的是11:39的数据，才触发策略计算
-                        # 如果补充的是11:37或11:38，则不触发（等到周期完整后再触发）
+                        # 🔴 处理补充的数据：无论是否是周期末尾，都要更新策略（包括Delta Volume计算）
                         for filled_kline in filled_klines:
                             minute = filled_kline['timestamp'].minute
                             is_period_last_minute = (minute + 1) % self.period_minutes == 0
@@ -2264,27 +2433,39 @@ class LiveTradingBotWithStopOrders:
                             print(f"   是周期末尾: {is_period_last_minute}")
                             print(f"   首周期完成: {self.first_period_completed}")
                             
-                            if is_period_last_minute:
-                                # 🔴 如果是首周期，先设置首周期完成标志
-                                if not self.first_period_completed:
-                                    self.first_period_completed = True
-                                    self.logger.log(f"\n🎯 首个完整周期完成（通过数据补充检测）")
-                                    self.logger.log(f"✅ 从下一个周期开始处理交易信号\n")
+                            # 🔴 如果是首周期且是周期末尾，先设置首周期完成标志
+                            if is_period_last_minute and not self.first_period_completed:
+                                self.first_period_completed = True
+                                self.logger.log(f"\n🎯 首个完整周期完成（通过数据补充检测）")
+                                self.logger.log(f"✅ 从下一个周期开始处理交易信号\n")
+                            
+                            # 🔴 无论是否是周期末尾，都要调用策略更新（计算Delta Volume等）
+                            if self.first_period_completed:
+                                if is_period_last_minute:
+                                    # 周期末尾：触发K线生成和策略计算
+                                    self.logger.log(f"🎯 补充了周期末尾数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 立即触发K线聚合和指标计算...")
+                                    next_minute = filled_kline['timestamp'] + timedelta(minutes=1)
+                                    result = self.strategy.update(
+                                        next_minute,
+                                        filled_kline['close'],
+                                        filled_kline['close'],
+                                        filled_kline['close'],
+                                        filled_kline['close'],
+                                        0
+                                    )
+                                else:
+                                    # 非周期末尾：正常更新策略（主要是Delta Volume计算）
+                                    self.logger.log(f"📊 补充了非周期末尾数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 更新策略（包括Delta Volume计算）...")
+                                    result = self.strategy.update(
+                                        filled_kline['timestamp'],
+                                        filled_kline['open'],
+                                        filled_kline['high'],
+                                        filled_kline['low'],
+                                        filled_kline['close'],
+                                        filled_kline.get('volume', 0)
+                                    )
                                 
-                                self.logger.log(f"🎯 补充了周期末尾数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 立即触发K线聚合和指标计算...")
-                                
-                                # 触发K线生成和策略计算
-                                next_minute = filled_kline['timestamp'] + timedelta(minutes=1)
-                                result = self.strategy.update(
-                                    next_minute,
-                                    filled_kline['close'],
-                                    filled_kline['close'],
-                                    filled_kline['close'],
-                                    filled_kline['close'],
-                                    0
-                                )
-                                
-                                # 保存指标信号到数据库
+                                # 保存指标信号到数据库（只在有SAR结果时）
                                 if result and 'sar_result' in result:
                                     kline_timestamp = result.get('kline_timestamp', filled_kline['timestamp'])
                                     self._save_indicator_signal(
@@ -2294,13 +2475,39 @@ class LiveTradingBotWithStopOrders:
                                         filled_kline['high'], 
                                         filled_kline['low'], 
                                         filled_kline['close'], 
-                                        filled_kline['volume']
+                                        filled_kline.get('volume', 0)
                                     )
                                 
-                                # 处理交易信号
+                                # 处理交易信号（只在首个完整周期完成后）
                                 if result and result.get('signals'):
                                     for signal in result['signals']:
                                         self.execute_signal(signal)
+                            else:
+                                # 🔴 首个完整周期未完成时，也要更新策略（计算Delta Volume，但不处理交易信号）
+                                self.logger.log(f"📊 补充了数据 ({filled_kline['timestamp'].strftime('%H:%M')}), 更新策略（计算Delta Volume，等待首个完整周期）...")
+                                result = self.strategy.update(
+                                    filled_kline['timestamp'],
+                                    filled_kline['open'],
+                                    filled_kline['high'],
+                                    filled_kline['low'],
+                                    filled_kline['close'],
+                                    filled_kline.get('volume', 0)
+                                )
+                        
+                        # 🔴 补充数据后，验证数据是否已正确添加到缓存
+                        # 避免下次检查时再次发现"缺失"
+                        if added_count > 0:
+                            # 重新获取缓存中的时间戳（标准化后）
+                            updated_recent_klines = list(self.kline_buffer.klines)[-3:] if len(self.kline_buffer.klines) >= 3 else list(self.kline_buffer.klines)
+                            updated_cached_times = {kline['timestamp'].replace(second=0, microsecond=0) for kline in updated_recent_klines}
+                            
+                            # 验证补充的数据是否真的在缓存中
+                            for filled_kline in filled_klines:
+                                filled_time = filled_kline['timestamp'].replace(second=0, microsecond=0)
+                                if filled_time not in updated_cached_times:
+                                    self.logger.log_warning(f"⚠️  警告: 补充的数据 {filled_time.strftime('%H:%M')} 未正确添加到缓存")
+                                else:
+                                    self.logger.log(f"✅ 验证: 补充的数据 {filled_time.strftime('%H:%M')} 已正确添加到缓存")
                         
                         return  # 补充成功，退出
                     else:
@@ -2353,8 +2560,11 @@ class LiveTradingBotWithStopOrders:
             close_price = kline[4]
             volume = kline[5] if len(kline) > 5 else 0
             
+            # 🔴 标准化时间戳（去掉秒和微秒，只保留到分钟）
+            normalized_timestamp = timestamp.replace(second=0, microsecond=0)
+            
             buffer_size = self.kline_buffer.add_kline(
-                timestamp, open_price, high_price, low_price, close_price, volume
+                normalized_timestamp, open_price, high_price, low_price, close_price, volume
             )
             
             if buffer_size == -1:
@@ -2411,7 +2621,36 @@ class LiveTradingBotWithStopOrders:
                 
                 # 🔴 处理交易信号
                 if result and result.get('signals'):
+                    # 🔴 在周期结束时，先验证实际持仓状态，确保策略状态与OKX一致
+                    has_okx_position = False
+                    if is_period_last_minute:
+                        try:
+                            positions = self.trader.exchange.fetch_positions([self.symbol])
+                            has_okx_position = self._check_okx_actual_positions(positions)
+                            
+                            # 如果OKX无持仓，但策略状态显示有持仓，清空策略状态
+                            if not has_okx_position and self.strategy.position is not None:
+                                self.logger.log_warning(f"⚠️  检测到状态不一致：OKX无持仓，但策略状态显示有持仓({self.strategy.position})")
+                                self.logger.log(f"🔄 清空策略持仓状态，确保一致性")
+                                self.strategy.position = None
+                                self.strategy.entry_price = None
+                                self.strategy.stop_loss_level = None
+                                self.strategy.take_profit_level = None
+                                self.strategy.position_shares = None
+                        except Exception as e:
+                            self.logger.log_warning(f"⚠️  验证持仓状态失败: {e}")
+                    
+                    # 🔴 过滤信号：如果没有实际持仓，过滤掉UPDATE_STOP_LOSS信号
+                    filtered_signals = []
                     for signal in result['signals']:
+                        if signal.get('type') == 'UPDATE_STOP_LOSS':
+                            # 检查是否有实际持仓
+                            if not has_okx_position and self.current_position is None:
+                                self.logger.log_warning(f"⚠️  过滤UPDATE_STOP_LOSS信号：无实际持仓")
+                                continue
+                        filtered_signals.append(signal)
+                    
+                    for signal in filtered_signals:
                         self.execute_signal(signal)
                         
             elif is_period_last_minute:
@@ -2450,13 +2689,17 @@ class LiveTradingBotWithStopOrders:
         """启动实盘交易"""
         self.logger.log("🚀 启动实盘交易 - 止损止盈挂单版...")
         
-        # 设置杠杆
+        # 🔴 设置杠杆（即使是1倍也要设置，确保账户杠杆与配置一致）
         leverage = TRADING_CONFIG.get('leverage', 1)
         margin_mode = TRADING_CONFIG.get('margin_mode', 'cross')
         
-        if leverage > 1:
-            self.logger.log(f"⚙️  设置杠杆: {leverage}x, 模式: {margin_mode}")
-            self.trader.set_leverage(self.symbol, leverage, margin_mode)
+        self.logger.log(f"⚙️  设置杠杆: {leverage}x, 模式: {margin_mode}")
+        if self.trader.set_leverage(self.symbol, leverage, margin_mode):
+            # 设置成功后，确保 trader 的 leverage 属性与配置一致
+            self.trader.leverage = leverage
+            self.logger.log(f"✅ 杠杆已设置并同步: {leverage}x")
+        else:
+            self.logger.log_warning(f"⚠️  杠杆设置失败，但继续运行（使用初始化时的杠杆: {self.trader.leverage}x）")
         
         # 预热策略
         self.warmup_strategy()
@@ -2476,8 +2719,11 @@ class LiveTradingBotWithStopOrders:
         try:
             account_info = self.trader.get_account_info()
             if account_info and 'balance' in account_info:
-                self.account_balance = account_info['balance']['total']
-                self.logger.log(f"💰 账户余额: ${self.account_balance:,.2f} USDT")
+                # 🔴 使用可用余额（free），而不是总余额（total）
+                self.account_balance = account_info['balance']['free']  # 可用余额
+                self.account_total_balance = account_info['balance']['total']  # 总余额
+                self.account_used_balance = account_info['balance']['used']  # 已用余额
+                self.logger.log(f"💰 账户余额: 可用=${self.account_balance:,.2f} | 总余额=${self.account_total_balance:,.2f} | 已用=${self.account_used_balance:,.2f} USDT")
                 self.logger.log(f"📊 仓位比例: {self.config.get('position_size_percentage', 100)}%")
                 self.logger.log(f"💵 可用保证金: ${self.account_balance * self.config.get('position_size_percentage', 100) / 100:,.2f} USDT\n")
             else:
@@ -2495,12 +2741,43 @@ class LiveTradingBotWithStopOrders:
             traceback.print_exc()
             return  # 🔴 直接返回，不启动交易循环
         
-        # 🔴 启动时同步OKX持仓状态到程序
+        # 🔴 启动时同步OKX持仓状态到程序（必须成功，否则可能导致状态不一致）
         try:
+            self.logger.log(f"\n{'='*80}")
+            self.logger.log(f"🔍 【启动检查】开始验证持仓状态...")
+            self.logger.log(f"{'='*80}")
+            
             self._sync_position_on_startup()
+            
+            # 🔴 验证同步结果：检查策略状态是否与本地状态一致
+            if self.strategy:
+                if self.current_position is None and self.strategy.position is not None:
+                    self.logger.log_warning(f"⚠️  检测到状态不一致：本地无持仓，但策略状态显示有持仓({self.strategy.position})")
+                    self.logger.log(f"🔄 清空策略持仓状态")
+                    self.strategy.position = None
+                    self.strategy.entry_price = None
+                    self.strategy.stop_loss_level = None
+                    self.strategy.take_profit_level = None
+                elif self.current_position is not None and self.strategy.position is None:
+                    self.logger.log_warning(f"⚠️  检测到状态不一致：本地有持仓({self.current_position})，但策略状态显示无持仓")
+                    self.logger.log(f"🔄 同步策略状态到本地持仓")
+                    self._sync_strategy_position_state(self.current_position)
+                
+                self.logger.log(f"✅ 启动检查完成: 本地持仓={self.current_position}, 策略持仓={self.strategy.position}")
+            
         except Exception as e:
-            self.logger.log_warning(f"⚠️  同步持仓状态失败: {e}")
-            self.logger.log_warning("程序将继续运行，但建议手动检查持仓状态")
+            self.logger.log_error(f"❌ 启动时同步持仓状态失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.logger.log_error("⚠️  警告：持仓状态同步失败，可能导致状态不一致！")
+            self.logger.log_error("   建议：")
+            self.logger.log_error("   1. 检查API配置是否正确")
+            self.logger.log_error("   2. 检查网络连接")
+            self.logger.log_error("   3. 手动检查OKX持仓状态")
+            self.logger.log_error("   4. 必要时手动清空策略状态")
+            # 🔴 不继续运行，因为状态不一致可能导致错误交易
+            self.logger.log_error("\n程序将退出，请修复问题后重试。")
+            return
         
         self.is_running = True
         self.logger.log(f"⏰ 每分钟01-05秒更新，{self.config['timeframe']}周期整点触发策略")
@@ -2569,11 +2846,11 @@ class LiveTradingBotWithStopOrders:
                     self.periodic_sync_with_okx()
                     last_periodic_sync_time = current_time
                 
-                # 🔴 每20秒：检查并优化止损单（V2混合方案）
+                # 🔴 每10秒：检查并优化止损单和开仓条件单（V2混合方案）
                 should_optimize_check = (
                     not self.is_warmup_phase and
                     hasattr(self.trader, 'check_and_optimize_stop_orders') and
-                    (last_optimize_check_time is None or (current_time - last_optimize_check_time).total_seconds() >= 20)  # 20秒
+                    (last_optimize_check_time is None or (current_time - last_optimize_check_time).total_seconds() >= 10)  # 10秒
                 )
                 
                 if should_optimize_check:

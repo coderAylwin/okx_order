@@ -7,17 +7,18 @@ import json
 from datetime import datetime
 
 class DatabaseService:
-    def __init__(self, config=None, host='localhost', port=3306, user='root', password='', database=''):
+    def __init__(self, config=None, host='localhost', port=3306, user='root', password='', database='', charset=None):
         """
         初始化数据库连接
         
         Args:
-            config: 配置字典（包含host, port, user, password, database）
+            config: 配置字典（包含host, port, user, password, database, charset等）
             host: 数据库主机地址
             port: 数据库端口
             user: 数据库用户名
             password: 数据库密码
             database: 数据库名称
+            charset: 字符集（可选，内部默认使用utf8mb4）
         """
         if config is not None:
             # 如果传入了配置字典，使用配置字典的值
@@ -26,6 +27,7 @@ class DatabaseService:
             self.user = config.get('user', 'root')
             self.password = config.get('password', '')
             self.database = config.get('database', '')
+            # charset 参数会被忽略，因为 connect() 方法中已经硬编码为 utf8mb4
         else:
             # 否则使用单独的参数
             self.host = host
@@ -33,6 +35,7 @@ class DatabaseService:
             self.user = user
             self.password = password
             self.database = database
+            # charset 参数会被忽略
         
         self.connection = None
         

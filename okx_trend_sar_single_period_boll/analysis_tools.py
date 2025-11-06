@@ -910,7 +910,7 @@ class StrategyAnalyzer:
             f.write(f"最大网格数: {config.get('max_grid_size', 0)}\n")
             f.write(f"下跌触发阈值: {config.get('down_pct', 0)}%\n")
             f.write(f"上涨触发阈值: {config.get('up_pct', 0)}%\n")
-            f.write(f"最大亏损: {config.get('max_loss_pct', 0)}%\n")
+            f.write(f"最大止损: {config.get('max_stop_loss_pct', 0)}% (双重止损机制)\n")
             f.write(f"止盈类型: {config.get('take_profit_type', 0)}\n")
             f.write(f"移动止盈倍数: {config.get('stop_profit_multiple', 0)}\n")
             f.write(f"首次止盈比例: {config.get('first_take_profit_ratio', 0)}\n")

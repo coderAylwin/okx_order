@@ -98,10 +98,13 @@ def check_strategy_config():
     print(f"💰 初始资金: ${config['initial_capital']:,.2f}")
     print(f"📊 仓位比例: {config['position_size_percentage']}%")
     print(f"🎯 固定止盈: {config['fixed_take_profit_pct']}%")
-    print(f"🛑 最大亏损: {config['max_loss_pct']}%")
+    if config.get('max_stop_loss_pct', 0) > 0:
+        print(f"🛡️  最大止损: {config['max_stop_loss_pct']}% (双重止损机制)")
+    else:
+        print(f"🛡️  最大止损: 禁用")
     
     # 检查止盈止损设置
-    if config['fixed_take_profit_pct'] == 0 and config['max_loss_pct'] == 0:
+    if config['fixed_take_profit_pct'] == 0 and config.get('max_stop_loss_pct', 0) == 0:
         warnings.append("⚠️  未设置止盈和止损（高风险！）")
     
     if config['position_size_percentage'] == 100:
