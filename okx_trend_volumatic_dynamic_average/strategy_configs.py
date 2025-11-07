@@ -37,7 +37,7 @@ def get_strategy_config():
         
         # 📐 布林带中轨角度计算器配置（基于30分钟K线，整点开仓）
         # 🚀 激进配置：快速捕捉大行情，更敏感
-        'enable_bb_angle_entry': False,             # 是否启用布林带角度独立开仓
+        'enable_bb_angle_entry': True,             # 是否启用布林带角度独立开仓
         'bb_midline_period': 14,                    # EMA中轨周期 = 7根K线(3.5小时@30m) - 快速响应
         'bb_angle_window_size': 10,                 # 角度窗口 = 7根K线(3.5小时@30m) - 短期趋势
         'bb_angle_threshold': 0.04,                # 角度阈值 = 0.05° - 更敏感（3.5小时≈0.6%涨幅）
