@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# 交易程序管理脚本
-SCRIPT_DIR="/home/ubuntu/okx_order/okx_trend_sar_single_period_boll"
-SCRIPT_NAME="live_trading_v2.py"
-PROJECT_NAME="trading_bot"
+# VIDYA 策略交易程序管理脚本
+SCRIPT_DIR="/home/ubuntu/okx_order/okx_trend_volumatic_dynamic_average"
+SCRIPT_NAME="live_trading_VIDYA.py"
+PROJECT_NAME="vidya_trading_bot"
 
 # 路径配置
 PID_FILE="$SCRIPT_DIR/${PROJECT_NAME}.pid"
@@ -36,63 +36,63 @@ is_running() {
 
 case "$1" in
     start)
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动交易程序..."
-        
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动VIDYA策略交易程序..."
+
         if is_running; then
             PID=$(cat $PID_FILE)
             echo "程序已在运行 (PID: $PID)"
             exit 1
         fi
-        
+
         # 激活虚拟环境并启动程序
         source /home/ubuntu/okx_order/venv/bin/activate
         nohup python $SCRIPT_NAME >> $(get_log_file) 2>&1 &
-        
+
         # 保存PID
         echo $! > $PID_FILE
         echo "程序已启动 (PID: $(cat $PID_FILE))"
         echo "日志文件: $(get_log_file)"
-        echo "使用 './manage_trading.sh logs' 查看实时日志"
+        echo "使用 './manage_vidya_trading.sh logs' 查看实时日志"
         ;;
-        
+
     stop)
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 停止交易程序..."
-        
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 停止VIDYA策略交易程序..."
+
         if is_running; then
             PID=$(cat $PID_FILE)
             echo "停止进程: $PID"
-            
+
             # 先尝试正常停止
             kill $PID
             sleep 5
-            
+
             # 如果还在运行，强制停止
             if ps -p $PID > /dev/null 2>&1; then
                 echo "强制停止进程: $PID"
                 kill -9 $PID
             fi
-            
+
             rm -f $PID_FILE
             echo "程序已停止"
         else
             echo "程序未在运行"
-            
+
             # 清理可能存在的旧PID文件
             if [ -f "$PID_FILE" ]; then
                 rm -f $PID_FILE
             fi
         fi
         ;;
-        
+
     restart)
-        echo "重启交易程序..."
+        echo "重启VIDYA策略交易程序..."
         $0 stop
         sleep 3
         $0 start
         ;;
-        
+
     status)
-        echo "交易程序状态:"
+        echo "VIDYA策略交易程序状态:"
         if is_running; then
             PID=$(cat $PID_FILE)
             echo "✅ 运行中 (PID: $PID)"
@@ -104,7 +104,7 @@ case "$1" in
             echo "❌ 未运行"
         fi
         ;;
-        
+
     logs)
         # 日志查看功能
         case "$2" in
@@ -152,14 +152,14 @@ case "$1" in
                 ;;
         esac
         ;;
-        
+
     monitor)
         # 监控模式
         echo "进入监控模式 (Ctrl+C 退出)"
         echo "每5秒刷新一次状态"
         while true; do
             clear
-            echo "=== 交易程序监控 ==="
+            echo "=== VIDYA 策略交易程序监控 ==="
             echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
             echo
             $0 status
@@ -171,9 +171,9 @@ case "$1" in
             sleep 5
         done
         ;;
-        
+
     *)
-        echo "交易程序管理脚本"
+        echo "VIDYA 策略交易程序管理脚本"
         echo "用法: $0 {start|stop|restart|status|logs|monitor}"
         echo "  start   - 启动程序 (后台运行)"
         echo "  stop    - 停止程序"
@@ -184,3 +184,4 @@ case "$1" in
         exit 1
         ;;
 esac
+

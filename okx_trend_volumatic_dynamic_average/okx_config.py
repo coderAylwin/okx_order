@@ -20,10 +20,22 @@ OKX API 配置文件
 #         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
 #     }
 # }
+# OKX_API_CONFIG = {
+#     'api_key': '3afaa787-5b41-4662-8a19-d08f593b8cba',           # 替换为你的 API Key
+#     'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
+#     'password': 'Ayw.72203991',          # 替换为你的 API Password
+#     'enableRateLimit': True,
+#     'proxies': {
+#         'https': 'http://127.0.0.1:10887',
+#     },
+#     'options': {
+#         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
+#     }
+# }
 OKX_API_CONFIG = {
-    'api_key': '3afaa787-5b41-4662-8a19-d08f593b8cba',           # 替换为你的 API Key
-    'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
-    'password': 'Ayw.72203991',          # 替换为你的 API Password
+    'api_key': '888aa9ba-c19b-40e1-a434-f830144379a2',           # 替换为你的 API Key
+    'secret': '55A86A8E250223D3BD03B51E61498F78',          # 替换为你的 Secret Key
+    'password': 'Fourieralpha@123',          # 替换为你的 API Password
     'enableRateLimit': True,
     'options': {
         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
@@ -48,7 +60,7 @@ TRADING_CONFIG = {
     
     # 风险控制
     'max_position_value': 10000,  # 最大持仓价值（USDT）
-    'min_order_size': 0.001,      # 最小下单量
+    'min_order_size': 0.01,      # 最小下单量
     'max_retry': 3,                # API调用最大重试次数
     
     # 数据更新间隔

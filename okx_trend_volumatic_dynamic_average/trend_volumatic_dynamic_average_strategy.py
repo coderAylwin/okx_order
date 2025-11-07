@@ -1864,6 +1864,21 @@ class TrendVolumaticDynamicAverageStrategy:
     
     def update(self, timestamp, open_price, high_price, low_price, close_price, volume=0):
         """处理1分钟K线数据 - 单周期模式（集成VIDYA）"""
+        # 🔴 启动时验证：如果策略认为有持仓但entry_price无效，清空状态（避免误判）
+        if self.position is not None:
+            if self.entry_price is None or self.entry_price <= 0:
+                print(f"  ⚠️  【启动验证】策略状态显示有持仓(position={self.position})，但无有效开仓价格(entry_price={self.entry_price})")
+                print(f"  ⚠️  清空策略持仓状态，避免生成错误的UPDATE_STOP_LOSS信号")
+                self.position = None
+                self.entry_price = None
+                self.stop_loss_level = None
+                self.take_profit_level = None
+                self.max_loss_level = None
+                self.position_shares = None
+                self.current_invested_amount = 0
+                self.waiting_for_dv_target = False
+                self.target_dv_percent = None
+        
         signal_info = {
             'timestamp': timestamp,
             'timeframe': self.timeframe,
@@ -2692,7 +2707,18 @@ class TrendVolumaticDynamicAverageStrategy:
         
         # 🔴 判断开仓类型：如果reason中包含"支撑位"或"阻力位"，说明是限价单；否则是立即挂单
         entry_type = 'limit' if ('标准VIDYA' in reason) else 'immediate'
-        
+
+        # 打印reason
+        print(f"  🔴 【开仓理由】{reason}")
+        # 挂单类型
+        print(f"  🔴 【挂单类型】{entry_type}")
+        # 止损
+        print(f"  🔴 【止损】${self.stop_loss_level:.2f}")
+        # 止盈
+        print(f"  🔴 【止盈】${self.take_profit_level:.2f}")
+        # 最大亏损
+        print(f"  🔴 【最大亏损】${self.max_loss_level:.2f}")
+   
         signal_info['signals'].append({
             'type': 'OPEN_LONG',
             'price': self.entry_price,
@@ -2757,7 +2783,7 @@ class TrendVolumaticDynamicAverageStrategy:
             self.max_loss_level = None
         
         # 🔴 判断开仓类型：如果reason中包含"支撑位"或"阻力位"，说明是限价单；否则是立即挂单
-        entry_type = 'limit' if ('支撑位' in reason or '阻力位' in reason) else 'immediate'
+        entry_type = 'limit' if ('标准VIDYA' in reason) else 'immediate'
         
         signal_info['signals'].append({
             'type': 'OPEN_SHORT',

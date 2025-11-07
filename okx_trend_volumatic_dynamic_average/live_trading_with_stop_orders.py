@@ -103,11 +103,22 @@ class LiveTradingBotWithStopOrders:
         # 🔴 记录当前持仓信息（用于更新止损）
         self.current_position = None
         self.current_position_side = None
+        self.current_position_contracts = 0  # 🔴 当前持仓合约张数
         self.current_position_shares = 0
         self.current_trade_id = None  # 🔴 当前交易ID（用于关联数据库记录）
         self.current_entry_order_id = None  # 🔴 当前开仓订单ID
         self.current_stop_loss_order_id = None  # 🔴 当前止损单ID
         self.current_take_profit_order_id = None  # 🔴 当前止盈单ID
+        
+        # 🔴 记录当前挂单信息（用于比较金额）
+        self.pending_entry_order_id = None  # 🔴 当前未成交的开仓订单ID
+        self.pending_entry_amount = None  # 🔴 当前未成交的开仓订单币数量
+        self.pending_entry_price = None  # 🔴 当前未成交的开仓订单价格
+        
+        # 🔴 记录待挂的止损止盈价格（等待开仓成交后挂单）
+        self.pending_stop_loss_price = None  # 🔴 待挂的止损价格
+        self.pending_take_profit_price = None  # 🔴 待挂的止盈价格
+        self.pending_entry_side = None  # 🔴 待挂的开仓方向（'long' 或 'short'）
         
         # 🔴 从数据库恢复的止损止盈价格（用于同步到策略）
         self._restored_stop_loss_price = None
@@ -377,14 +388,195 @@ class LiveTradingBotWithStopOrders:
                 entry_price,
                 leverage=leverage  # 🔴 显式传入杠杆，确保使用配置的杠杆倍数
             )
+            contract_size, _ = self.trader.get_contract_size(self.symbol)
+            coin_amount = round(contract_amount * contract_size, 2)
             
             print(f"🔍 准备开多单:")
             print(f"   交易对: {self.symbol}")
             print(f"   投入金额: ${actual_invested:.2f}")
             print(f"   当前价格: ${entry_price:.2f}")
-            print(f"   合约张数: {contract_amount}")
+            print(f"   合约张数: {contract_amount} 张 (~币数量 {coin_amount} {self.config.get('long_coin', 'coin')})")
             print(f"   止损价格: ${stop_loss:.2f}")
             print(f"   止盈价格: ${take_profit:.2f}")
+            
+            # 🔴 检查是否有未成交的挂单，比较金额
+            should_place_new_order = True
+            if self.pending_entry_order_id is not None:
+                print(f"\n🔍 检测到已有未成交挂单:")
+                print(f"   订单ID: {self.pending_entry_order_id}")
+                print(f"   挂单币数量: {self.pending_entry_amount} {self.config.get('long_coin', 'coin')}")
+                print(f"   挂单价格: ${self.pending_entry_price:.2f}")
+                
+                # 🔴 先检查订单是否还存在，并查询所有未成交订单检查是否有相同价格的挂单
+                order_still_exists = False
+                query_success = False
+                same_price_order_exists = False
+                
+                try:
+                    # 方法1: 尝试查询订单状态（可能是限价单或条件单）
+                    try:
+                        order_info = self.trader.exchange.fetch_order(self.pending_entry_order_id, self.symbol)
+                        order_status = order_info.get('status', 'unknown')
+                        query_success = True
+                        if order_status in ['open', 'pending', 'new']:
+                            order_still_exists = True
+                            print(f"   ✅ 订单仍存在，状态: {order_status}")
+                        else:
+                            print(f"   ⚠️  订单已不存在或已成交，状态: {order_status}")
+                    except Exception as e1:
+                        # 如果不是普通订单，可能是条件单，尝试查询条件单
+                        try:
+                            # 查询条件单状态
+                            params = {'ordType': 'conditional'}
+                            response = self.trader.exchange.private_get_trade_orders_algo_pending(params)
+                            query_success = True
+                            if response.get('code') == '0' and response.get('data'):
+                                found = False
+                                for algo_data in response['data']:
+                                    algo_id = algo_data.get('algoId', '')
+                                    if str(algo_id) == str(self.pending_entry_order_id):
+                                        found = True
+                                        state = algo_data.get('state', '')
+                                        if state == 'live':
+                                            order_still_exists = True
+                                            print(f"   ✅ 条件单仍存在，状态: {state}")
+                                        else:
+                                            print(f"   ⚠️  条件单已不存在，状态: {state}")
+                                        break
+                                if not found:
+                                    print(f"   ⚠️  条件单不存在于待处理列表中")
+                        except Exception as e2:
+                            print(f"   ⚠️  查询条件单状态失败: {e2}")
+                    
+                    # 方法2: 查询所有未成交订单，检查是否有相同价格的挂单
+                    if not order_still_exists:
+                        try:
+                            print(f"   🔍 查询所有未成交订单，检查是否有相同价格的挂单...")
+                            open_orders = self.trader.exchange.fetch_open_orders(self.symbol)
+                            
+                            # 检查是否有相同价格的挂单（允许0.01的误差）
+                            for order in open_orders:
+                                order_price = self.safe_float(order.get('price'))
+                                order_side = order.get('side', '').lower()
+                                order_amount = self.safe_float(order.get('amount'))
+                                
+                                # 检查方向：做多应该是buy
+                                if order_price and order_side == 'buy':
+                                    price_diff = abs(order_price - entry_price)
+                                    amount_diff = abs(order_amount - contract_amount) if order_amount else 999
+                                    
+                                    if price_diff < 0.01 and amount_diff < 0.01:
+                                        same_price_order_exists = True
+                                        print(f"   ✅ 发现相同价格的未成交挂单: 订单ID={order.get('id')}, 价格=${order_price:.2f}, 数量={order_amount}{self.config.get('long_coin', 'coin')}")
+                                        # 更新记录的订单ID（可能订单ID变了，但价格和数量相同）
+                                        if order.get('id') != self.pending_entry_order_id:
+                                            print(f"   🔄 更新记录的订单ID: {self.pending_entry_order_id} → {order.get('id')}")
+                                            self.pending_entry_order_id = order.get('id')
+                                        break
+                            
+                            if not same_price_order_exists:
+                                print(f"   ⚠️  未找到相同价格的未成交挂单")
+                        except Exception as e3:
+                            print(f"   ⚠️  查询未成交订单失败: {e3}")
+                    
+                    # 方法3: 查询条件单列表，检查是否有相同价格的挂单
+                    if not order_still_exists and not same_price_order_exists:
+                        try:
+                            print(f"   🔍 查询所有条件单，检查是否有相同价格的挂单...")
+                            params = {'ordType': 'conditional'}
+                            response = self.trader.exchange.private_get_trade_orders_algo_pending(params)
+                            if response.get('code') == '0' and response.get('data'):
+                                for algo_data in response['data']:
+                                    algo_id = algo_data.get('algoId', '')
+                                    trigger_price = self.safe_float(algo_data.get('triggerPx'))
+                                    order_price = self.safe_float(algo_data.get('orderPx'))
+                                    algo_amount = self.safe_float(algo_data.get('sz'))
+                                    side = algo_data.get('side', '').lower()
+                                    
+                                    # 检查方向：做多应该是buy
+                                    # 使用触发价或委托价进行比较
+                                    check_price = order_price if order_price else trigger_price
+                                    
+                                    if check_price and side == 'buy':
+                                        price_diff = abs(check_price - entry_price)
+                                        amount_diff = abs(algo_amount - contract_amount) if algo_amount else 999
+                                        
+                                        if price_diff < 0.01 and amount_diff < 0.01:
+                                            same_price_order_exists = True
+                                            print(f"   ✅ 发现相同价格的条件单: 订单ID={algo_id}, 价格=${check_price:.2f}, 数量={algo_amount}{self.config.get('long_coin', 'coin')}")
+                                            # 更新记录的订单ID
+                                            if str(algo_id) != str(self.pending_entry_order_id):
+                                                print(f"   🔄 更新记录的订单ID: {self.pending_entry_order_id} → {algo_id}")
+                                                self.pending_entry_order_id = algo_id
+                                            break
+                        except Exception as e4:
+                            print(f"   ⚠️  查询条件单列表失败: {e4}")
+                            
+                except Exception as e:
+                    print(f"   ⚠️  检查订单状态异常: {e}")
+                
+                # 🔴 判断是否应该跳过挂单
+                if order_still_exists or same_price_order_exists:
+                    # 订单存在或找到相同价格的挂单，比较金额和价格
+                    print(f"   新信号金额: {coin_amount} {self.config.get('long_coin', 'coin')}")
+                    print(f"   新信号价格: ${entry_price:.2f}")
+                    
+                    # 比较金额（允许0.01的误差，因为精度问题）
+                    amount_diff = abs(self.pending_entry_amount - coin_amount)
+                    price_diff = abs(self.pending_entry_price - entry_price)
+                    
+                    if amount_diff < 0.01 and price_diff < 0.01:
+                        print(f"✅ 挂单币数量和价格一致，无需重新挂单")
+                        print(f"   金额差异: {amount_diff:.4f} (≤ 0.01)")
+                        print(f"   价格差异: ${price_diff:.2f} (≤ $0.01)")
+                        should_place_new_order = False
+                    else:
+                        print(f"⚠️  挂单币数量或价格不一致，需要取消旧单并重新挂单")
+                        print(f"   金额差异: {amount_diff:.4f}")
+                        print(f"   价格差异: ${price_diff:.2f}")
+                        
+                        # 取消旧订单
+                        try:
+                            print(f"🔄 取消旧挂单: {self.pending_entry_order_id}")
+                            # 检查订单类型（可能是限价单或条件单）
+                            try:
+                                # 先尝试作为普通订单取消
+                                self.trader.exchange.cancel_order(self.pending_entry_order_id, self.symbol)
+                                print(f"✅ 已取消旧挂单（限价单）")
+                            except Exception as e1:
+                                # 如果不是普通订单，可能是条件单
+                                if 'conditional' in str(e1).lower() or 'algo' in str(e1).lower():
+                                    print(f"🔄 尝试作为条件单取消...")
+                                    self.trader._cancel_conditional_order(self.pending_entry_order_id, self.symbol)
+                                    print(f"✅ 已取消旧挂单（条件单）")
+                                else:
+                                    print(f"⚠️  取消旧挂单失败: {e1}")
+                                    # 继续执行，尝试挂新单
+                        except Exception as e:
+                            print(f"⚠️  取消旧挂单异常: {e}")
+                            # 继续执行，尝试挂新单
+                        
+                        # 清空记录
+                        self.pending_entry_order_id = None
+                        self.pending_entry_amount = None
+                        self.pending_entry_price = None
+                        print(f"   🔄 清空挂单记录G")
+                elif query_success:
+                    # 查询成功但订单不存在，清空记录
+                    print(f"   🔄 订单已不存在，清空挂单记录")
+                    self.pending_entry_order_id = None
+                    self.pending_entry_amount = None
+                    self.pending_entry_price = None
+                else:
+                    # 查询失败，保留记录，不挂新单（避免重复挂单）
+                    print(f"   ⚠️  查询订单状态失败，为安全起见保留记录，不挂新单")
+                    print(f"   💡 等待下次检查时再确认订单状态")
+                    should_place_new_order = False
+            
+            if not should_place_new_order:
+                print(f"⏭️  跳过挂单，使用现有挂单")
+                return
+            
             print(f"🔍 开始调用OKX接口开多单...")
             
             # 🔴 根据开仓类型选择不同的挂单方式
@@ -410,13 +602,48 @@ class LiveTradingBotWithStopOrders:
             
             print(f"\n🔍 OKX开多单返回结果:")
             print(f"   入场订单: {result.get('entry_order')}")
-            print(f"   止损订单: {result.get('stop_loss_order')}")
-            print(f"   止盈订单: {result.get('take_profit_order')}")
+            print(f"   止损订单: {result.get('stop_loss_order')} (将在开仓成交后挂单)")
+            print(f"   止盈订单: {result.get('take_profit_order')} (将在开仓成交后挂单)")
+            
+            # 🔴 记录挂单信息和止盈止损价格（无论是否成交）
+            if result.get('entry_order'):
+                entry_order = result['entry_order']
+                order_id = entry_order.get('id')
+                order_status = entry_order.get('status', 'unknown')
+                
+                # 🔴 记录止盈止损价格（等待开仓成交后挂单）
+                self.pending_stop_loss_price = stop_loss
+                self.pending_take_profit_price = take_profit
+                self.pending_entry_side = 'long'
+                print(f"📝 记录待挂止损止盈价格: 止损=${stop_loss:.2f}, 止盈=${take_profit:.2f}")
+                
+                # 检查订单是否已成交
+                if order_status == 'closed' or order_status == 'filled':
+                    # 已成交，立即挂止损止盈单
+                    print(f"✅ 开仓订单已成交，立即挂止损止盈单")
+                    self._place_stop_orders_after_entry('long', coin_amount, stop_loss, take_profit)
+                    # 清空挂单记录
+                    self.pending_entry_order_id = None
+                    self.pending_entry_amount = None
+                    self.pending_entry_price = None
+                    self.pending_stop_loss_price = None
+                    self.pending_take_profit_price = None
+                    self.pending_entry_side = None
+                    print(f"   🔄 清空挂单记录H")
+                else:
+                    # 未成交，记录挂单信息
+                    print(f"📝 记录挂单信息: 订单ID={order_id}, 币数量={coin_amount}{self.config.get('long_coin', 'coin')}, 价格=${entry_price:.2f}")
+                    self.pending_entry_order_id = order_id
+                    self.pending_entry_amount = coin_amount
+                    self.pending_entry_price = entry_price
+                    # 打印
+                    print(f"   🔍 记录待挂挂单: 订单ID={self.pending_entry_order_id}")
             
             if result['entry_order']:
                 self.current_position = 'long'
                 self.current_position_side = 'long'
-                self.current_position_shares = contract_amount
+                self.current_position_contracts = contract_amount
+                self.current_position_shares = coin_amount
                 self.daily_stats['total_trades'] += 1
                 
                 self.logger.log(f"✅ 开多单成功")
@@ -427,12 +654,13 @@ class LiveTradingBotWithStopOrders:
                 trade_data = {
                     'position': 'long',
                     'entry_price': entry_price,
-                    'position_shares': contract_amount,
+                    'position_shares': coin_amount,
                     'stop_loss_price': stop_loss,
                     'take_profit_price': take_profit,
                     'invested_amount': actual_invested,
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
+                trade_data['position_shares'] = coin_amount
                 self.strategy.sync_real_trade_data(trade_data)
                 
                 # 🔴 保存开仓订单到数据库
@@ -636,14 +864,199 @@ class LiveTradingBotWithStopOrders:
                 entry_price,
                 leverage=leverage  # 🔴 显式传入杠杆，确保使用配置的杠杆倍数
             )
+            contract_size, _ = self.trader.get_contract_size(self.symbol)
+            coin_amount = round(contract_amount * contract_size, 2)
             
             print(f"🔍 准备开空单:")
             print(f"   交易对: {self.symbol}")
             print(f"   投入金额: ${actual_invested:.2f}")
             print(f"   当前价格: ${entry_price:.2f}")
-            print(f"   合约张数: {contract_amount}")
+            print(f"   合约张数: {contract_amount} 张 (~币数量 {coin_amount} {self.config.get('long_coin', 'coin')})")
             print(f"   止损价格: ${stop_loss:.2f}")
             print(f"   止盈价格: ${take_profit:.2f}")
+
+            # 打印pending_entry_order_id
+            print(f"   当前挂单ID: {self.pending_entry_order_id}")
+            
+            # 🔴 检查是否有未成交的挂单，比较金额
+            should_place_new_order = True
+            if self.pending_entry_order_id is not None:
+                print(f"\n🔍 检测到已有未成交挂单:")
+                print(f"   订单ID: {self.pending_entry_order_id}")
+                print(f"   挂单币数量: {self.pending_entry_amount} {self.config.get('long_coin', 'coin')}")
+                print(f"   挂单价格: ${self.pending_entry_price:.2f}")
+                
+                # 🔴 先检查订单是否还存在，并查询所有未成交订单检查是否有相同价格的挂单
+                order_still_exists = False
+                query_success = False
+                same_price_order_exists = False
+                
+                try:
+                    # 方法1: 尝试查询订单状态（可能是限价单或条件单）
+                    try:
+                        order_info = self.trader.exchange.fetch_order(self.pending_entry_order_id, self.symbol)
+                        order_status = order_info.get('status', 'unknown')
+                        query_success = True
+                        if order_status in ['open', 'pending', 'new']:
+                            order_still_exists = True
+                            print(f"   ✅ 订单仍存在，状态: {order_status}")
+                        else:
+                            print(f"   ⚠️  订单已不存在或已成交，状态: {order_status}")
+                    except Exception as e1:
+                        # 如果不是普通订单，可能是条件单，尝试查询条件单
+                        try:
+                            # 查询条件单状态
+                            params = {'ordType': 'conditional'}
+                            response = self.trader.exchange.private_get_trade_orders_algo_pending(params)
+                            query_success = True
+                            if response.get('code') == '0' and response.get('data'):
+                                found = False
+                                for algo_data in response['data']:
+                                    algo_id = algo_data.get('algoId', '')
+                                    if str(algo_id) == str(self.pending_entry_order_id):
+                                        found = True
+                                        state = algo_data.get('state', '')
+                                        if state == 'live':
+                                            order_still_exists = True
+                                            print(f"   ✅ 条件单仍存在，状态: {state}")
+                                        else:
+                                            print(f"   ⚠️  条件单已不存在，状态: {state}")
+                                        break
+                                if not found:
+                                    print(f"   ⚠️  条件单不存在于待处理列表中")
+                        except Exception as e2:
+                            print(f"   ⚠️  查询条件单状态失败: {e2}")
+                    
+                    # 方法2: 查询所有未成交订单，检查是否有相同价格的挂单
+                    if not order_still_exists:
+                        try:
+                            print(f"   🔍 查询所有未成交订单，检查是否有相同价格的挂单...")
+                            open_orders = self.trader.exchange.fetch_open_orders(self.symbol)
+                            
+                            # 检查是否有相同价格的挂单（允许0.01的误差）
+                            for order in open_orders:
+                                order_price = self.safe_float(order.get('price'))
+                                order_side = order.get('side', '').lower()
+                                order_amount = self.safe_float(order.get('amount'))
+                                
+                                # 检查方向：做空应该是sell
+                                if order_price and order_side == 'sell':
+                                    price_diff = abs(order_price - entry_price)
+                                    amount_diff = abs(order_amount - coin_amount) if order_amount else 999
+                                    
+                                    if price_diff < 0.01 and amount_diff < 0.01:
+                                        same_price_order_exists = True
+                                        print(f"   ✅ 发现相同价格的未成交挂单: 订单ID={order.get('id')}, 价格=${order_price:.2f}, 数量={order_amount}{self.config.get('long_coin', 'coin')}")
+                                        # 更新记录的订单ID（可能订单ID变了，但价格和数量相同）
+                                        if order.get('id') != self.pending_entry_order_id:
+                                            print(f"   🔄 更新记录的订单ID: {self.pending_entry_order_id} → {order.get('id')}")
+                                            self.pending_entry_order_id = order.get('id')
+                                        break
+                            
+                            if not same_price_order_exists:
+                                print(f"   ⚠️  未找到相同价格的未成交挂单")
+                        except Exception as e3:
+                            print(f"   ⚠️  查询未成交订单失败: {e3}")
+                    
+                    # 方法3: 查询条件单列表，检查是否有相同价格的挂单
+                    if not order_still_exists and not same_price_order_exists:
+                        try:
+                            print(f"   🔍 查询所有条件单，检查是否有相同价格的挂单...")
+                            params = {'ordType': 'conditional'}
+                            response = self.trader.exchange.private_get_trade_orders_algo_pending(params)
+                            if response.get('code') == '0' and response.get('data'):
+                                for algo_data in response['data']:
+                                    algo_id = algo_data.get('algoId', '')
+                                    trigger_price = self.safe_float(algo_data.get('triggerPx'))
+                                    order_price = self.safe_float(algo_data.get('orderPx'))
+                                    algo_amount = self.safe_float(algo_data.get('sz'))
+                                    side = algo_data.get('side', '').lower()
+                                    
+                                    # 检查方向：做空应该是sell
+                                    # 使用触发价或委托价进行比较
+                                    check_price = order_price if order_price else trigger_price
+                                    
+                                    if check_price and side == 'sell':
+                                        price_diff = abs(check_price - entry_price)
+                                        amount_diff = abs(algo_amount - coin_amount) if algo_amount else 999
+                                        
+                                        if price_diff < 0.01 and amount_diff < 0.01:
+                                            same_price_order_exists = True
+                                            print(f"   ✅ 发现相同价格的条件单: 订单ID={algo_id}, 价格=${check_price:.2f}, 数量={algo_amount}{self.config.get('long_coin', 'coin')}")
+                                            # 更新记录的订单ID
+                                            if str(algo_id) != str(self.pending_entry_order_id):
+                                                print(f"   🔄 更新记录的订单ID: {self.pending_entry_order_id} → {algo_id}")
+                                                self.pending_entry_order_id = algo_id
+                                            break
+                        except Exception as e4:
+                            print(f"   ⚠️  查询条件单列表失败: {e4}")
+                            
+                except Exception as e:
+                    print(f"   ⚠️  检查订单状态异常: {e}")
+                
+                # 🔴 判断是否应该跳过挂单
+                if order_still_exists or same_price_order_exists:
+                    # 订单存在或找到相同价格的挂单，比较金额和价格
+                    print(f"   新信号金额: {coin_amount} {self.config.get('long_coin', 'coin')}")
+                    print(f"   新信号价格: ${entry_price:.2f}")
+                    
+                    # 比较金额（允许0.01的误差，因为精度问题）
+                    amount_diff = abs(self.pending_entry_amount - coin_amount)
+                    price_diff = abs(self.pending_entry_price - entry_price)
+                    
+                    if amount_diff < 0.01 and price_diff < 0.01:
+                        print(f"✅ 挂单币数量和价格一致，无需重新挂单")
+                        print(f"   金额差异: {amount_diff:.4f} (≤ 0.01)")
+                        print(f"   价格差异: ${price_diff:.2f} (≤ $0.01)")
+                        should_place_new_order = False
+                    else:
+                        print(f"⚠️  挂单币数量或价格不一致，需要取消旧单并重新挂单")
+                        print(f"   金额差异: {amount_diff:.4f}")
+                        print(f"   价格差异: ${price_diff:.2f}")
+                        
+                        # 取消旧订单
+                        try:
+                            print(f"🔄 取消旧挂单: {self.pending_entry_order_id}")
+                            # 检查订单类型（可能是限价单或条件单）
+                            try:
+                                # 先尝试作为普通订单取消
+                                self.trader.exchange.cancel_order(self.pending_entry_order_id, self.symbol)
+                                print(f"✅ 已取消旧挂单（限价单）")
+                            except Exception as e1:
+                                # 如果不是普通订单，可能是条件单
+                                if 'conditional' in str(e1).lower() or 'algo' in str(e1).lower():
+                                    print(f"🔄 尝试作为条件单取消...")
+                                    self.trader._cancel_conditional_order(self.pending_entry_order_id, self.symbol)
+                                    print(f"✅ 已取消旧挂单（条件单）")
+                                else:
+                                    print(f"⚠️  取消旧挂单失败: {e1}")
+                                    # 继续执行，尝试挂新单
+                        except Exception as e:
+                            print(f"⚠️  取消旧挂单异常: {e}")
+                            # 继续执行，尝试挂新单
+                        
+                        # 清空记录
+                        self.pending_entry_order_id = None
+                        self.pending_entry_amount = None
+                        self.pending_entry_price = None
+                        print(f"   🔄 清空挂单记录A")
+                elif query_success:
+                    # 查询成功但订单不存在，清空记录
+                    print(f"   🔄 订单已不存在，清空挂单记录")
+                    self.pending_entry_order_id = None
+                    self.pending_entry_amount = None
+                    self.pending_entry_price = None
+                    print(f"   🔄 清空挂单记录B")
+                else:
+                    # 查询失败，保留记录，不挂新单（避免重复挂单）
+                    print(f"   ⚠️  查询订单状态失败，为安全起见保留记录，不挂新单")
+                    print(f"   💡 等待下次检查时再确认订单状态")
+                    should_place_new_order = False
+            
+            if not should_place_new_order:
+                print(f"⏭️  跳过挂单，使用现有挂单")
+                return
+            
             print(f"🔍 开始调用OKX接口开空单...")
             
             # 🔴 根据开仓类型选择不同的挂单方式
@@ -669,13 +1082,46 @@ class LiveTradingBotWithStopOrders:
             
             print(f"\n🔍 OKX开空单返回结果:")
             print(f"   入场订单: {result.get('entry_order')}")
-            print(f"   止损订单: {result.get('stop_loss_order')}")
-            print(f"   止盈订单: {result.get('take_profit_order')}")
+            print(f"   止损订单: {result.get('stop_loss_order')} (将在开仓成交后挂单)")
+            print(f"   止盈订单: {result.get('take_profit_order')} (将在开仓成交后挂单)")
+            
+            # 🔴 记录挂单信息和止盈止损价格（无论是否成交）
+            if result.get('entry_order'):
+                entry_order = result['entry_order']
+                order_id = entry_order.get('id')
+                order_status = entry_order.get('status', 'unknown')
+                
+                # 🔴 记录止盈止损价格（等待开仓成交后挂单）
+                self.pending_stop_loss_price = stop_loss
+                self.pending_take_profit_price = take_profit
+                self.pending_entry_side = 'short'
+                print(f"📝 记录待挂止损止盈价格: 止损=${stop_loss:.2f}, 止盈=${take_profit:.2f}")
+                
+                # 检查订单是否已成交
+                if order_status == 'closed' or order_status == 'filled':
+                    # 已成交，立即挂止损止盈单
+                    print(f"✅ 开仓订单已成交，立即挂止损止盈单")
+                    self._place_stop_orders_after_entry('short', coin_amount, stop_loss, take_profit)
+                    # 清空挂单记录
+                    self.pending_entry_order_id = None
+                    self.pending_entry_amount = None
+                    self.pending_entry_price = None
+                    self.pending_stop_loss_price = None
+                    self.pending_take_profit_price = None
+                    self.pending_entry_side = None
+                    print(f"   🔄 清空挂单记录C")
+                else:
+                    # 未成交，记录挂单信息
+                    print(f"📝 记录挂单信息: 订单ID={order_id}, 币数量={coin_amount}{self.config.get('long_coin', 'coin')}, 价格=${entry_price:.2f}")
+                    self.pending_entry_order_id = order_id
+                    self.pending_entry_amount = coin_amount
+                    self.pending_entry_price = entry_price
             
             if result['entry_order']:
                 self.current_position = 'short'
                 self.current_position_side = 'short'
-                self.current_position_shares = contract_amount
+                self.current_position_contracts = contract_amount
+                self.current_position_shares = coin_amount
                 self.daily_stats['total_trades'] += 1
                 
                 self.logger.log(f"✅ 开空单成功")
@@ -686,12 +1132,13 @@ class LiveTradingBotWithStopOrders:
                 trade_data = {
                     'position': 'short',
                     'entry_price': entry_price,
-                    'position_shares': contract_amount,
+                    'position_shares': coin_amount,
                     'stop_loss_price': stop_loss,
                     'take_profit_price': take_profit,
                     'invested_amount': actual_invested,
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
+                trade_data['position_shares'] = coin_amount
                 self.strategy.sync_real_trade_data(trade_data)
                 
                 # 🔴 保存开仓订单到数据库
@@ -944,6 +1391,7 @@ class LiveTradingBotWithStopOrders:
             # 清空持仓记录
             self.current_position = None
             self.current_position_side = None
+            self.current_position_contracts = 0
             self.current_position_shares = 0
             self.current_trade_id = None
             self.current_entry_order_id = None
@@ -991,6 +1439,7 @@ class LiveTradingBotWithStopOrders:
             print(f"🔍 current_trade_id: {self.current_trade_id}")
             print(f"🔍 current_entry_order_id: {self.current_entry_order_id}")
             print(f"🔍 current_stop_loss_order_id: {self.current_stop_loss_order_id}")
+            print(f"🔍 pending_entry_order_id: {self.pending_entry_order_id}")
             
             if not self.current_position:
                 print(f"❌ 跳过止损更新: 当前无持仓")
@@ -999,6 +1448,41 @@ class LiveTradingBotWithStopOrders:
             if not new_stop_loss:
                 print(f"❌ 跳过止损更新: 新止损价格为空")
                 return
+            
+            # 🔴 检查是否有待成交的开仓订单
+            if self.pending_entry_order_id is not None:
+                print(f"⚠️  检测到有待成交的开仓订单: {self.pending_entry_order_id}")
+                print(f"   💡 开仓订单还未成交，等待成交后再挂止损单")
+                
+                # 🔴 查询OKX实际持仓状态，确认是否真的没有持仓
+                try:
+                    positions = self.trader.exchange.fetch_positions([self.symbol])
+                    has_okx_position = False
+                    for pos in positions:
+                        contracts = self.safe_float(pos.get('contracts'))
+                        size = self.safe_float(pos.get('size'))
+                        pos_side = pos.get('side', '')
+                        
+                        if (contracts > 0 or size > 0) and pos_side == self.current_position:
+                            has_okx_position = True
+                            print(f"   ✅ OKX有实际持仓: {pos_side}, 数量={contracts if contracts > 0 else size}张")
+                            break
+                    
+                    if not has_okx_position:
+                        print(f"   ❌ OKX无实际持仓，跳过挂止损单")
+                        print(f"   💡 等待开仓订单成交后，通过定时检查机制自动挂止损单")
+                        return
+                    else:
+                        print(f"   ✅ OKX有实际持仓，可以挂止损单")
+                        # 清空待成交订单记录，因为已经有持仓了
+                        self.pending_entry_order_id = None
+                        self.pending_entry_amount = None
+                        self.pending_entry_price = None
+                        print(f"   🔄 清空待成交订单记录D")
+                except Exception as e:
+                    print(f"   ⚠️  查询OKX持仓状态失败: {e}")
+                    print(f"   💡 为安全起见，跳过挂止损单，等待开仓订单成交后再挂")
+                    return
             
             # 🔴 比较新旧止损价，如果有变化才更新
             if old_stop_loss is not None and abs(new_stop_loss - old_stop_loss) < 0.01:  # 价格差异小于0.01，认为是相同价格
@@ -1471,11 +1955,21 @@ class LiveTradingBotWithStopOrders:
         # 清空机器人持仓记录
         self.current_position = None
         self.current_position_side = None
+        self.current_position_contracts = 0  # 🔴 当前持仓合约张数
         self.current_position_shares = 0
         self.current_trade_id = None
         self.current_entry_order_id = None
         self.current_stop_loss_order_id = None
         self.current_take_profit_order_id = None
+        
+        # 🔴 清空挂单记录
+        # self.pending_entry_order_id = None
+        # self.pending_entry_amount = None
+        # self.pending_entry_price = None
+        # self.pending_stop_loss_price = None
+        # self.pending_take_profit_price = None
+        # self.pending_entry_side = None
+        # print(f"   🔄 清空挂单记录E")
         
         # 🔴 同步持仓平仓到策略
         if hasattr(self, 'strategy'):
@@ -1486,6 +1980,163 @@ class LiveTradingBotWithStopOrders:
         
         print(f"✅ 持仓状态已清空")
     
+    def _place_stop_orders_after_entry(self, side, amount, stop_loss_price, take_profit_price):
+        """开仓成交后挂止损止盈单
+        
+        Args:
+            side: 'long' 或 'short'
+            amount: 实际成交币数量
+            stop_loss_price: 止损价格
+            take_profit_price: 止盈价格
+        """
+        try:
+            print(f"\n{'='*60}")
+            print(f"🛡️  开仓成交后挂止损止盈单")
+            print(f"{'='*60}")
+            print(f"   方向: {side}")
+            print(f"   数量: {amount} {self.config.get('long_coin', 'coin')}")
+            print(f"   止损: ${stop_loss_price:.2f}")
+            print(f"   止盈: ${take_profit_price:.2f}")
+            
+            # 挂止损单
+            if stop_loss_price and stop_loss_price > 0:
+                stop_loss_order = self.trader._set_stop_loss_limit(
+                    self.symbol, side, stop_loss_price, amount
+                )
+                if stop_loss_order:
+                    self.current_stop_loss_order_id = stop_loss_order.get('id')
+                    print(f"✅ 止损单已挂: {self.current_stop_loss_order_id}")
+                else:
+                    print(f"⚠️  止损单挂单失败")
+            
+            # 挂止盈单
+            if take_profit_price and take_profit_price > 0:
+                take_profit_order = self.trader._set_take_profit_limit(
+                    self.symbol, side, take_profit_price, amount
+                )
+                if take_profit_order:
+                    self.current_take_profit_order_id = take_profit_order.get('id')
+                    print(f"✅ 止盈单已挂: {self.current_take_profit_order_id}")
+                else:
+                    print(f"⚠️  止盈单挂单失败")
+            
+            print(f"{'='*60}\n")
+            
+        except Exception as e:
+            print(f"❌ 挂止损止盈单失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _check_entry_order_filled(self):
+        """检查开仓订单是否已成交（每30秒调用一次）"""
+        try:
+            # 如果没有待检查的挂单，直接返回
+            if self.pending_entry_order_id is None:
+                return
+            
+            print(f"\n🔍 【定时检查】检查开仓订单是否已成交: {self.pending_entry_order_id}")
+            contract_size, _ = self.trader.get_contract_size(self.symbol)
+            
+            # 方法1: 查询订单状态
+            order_filled = False
+            actual_amount = None
+            
+            try:
+                # 尝试查询订单状态（可能是限价单或条件单）
+                try:
+                    order_info = self.trader.exchange.fetch_order(self.pending_entry_order_id, self.symbol)
+                    order_status = order_info.get('status', 'unknown')
+                    filled_amount = order_info.get('filled', 0)
+                    
+                    if order_status in ['closed', 'filled']:
+                        order_filled = True
+                        actual_amount = filled_amount if filled_amount > 0 else self.pending_entry_amount
+                        print(f"   ✅ 订单已成交: 状态={order_status}, 成交币数量={actual_amount}{self.config.get('long_coin', 'coin')}")
+                    else:
+                        print(f"   ⏳ 订单未成交: 状态={order_status}")
+                except Exception as e1:
+                    # 如果不是普通订单，可能是条件单，尝试查询条件单
+                    try:
+                        params = {'ordType': 'conditional'}
+                        response = self.trader.exchange.private_get_trade_orders_algo_pending(params)
+                        if response.get('code') == '0' and response.get('data'):
+                            found = False
+                            for algo_data in response['data']:
+                                algo_id = algo_data.get('algoId', '')
+                                if str(algo_id) == str(self.pending_entry_order_id):
+                                    found = True
+                                    state = algo_data.get('state', '')
+                                    if state != 'live':
+                                        # 条件单已触发或取消
+                                        order_filled = True
+                                        actual_amount = self.pending_entry_amount
+                                        print(f"   ✅ 条件单已触发: 状态={state}")
+                                    else:
+                                        print(f"   ⏳ 条件单未触发: 状态={state}")
+                                    break
+                            if not found:
+                                # 条件单不存在，可能已触发
+                                order_filled = True
+                                actual_amount = self.pending_entry_amount
+                                print(f"   ✅ 条件单不存在，可能已触发")
+                    except Exception as e2:
+                        print(f"   ⚠️  查询条件单状态失败: {e2}")
+            except Exception as e:
+                print(f"   ⚠️  查询订单状态异常: {e}")
+            
+            # 方法2: 如果订单状态查询失败，查询OKX持仓状态
+            if not order_filled:
+                try:
+                    positions = self.trader.exchange.fetch_positions([self.symbol])
+                    for pos in positions:
+                        contracts = self.safe_float(pos.get('contracts'))
+                        size = self.safe_float(pos.get('size'))
+                        pos_side = pos.get('side', '')
+                        
+                        # 检查是否有持仓，且方向匹配
+                        if (contracts > 0 or size > 0) and pos_side == self.pending_entry_side:
+                            order_filled = True
+                            if contracts and contracts > 0:
+                                contract_size = self.trader.get_contract_size(self.symbol)[0]
+                                actual_amount = round(contracts * contract_size, 2)
+                            else:
+                                actual_amount = size
+                            print(f"   ✅ 检测到持仓，开仓订单已成交: 币数量={actual_amount}{self.config.get('long_coin', 'coin')}, 方向={pos_side}")
+                            break
+                except Exception as e:
+                    print(f"   ⚠️  查询持仓状态失败: {e}")
+            
+            # 如果订单已成交，挂止损止盈单
+            if order_filled:
+                print(f"   🎯 开仓订单已成交，开始挂止损止盈单")
+                
+                # 使用实际成交数量（如果查询到）或记录的挂单数量
+                final_amount = actual_amount if actual_amount and actual_amount > 0 else self.pending_entry_amount
+                
+                if self.pending_stop_loss_price and self.pending_take_profit_price and self.pending_entry_side:
+                    self._place_stop_orders_after_entry(
+                        self.pending_entry_side,
+                        final_amount,
+                        self.pending_stop_loss_price,
+                        self.pending_take_profit_price
+                    )
+                    
+                    # 清空挂单记录
+                    self.pending_entry_order_id = None
+                    self.pending_entry_amount = None
+                    self.pending_entry_price = None
+                    self.pending_stop_loss_price = None
+                    self.pending_take_profit_price = None
+                    self.pending_entry_side = None
+                    print(f"   ✅ 止损止盈单已挂，清空挂单记录F")
+                else:
+                    print(f"   ⚠️  缺少止损止盈价格信息，无法挂单")
+            
+        except Exception as e:
+            print(f"❌ 检查开仓订单状态失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def _print_position_status(self):
         """打印当前持仓状态（调试用）"""
         print(f"\n{'='*80}")
@@ -1495,7 +2146,7 @@ class LiveTradingBotWithStopOrders:
         # 打印机器人持仓状态
         print(f"🤖 机器人状态:")
         print(f"   持仓方向: {self.current_position}")
-        print(f"   持仓数量: {self.current_position_shares}")
+        print(f"   持仓数量: {self.current_position_shares}{self.config.get('long_coin', 'coin')} (合约{self.current_position_contracts}张)")
         print(f"   交易ID: {self.current_trade_id}")
         print(f"   开仓订单ID: {self.current_entry_order_id}")
         print(f"   止损订单ID: {self.current_stop_loss_order_id}")
@@ -1571,6 +2222,9 @@ class LiveTradingBotWithStopOrders:
     
     def _update_account_balance(self):
         """更新账户余额（使用可用余额free，而不是总余额total）"""
+        if not getattr(self.trader, 'exchange', None):
+            self.logger.log_error("❌ OKX 交易接口未初始化，无法获取账户余额。请检查 API 配置。")
+            return
         try:
             account_info = self.trader.get_account_info()
             if account_info:
@@ -1608,6 +2262,7 @@ class LiveTradingBotWithStopOrders:
             has_okx_position = False
             okx_position_side = None
             okx_position_contracts = 0
+            contract_size, _ = self.trader.get_contract_size(self.symbol)
             
             for pos in positions:
                 # 检查是否匹配当前交易对（支持多种symbol格式）
@@ -1634,12 +2289,14 @@ class LiveTradingBotWithStopOrders:
                         has_okx_position = True
                         okx_position_side = pos.get('side', '').lower()
                         okx_position_contracts = contracts
-                        self.logger.log(f"📊 检测到OKX持仓: {okx_position_side}, {okx_position_contracts}张")
+                        coin_qty = round(okx_position_contracts * contract_size, 2)
+                        self.logger.log(f"📊 检测到OKX持仓: {okx_position_side}, 合约{okx_position_contracts}张 ≈ {coin_qty}{self.config.get('long_coin', 'coin')}")
                         
                         # 🔴 同步到本地状态
                         self.current_position = okx_position_side
                         self.current_position_side = okx_position_side
-                        self.current_position_shares = okx_position_contracts
+                        self.current_position_contracts = okx_position_contracts
+                        self.current_position_shares = coin_qty
                         
                         # 🔴 尝试从数据库恢复交易记录
                         self._restore_trade_from_database(okx_position_side)
@@ -1652,6 +2309,19 @@ class LiveTradingBotWithStopOrders:
                 self.logger.log(f"✅ OKX无持仓，程序从空仓开始")
                 # 🔴 确保本地状态为空
                 self._clear_position_state()
+                # 🔴 强制清空策略对象状态（重要！避免策略认为有持仓）
+                if self.strategy:
+                    self.logger.log(f"🔄 强制清空策略对象持仓状态（OKX无持仓）")
+                    self.strategy.position = None
+                    self.strategy.entry_price = None
+                    self.strategy.stop_loss_level = None
+                    self.strategy.take_profit_level = None
+                    self.strategy.max_loss_level = None
+                    self.strategy.position_shares = None
+                    self.strategy.current_invested_amount = 0
+                    self.strategy.waiting_for_dv_target = False
+                    self.strategy.target_dv_percent = None
+                    self.logger.log(f"✅ 策略状态已清空: position=None")
                 self.logger.log(f"{'='*80}\n")
                 return
             
@@ -1851,7 +2521,9 @@ class LiveTradingBotWithStopOrders:
             elif has_okx_position and local_has_position:
                 # 两边都有持仓，检查数量是否一致
                 if abs(self.current_position_shares - okx_position_contracts) > 0.1:
-                    self.logger.log(f"⚠️  持仓数量不一致: 本地{self.current_position_shares}张 vs OKX{okx_position_contracts}张")
+                    contract_size = self.trader.get_contract_size(self.symbol)[0]
+                    coin_qty = round(okx_position_contracts * contract_size, 2)
+                    self.logger.log(f"⚠️  持仓数量不一致: 本地{self.current_position_contracts}张 (≈{self.current_position_shares}{self.config.get('long_coin', 'coin')}) vs OKX{okx_position_contracts}张")
                     self.logger.log(f"🔄 以OKX为准，更新本地数量")
                     self.current_position_shares = okx_position_contracts
                     
@@ -2589,6 +3261,30 @@ class LiveTradingBotWithStopOrders:
             result = {'signals': []}
             
             if self.first_period_completed:
+                # 🔴 在调用策略update之前，先验证并同步OKX持仓状态（避免策略基于错误状态生成信号）
+                try:
+                    positions = self.trader.exchange.fetch_positions([self.symbol])
+                    has_okx_position = self._check_okx_actual_positions(positions)
+                    
+                    # 如果OKX无持仓，但策略状态显示有持仓，先清空策略状态
+                    if not has_okx_position and self.strategy.position is not None:
+                        self.logger.log_warning(f"⚠️  【更新前验证】OKX无持仓，但策略状态显示有持仓({self.strategy.position})")
+                        self.logger.log(f"🔄 清空策略持仓状态，避免生成错误的UPDATE_STOP_LOSS信号")
+                        self.strategy.position = None
+                        self.strategy.entry_price = None
+                        self.strategy.stop_loss_level = None
+                        self.strategy.take_profit_level = None
+                        self.strategy.max_loss_level = None
+                        self.strategy.position_shares = None
+                        self.strategy.current_invested_amount = 0
+                        self.strategy.waiting_for_dv_target = False
+                        self.strategy.target_dv_percent = None
+                        # 同时清空本地状态
+                        if self.current_position is not None:
+                            self._clear_position_state()
+                except Exception as e:
+                    self.logger.log_warning(f"⚠️  更新前验证持仓状态失败: {e}")
+                
                 # 🔴 周期末尾：只触发K线生成，不做两次update
                 if is_period_last_minute:
                     next_minute = timestamp + timedelta(minutes=1)
@@ -2749,21 +3445,63 @@ class LiveTradingBotWithStopOrders:
             
             self._sync_position_on_startup()
             
-            # 🔴 验证同步结果：检查策略状态是否与本地状态一致
+            # 🔴 验证同步结果：检查策略状态是否与本地状态一致（以OKX实际持仓为准）
             if self.strategy:
-                if self.current_position is None and self.strategy.position is not None:
-                    self.logger.log_warning(f"⚠️  检测到状态不一致：本地无持仓，但策略状态显示有持仓({self.strategy.position})")
-                    self.logger.log(f"🔄 清空策略持仓状态")
-                    self.strategy.position = None
-                    self.strategy.entry_price = None
-                    self.strategy.stop_loss_level = None
-                    self.strategy.take_profit_level = None
-                elif self.current_position is not None and self.strategy.position is None:
-                    self.logger.log_warning(f"⚠️  检测到状态不一致：本地有持仓({self.current_position})，但策略状态显示无持仓")
-                    self.logger.log(f"🔄 同步策略状态到本地持仓")
-                    self._sync_strategy_position_state(self.current_position)
-                
-                self.logger.log(f"✅ 启动检查完成: 本地持仓={self.current_position}, 策略持仓={self.strategy.position}")
+                # 🔴 再次查询OKX实际持仓，确保状态一致
+                try:
+                    positions = self.trader.exchange.fetch_positions([self.symbol])
+                    has_okx_position_final = self._check_okx_actual_positions(positions)
+                    
+                    if not has_okx_position_final:
+                        # OKX确实无持仓，强制清空所有状态
+                        if self.strategy.position is not None:
+                            self.logger.log_warning(f"⚠️  OKX无持仓，但策略状态显示有持仓({self.strategy.position})")
+                            self.logger.log(f"🔄 强制清空策略持仓状态（以OKX为准）")
+                            self.strategy.position = None
+                            self.strategy.entry_price = None
+                            self.strategy.stop_loss_level = None
+                            self.strategy.take_profit_level = None
+                            self.strategy.max_loss_level = None
+                            self.strategy.position_shares = None
+                            self.strategy.current_invested_amount = 0
+                            self.strategy.waiting_for_dv_target = False
+                            self.strategy.target_dv_percent = None
+                            self.logger.log(f"✅ 策略状态已清空")
+                        
+                        # 确保本地状态也为空
+                        if self.current_position is not None:
+                            self.logger.log(f"🔄 清空本地持仓状态")
+                            self._clear_position_state()
+                    else:
+                        # OKX有持仓，检查策略状态是否一致
+                        if self.current_position is None and self.strategy.position is not None:
+                            self.logger.log_warning(f"⚠️  检测到状态不一致：本地无持仓，但策略状态显示有持仓({self.strategy.position})")
+                            self.logger.log(f"🔄 清空策略持仓状态（以OKX为准）")
+                            self.strategy.position = None
+                            self.strategy.entry_price = None
+                            self.strategy.stop_loss_level = None
+                            self.strategy.take_profit_level = None
+                            self.strategy.max_loss_level = None
+                            self.strategy.position_shares = None
+                            self.strategy.current_invested_amount = 0
+                        elif self.current_position is not None and self.strategy.position is None:
+                            self.logger.log_warning(f"⚠️  检测到状态不一致：本地有持仓({self.current_position})，但策略状态显示无持仓")
+                            self.logger.log(f"🔄 同步策略状态到本地持仓")
+                            self._sync_strategy_position_state(self.current_position)
+                    
+                    self.logger.log(f"✅ 启动检查完成: OKX持仓={has_okx_position_final}, 本地持仓={self.current_position}, 策略持仓={self.strategy.position}")
+                except Exception as e:
+                    self.logger.log_error(f"❌ 验证持仓状态失败: {e}")
+                    # 为了安全，如果验证失败，清空策略状态
+                    if self.strategy.position is not None:
+                        self.logger.log_warning(f"⚠️  验证失败，为安全起见清空策略持仓状态")
+                        self.strategy.position = None
+                        self.strategy.entry_price = None
+                        self.strategy.stop_loss_level = None
+                        self.strategy.take_profit_level = None
+                        self.strategy.max_loss_level = None
+                        self.strategy.position_shares = None
+                        self.strategy.current_invested_amount = 0
             
         except Exception as e:
             self.logger.log_error(f"❌ 启动时同步持仓状态失败: {e}")
@@ -2784,7 +3522,8 @@ class LiveTradingBotWithStopOrders:
         self.logger.log(f"🔍 每分钟08-13秒主动检查数据完整性（紧跟正常更新，确保周期末尾数据完整）")
         self.logger.log(f"🔔 每分钟18-23秒检查止损/止盈单状态（有持仓时）")
         self.logger.log(f"🔄 每5分钟定期同步OKX状态（混合方案）")
-        self.logger.log(f"🔍 每20秒检查并优化止损单（V2混合方案 - 条件单→限价单）")
+        self.logger.log(f"🔍 每10秒检查并优化止损单（V2混合方案 - 条件单→限价单）")
+        self.logger.log(f"⏱️  每30秒检查开仓订单是否已成交，成交后自动挂止损止盈单")
         self.logger.log(f"🔄 开始监控市场...\n")
         
         last_update_minute = None
@@ -2856,6 +3595,18 @@ class LiveTradingBotWithStopOrders:
                 if should_optimize_check:
                     self.trader.check_and_optimize_stop_orders()
                     last_optimize_check_time = current_time
+                
+                # 🔴 每30秒：检查开仓订单是否已成交，如果成交则挂止损止盈单
+                last_entry_check_time = getattr(self, '_last_entry_check_time', None)
+                should_check_entry = (
+                    not self.is_warmup_phase and
+                    self.pending_entry_order_id is not None and
+                    (last_entry_check_time is None or (current_time - last_entry_check_time).total_seconds() >= 30)  # 30秒
+                )
+                
+                if should_check_entry:
+                    self._check_entry_order_filled()
+                    self._last_entry_check_time = current_time
                 
                 # 📊 每分钟30-35秒：打印持仓信息（调试用）
                 should_print_position = (

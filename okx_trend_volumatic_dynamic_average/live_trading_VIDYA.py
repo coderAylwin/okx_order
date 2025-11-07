@@ -137,6 +137,20 @@ class LiveTradingBotVIDYA(LiveTradingBotWithStopOrders):
         self.current_stop_loss_order_id = None
         self.current_take_profit_order_id = None
         
+        # 🔴 记录当前挂单信息（用于比较金额）
+        self.pending_entry_order_id = None
+        self.pending_entry_amount = None
+        self.pending_entry_price = None
+
+        # 🔴 记录待挂的止损止盈价格（等待开仓成交后挂单）
+        self.pending_stop_loss_price = None
+        self.pending_take_profit_price = None
+        self.pending_entry_side = None
+
+        # 🔴 从数据库恢复的止损止盈价格（用于同步到策略）
+        self._restored_stop_loss_price = None
+        self._restored_take_profit_price = None
+
         # 🔴 账户余额
         self.account_balance = 0.0
         

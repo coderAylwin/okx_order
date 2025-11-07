@@ -29,7 +29,11 @@ class OKXTraderV2:
         
         # 初始化CCXT交易所
         try:
-            self.exchange = ccxt.okx(OKX_API_CONFIG)
+            # 🔴 兼容旧配置键名（api_key → apiKey）
+            api_config = dict(OKX_API_CONFIG)
+            if 'api_key' in api_config and 'apiKey' not in api_config:
+                api_config['apiKey'] = api_config.pop('api_key')
+            self.exchange = ccxt.okx(api_config)
             
             if TRADING_CONFIG['mode'] == 'paper':
                 self.exchange.set_sandbox_mode(True)
@@ -45,6 +49,7 @@ class OKXTraderV2:
         except Exception as e:
             print(f"❌ OKX 交易接口初始化失败: {e}")
             self.exchange = None
+            raise
         
         # 不使用WebSocket订单簿监听器，直接用ccxt获取
         self.orderbook_watcher = None
@@ -126,29 +131,48 @@ class OKXTraderV2:
                 return 0.1, 0.01
             
             markets = self.exchange.load_markets()
-            if symbol in markets:
-                market = markets[symbol]
+            
+            # 🔴 尝试多种symbol格式匹配
+            symbol_variants = [
+                symbol,  # 原始格式，如 SOL-USDT-SWAP
+                symbol.replace('-', '/'),  # SOL/USDT:SWAP
+                symbol.replace('-USDT-SWAP', '/USDT:SWAP'),  # SOL/USDT:SWAP
+            ]
+            
+            market = None
+            for sym_variant in symbol_variants:
+                if sym_variant in markets:
+                    market = markets[sym_variant]
+                    print(f"   ✅ 找到市场信息: {sym_variant}")
+                    break
+            
+            if market:
                 contract_size = market.get('contractSize', 0.1)
                 limits = market.get('limits', {})
                 amount_limits = limits.get('amount', {})
                 min_size = amount_limits.get('min', 0.01)
                 
+                print(f"   📊 合约规格: {contract_size} SOL/张, 最小下单量: {min_size} 张")
                 return contract_size, min_size
             else:
-                print(f"⚠️  未找到 {symbol} 的市场信息，使用默认值")
+                print(f"⚠️  未找到 {symbol} 的市场信息（已尝试: {symbol_variants}），使用默认值 0.1 SOL/张")
+                print(f"   💡 如果持续出现保证金不足错误，请检查合约规格是否正确")
                 return 0.1, 0.01
         except Exception as e:
             print(f"❌ 获取合约规格失败: {e}")
             return 0.1, 0.01
     
     def calculate_contract_amount(self, symbol, usdt_amount, current_price, leverage=None):
-        """计算可以购买的合约张数"""
+        """计算可以购买的合约张数
+        
+        注意：计算出的合约数量，实际所需保证金不能超过输入的 usdt_amount
+        """
         if leverage is None:
             leverage = self.leverage
         
         contract_size, min_size = self.get_contract_size(symbol)
         
-        # 安全保证金：95%缓冲
+        # 🔴 安全保证金：95%缓冲（但最终验证时要用原始 usdt_amount）
         safe_margin = usdt_amount * 0.95
         position_value = safe_margin * leverage
         coin_amount = position_value / current_price
@@ -167,7 +191,59 @@ class OKXTraderV2:
             else:
                 contract_amount = round(contract_amount, 4)
         
-        print(f"💰 合约数量计算: 保证金=${usdt_amount:.2f} × 95% × {leverage}倍杠杆 = 持仓价值=${position_value:.2f} → {contract_amount} 张")
+        # 🔴 验证：计算实际所需保证金，确保不超过输入的 usdt_amount
+        actual_coin_amount = contract_amount * contract_size  # 实际币数量
+        actual_position_value = actual_coin_amount * current_price  # 实际持仓价值
+        actual_required_margin = actual_position_value / leverage  # 实际所需保证金
+        
+        # 🔴 如果实际所需保证金超过输入金额，向下调整合约数量
+        if actual_required_margin > usdt_amount:
+            print(f"   ⚠️  警告：计算出的合约数量需要保证金${actual_required_margin:.2f}，超过输入金额${usdt_amount:.2f}")
+            print(f"   🔄 向下调整合约数量...")
+            
+            # 反向计算：从可用保证金反推最大合约数量
+            max_position_value = usdt_amount * leverage  # 最大持仓价值
+            max_coin_amount = max_position_value / current_price  # 最大币数量
+            max_contract_amount = max_coin_amount / contract_size  # 最大合约张数
+            
+            # 根据最小下单量向下取整
+            if max_contract_amount < min_size:
+                contract_amount = min_size
+            else:
+                if min_size >= 1:
+                    contract_amount = int(max_contract_amount)
+                elif min_size >= 0.1:
+                    contract_amount = int(max_contract_amount * 10) / 10
+                elif min_size >= 0.01:
+                    contract_amount = int(max_contract_amount * 100) / 100
+                else:
+                    contract_amount = round(max_contract_amount, 4)
+            
+            # 重新计算实际所需保证金
+            actual_coin_amount = contract_amount * contract_size
+            actual_position_value = actual_coin_amount * current_price
+            actual_required_margin = actual_position_value / leverage
+            
+            print(f"   ✅ 调整后合约数量: {contract_amount} 张")
+            print(f"   ✅ 调整后所需保证金: ${actual_required_margin:.2f} (≤ 输入金额${usdt_amount:.2f})")
+        
+        # 🔴 详细的计算过程日志
+        print(f"\n   📊 【合约数量计算详情】")
+        print(f"      输入保证金: ${usdt_amount:.2f}")
+        print(f"      安全保证金(95%): ${safe_margin:.2f} (${usdt_amount:.2f} × 95%)")
+        print(f"      理论持仓价值: ${position_value:.2f} (安全保证金${safe_margin:.2f} × {leverage}倍杠杆)")
+        print(f"      理论币数量: {coin_amount:.4f} SOL (理论持仓价值${position_value:.2f} ÷ 价格${current_price:.2f})")
+        print(f"      合约规格: {contract_size} SOL/张")
+        print(f"      最终合约张数: {contract_amount} 张")
+        print(f"      实际币数量: {actual_coin_amount:.4f} SOL (数量{contract_amount} × 规格{contract_size})")
+        print(f"      实际持仓价值: ${actual_position_value:.2f} (币数量{actual_coin_amount:.4f} × 价格${current_price:.2f})")
+        print(f"      实际所需保证金: ${actual_required_margin:.2f} (持仓价值${actual_position_value:.2f} ÷ {leverage}倍杠杆)")
+        if actual_required_margin <= usdt_amount:
+            print(f"      ✅ 验证通过: 所需保证金${actual_required_margin:.2f} ≤ 输入金额${usdt_amount:.2f}")
+        else:
+            print(f"      ⚠️  警告: 所需保证金${actual_required_margin:.2f} > 输入金额${usdt_amount:.2f} (可能因为最小下单量限制)")
+        print(f"   {'-'*60}\n")
+        
         return contract_amount
     
     def open_long_with_limit_order(self, symbol, amount, stop_loss_price=None, take_profit_price=None):
@@ -294,16 +370,11 @@ class OKXTraderV2:
         # 注释掉：if symbol in self.pending_stop_loss:
         #     del self.pending_stop_loss[symbol]
         
-        # 🔴 只有开仓成功才设置止损止盈
-        if stop_loss_price:
-            result['stop_loss_order'] = self._set_stop_loss_limit(
-                symbol, 'long', stop_loss_price, amount
-            )
-        
-        if take_profit_price:
-            result['take_profit_order'] = self._set_take_profit_limit(
-                symbol, 'long', take_profit_price, amount
-            )
+        # 🔴 不立即挂止损止盈单，等待开仓成交后再挂
+        # 止损止盈价格会在开仓成交后通过定时检查机制挂单
+        print(f"   💡 止损止盈单将在开仓成交后自动挂单")
+        print(f"   📝 止损价格: ${stop_loss_price:.2f}" if stop_loss_price else "   📝 止损价格: 未设置")
+        print(f"   📝 止盈价格: ${take_profit_price:.2f}" if take_profit_price else "   📝 止盈价格: 未设置")
         
         print(f"{'='*60}\n")
         return result
@@ -411,16 +482,11 @@ class OKXTraderV2:
         # 注释掉：if symbol in self.pending_stop_loss:
         #     del self.pending_stop_loss[symbol]
         
-        # 🔴 只有开仓成功才设置止损止盈
-        if stop_loss_price:
-            result['stop_loss_order'] = self._set_stop_loss_limit(
-                symbol, 'short', stop_loss_price, amount
-            )
-        
-        if take_profit_price:
-            result['take_profit_order'] = self._set_take_profit_limit(
-                symbol, 'short', take_profit_price, amount
-            )
+        # 🔴 不立即挂止损止盈单，等待开仓成交后再挂
+        # 止损止盈价格会在开仓成交后通过定时检查机制挂单
+        print(f"   💡 止损止盈单将在开仓成交后自动挂单")
+        print(f"   📝 止损价格: ${stop_loss_price:.2f}" if stop_loss_price else "   📝 止损价格: 未设置")
+        print(f"   📝 止盈价格: ${take_profit_price:.2f}" if take_profit_price else "   📝 止盈价格: 未设置")
         
         print(f"{'='*60}\n")
         return result
@@ -432,13 +498,19 @@ class OKXTraderV2:
         Args:
             symbol: 交易对
             side: 'buy' 或 'sell'
-            amount: 数量
+            amount: 合约张数（需要转换为币数量）
             price: 价格
         
         Returns:
             dict: 订单信息（如果成功），或 None（如果失败）
         """
         try:
+            # 🔴 将合约张数转换为币数量（OKX API 需要币数量，而不是合约张数）
+            contract_size, _ = self.get_contract_size(symbol)
+            coin_amount = float(amount) * contract_size  # 币数量 = 合约张数 × 合约规格
+            # 保留两位小数（OKX 要求）
+            coin_amount = round(coin_amount, 2)
+            
             # 检查是否会立即成交
             ticker = self.exchange.fetch_ticker(symbol)
             
@@ -465,14 +537,93 @@ class OKXTraderV2:
             else:
                 params['posSide'] = 'short'
             
+            # 🔴 打印详细的挂单参数
+            print(f"\n   📋 【挂单参数详情】")
+            print(f"      Symbol: {symbol}")
+            print(f"      Side: {side}")
+            print(f"      合约张数: {amount} 张")
+            print(f"      合约规格: {contract_size} SOL/张")
+            print(f"      币数量: {coin_amount} SOL (合约张数{amount} × 规格{contract_size})")
+            print(f"      Price: ${price:.2f}")
+            print(f"      Params: {params}")
+            
+            # 获取账户余额信息
             try:
-                order = self.exchange.create_limit_order(symbol, side, amount, price, params)
+                balance_info = self.get_balance()
+                if balance_info:
+                    print(f"      💰 账户余额: 总余额=${balance_info.get('total', 0):.2f}, 可用=${balance_info.get('free', 0):.2f}, 已用=${balance_info.get('used', 0):.2f}")
+                
+                # 🔴 计算需要的保证金
+                leverage = getattr(self, 'leverage', TRADING_CONFIG.get('leverage', 1))
+                position_value = coin_amount * price  # 实际持仓价值（币数量 × 价格）
+                required_margin = position_value / leverage  # 所需保证金（持仓价值 ÷ 杠杆）
+                
+                print(f"      💰 持仓价值: ${position_value:.2f} (币数量{coin_amount} × 价格${price:.2f})")
+                print(f"      💰 所需保证金: ${required_margin:.2f} (持仓价值${position_value:.2f} ÷ {leverage}倍杠杆)")
+                if balance_info:
+                    free_balance = balance_info.get('free', 0)
+                    if free_balance < required_margin:
+                        print(f"      ⚠️  可用余额不足: 需要${required_margin:.2f}, 可用${free_balance:.2f}, 差额=${required_margin - free_balance:.2f}")
+                    else:
+                        print(f"      ✅ 可用余额充足: 需要${required_margin:.2f}, 可用${free_balance:.2f}, 剩余=${free_balance - required_margin:.2f}")
+            except Exception as e:
+                print(f"      ⚠️  获取账户信息失败: {e}")
+            
+            print(f"   {'-'*60}\n")
+            
+            try:
+                # 🔴 使用币数量而不是合约张数
+                print(f"\n   📤 【OKX API调用详情】")
+                print(f"      CCXT方法: create_limit_order")
+                print(f"      参数:")
+                print(f"         symbol: {symbol}")
+                print(f"         side: {side}")
+                print(f"         amount: {coin_amount} (币数量，类型: {type(coin_amount).__name__})")
+                print(f"         price: {price} (类型: {type(price).__name__})")
+                print(f"         params: {params}")
+                print(f"      📊 计算过程:")
+                print(f"         - 合约张数(输入): {amount} 张")
+                print(f"         - 合约规格: {contract_size} SOL/张")
+                print(f"         - 币数量(计算): {coin_amount} SOL = {amount} × {contract_size}")
+                print(f"         - 价格: ${price:.2f}")
+                print(f"      📋 CCXT可能转换为OKX API:")
+                print(f"         POST /api/v5/trade/order")
+                print(f"         请求体可能包含:")
+                print(f"           - instId: {symbol}")
+                print(f"           - tdMode: cross (全仓)")
+                print(f"           - side: {side}")
+                print(f"           - ordType: limit")
+                print(f"           - sz: {coin_amount} (币数量)")
+                print(f"           - px: {price}")
+                print(f"           - posSide: {params.get('posSide', 'None')}")
+                print(f"           - postOnly: {params.get('postOnly', False)}")
+                print(f"   {'='*60}\n")
+                
+                order = self.exchange.create_limit_order(symbol, side, coin_amount, price, params)
+                
+                print(f"   ✅ API调用成功，返回订单ID: {order.get('id', 'N/A')}")
             except Exception as e1:
                 error_msg = str(e1)
+                print(f"\n   ❌ API调用失败: {error_msg}")
+                print(f"   📋 错误详情: {type(e1).__name__}: {str(e1)}")
+                
                 if '51000' in error_msg or 'posSide' in error_msg:
                     print(f"   🔄 检测到单向持仓模式，重试不带posSide...")
-                    del params['posSide']
-                    order = self.exchange.create_limit_order(symbol, side, amount, price, params)
+                    retry_params = params.copy()
+                    del retry_params['posSide']
+                    
+                    print(f"\n   📤 【OKX API重试调用详情】")
+                    print(f"      方法: create_limit_order")
+                    print(f"      symbol: {symbol}")
+                    print(f"      side: {side}")
+                    print(f"      amount: {coin_amount} (币数量)")
+                    print(f"      price: {price}")
+                    print(f"      params: {retry_params} (已移除posSide)")
+                    print(f"   {'='*60}\n")
+                    
+                    # 🔴 重试时也使用币数量，不是合约张数
+                    order = self.exchange.create_limit_order(symbol, side, coin_amount, price, retry_params)
+                    print(f"   ✅ 重试成功，返回订单ID: {order.get('id', 'N/A')}")
                 elif '51008' in error_msg or 'post_only' in error_msg.lower() or 'Post only' in error_msg:
                     print(f"   ⚠️  Post-Only被拒绝（订单会立即成交）")
                     print(f"   💡 无法挂限价单，将使用条件单")
@@ -512,7 +663,7 @@ class OKXTraderV2:
         Args:
             symbol: 交易对
             side: 'buy' 或 'sell'
-            amount: 数量
+            amount: 合约张数（需要转换为币数量）
             price: 价格
             timeout: 超时时间（秒）
             check_immediate_fill: 是否检查立即成交（开仓时True，止损止盈时False）
@@ -521,6 +672,12 @@ class OKXTraderV2:
             dict: 成交的订单信息，或 None
         """
         try:
+            # 🔴 将合约张数转换为币数量（OKX API 需要币数量，而不是合约张数）
+            contract_size, _ = self.get_contract_size(symbol)
+            coin_amount = float(amount) * contract_size  # 币数量 = 合约张数 × 合约规格
+            # 保留两位小数（OKX 要求）
+            coin_amount = round(coin_amount, 2)
+            
             # 🔴 开仓时检查是否会立即成交
             if check_immediate_fill:
                 ticker = self.exchange.fetch_ticker(symbol)
@@ -547,11 +704,54 @@ class OKXTraderV2:
                 params['posSide'] = 'short'
             
             try:
-                order = self.exchange.create_limit_order(symbol, side, amount, price, params)
+                # 🔴 使用币数量而不是合约张数
+                print(f"\n   📤 【OKX API调用详情】")
+                print(f"      CCXT方法: create_limit_order")
+                print(f"      参数:")
+                print(f"         symbol: {symbol}")
+                print(f"         side: {side}")
+                print(f"         amount: {coin_amount} (币数量，类型: {type(coin_amount).__name__})")
+                print(f"         price: {price} (类型: {type(price).__name__})")
+                print(f"         params: {params}")
+                print(f"      📊 计算过程:")
+                print(f"         - 合约张数(输入): {amount} 张")
+                print(f"         - 合约规格: {contract_size} SOL/张")
+                print(f"         - 币数量(计算): {coin_amount} SOL = {amount} × {contract_size}")
+                print(f"         - 价格: ${price:.2f}")
+                print(f"      📋 CCXT可能转换为OKX API:")
+                print(f"         POST /api/v5/trade/order")
+                print(f"         请求体可能包含:")
+                print(f"           - instId: {symbol}")
+                print(f"           - tdMode: cross (全仓)")
+                print(f"           - side: {side}")
+                print(f"           - ordType: limit")
+                print(f"           - sz: {coin_amount} (币数量)")
+                print(f"           - px: {price}")
+                print(f"           - posSide: {params.get('posSide', 'None')}")
+                print(f"   {'='*60}\n")
+                
+                order = self.exchange.create_limit_order(symbol, side, coin_amount, price, params)
+                
+                print(f"   ✅ API调用成功，返回订单ID: {order.get('id', 'N/A')}")
             except Exception as e1:
+                error_msg = str(e1)
+                print(f"\n   ❌ API调用失败: {error_msg}")
+                print(f"   📋 错误详情: {type(e1).__name__}: {str(e1)}")
+                
                 if '51000' in str(e1) or 'posSide' in str(e1):
                     print(f"   🔄 检测到单向持仓模式")
-                    order = self.exchange.create_limit_order(symbol, side, amount, price)
+                    # 🔴 重试时也使用币数量
+                    print(f"\n   📤 【OKX API重试调用详情】")
+                    print(f"      方法: create_limit_order")
+                    print(f"      symbol: {symbol}")
+                    print(f"      side: {side}")
+                    print(f"      amount: {coin_amount} (币数量)")
+                    print(f"      price: {price}")
+                    print(f"      params: {{}} (无posSide)")
+                    print(f"   {'='*60}\n")
+                    
+                    order = self.exchange.create_limit_order(symbol, side, coin_amount, price)
+                    print(f"   ✅ 重试成功，返回订单ID: {order.get('id', 'N/A')}")
                 else:
                     raise e1
             
@@ -1015,16 +1215,11 @@ class OKXTraderV2:
             print(f"\n✅ 限价单已挂: 订单ID={entry_order['id']}")
             result['entry_order'] = entry_order
             
-            # 只有开仓成功才设置止损止盈
-            if stop_loss_price:
-                result['stop_loss_order'] = self._set_stop_loss_limit(
-                    symbol, 'long', stop_loss_price, amount
-                )
-            
-            if take_profit_price:
-                result['take_profit_order'] = self._set_take_profit_limit(
-                    symbol, 'long', take_profit_price, amount
-                )
+            # 🔴 不立即挂止损止盈单，等待开仓成交后再挂
+            # 止损止盈价格会在开仓成交后通过定时检查机制挂单
+            print(f"   💡 止损止盈单将在开仓成交后自动挂单")
+            print(f"   📝 止损价格: ${stop_loss_price:.2f}" if stop_loss_price else "   📝 止损价格: 未设置")
+            print(f"   📝 止盈价格: ${take_profit_price:.2f}" if take_profit_price else "   📝 止盈价格: 未设置")
             
             print(f"{'='*60}\n")
             return result
@@ -1049,6 +1244,11 @@ class OKXTraderV2:
             print(f"      挂单价: ${limit_price:.2f}")
             print(f"   💡 执行逻辑: 价格跌至${actual_trigger_price:.2f}时触发 → 挂${limit_price:.2f}的买单")
             
+            # 🔴 将合约张数转换为币数量（OKX API 需要币数量）
+            contract_size, _ = self.get_contract_size(symbol)
+            coin_amount = float(amount) * contract_size  # 币数量 = 合约张数 × 合约规格
+            coin_amount = round(coin_amount, 2)  # 保留两位小数
+            
             # 🔴 使用OKX的algo_order API创建开仓条件单（计划委托）
             # 注意：这不是止损止盈条件单，而是开仓条件单
             algo_params = {
@@ -1056,10 +1256,52 @@ class OKXTraderV2:
                 'tdMode': 'cross',
                 'side': 'buy',
                 'ordType': 'conditional',  # 条件单类型
-                'sz': str(amount),  # 数量
+                'sz': str(coin_amount),  # 🔴 币数量（不是合约张数）
                 'triggerPx': str(actual_trigger_price),  # 触发价
                 'orderPx': str(limit_price),  # 委托价（支撑位价格）
             }
+            
+            # 🔴 打印条件单参数详情
+            print(f"\n   📋 【条件单参数详情】")
+            print(f"      Symbol: {symbol}")
+            print(f"      Side: buy")
+            print(f"      合约张数: {amount} 张")
+            print(f"      合约规格: {contract_size} SOL/张")
+            print(f"      币数量: {coin_amount} SOL (合约张数{amount} × 规格{contract_size})")
+            print(f"      触发价: ${actual_trigger_price:.2f}")
+            print(f"      挂单价: ${limit_price:.2f}")
+            print(f"      Params: {algo_params}")
+            
+            # 获取账户余额信息
+            try:
+                balance_info = self.get_balance()
+                if balance_info:
+                    print(f"      💰 账户余额: 总余额=${balance_info.get('total', 0):.2f}, 可用=${balance_info.get('free', 0):.2f}, 已用=${balance_info.get('used', 0):.2f}")
+                
+                # 🔴 计算需要的保证金（注意：amount 已经是计算好的合约张数）
+                leverage = getattr(self, 'leverage', TRADING_CONFIG.get('leverage', 1))
+                
+                # 获取合约规格，计算实际持仓价值
+                contract_size, _ = self.get_contract_size(symbol)
+                coin_amount = float(amount) * contract_size  # 实际币数量
+                position_value = coin_amount * limit_price  # 实际持仓价值（币数量 × 挂单价）
+                required_margin = position_value / leverage  # 所需保证金（持仓价值 ÷ 杠杆）
+                
+                print(f"      💰 合约张数: {amount} 张")
+                print(f"      💰 合约规格: {contract_size} SOL/张")
+                print(f"      💰 实际币数量: {coin_amount:.4f} SOL (数量{amount} × 规格{contract_size})")
+                print(f"      💰 持仓价值: ${position_value:.2f} (币数量{coin_amount:.4f} × 挂单价${limit_price:.2f})")
+                print(f"      💰 所需保证金: ${required_margin:.2f} (持仓价值${position_value:.2f} ÷ {leverage}倍杠杆)")
+                if balance_info:
+                    free_balance = balance_info.get('free', 0)
+                    if free_balance < required_margin:
+                        print(f"      ⚠️  可用余额不足: 需要${required_margin:.2f}, 可用${free_balance:.2f}, 差额=${required_margin - free_balance:.2f}")
+                    else:
+                        print(f"      ✅ 可用余额充足: 需要${required_margin:.2f}, 可用${free_balance:.2f}, 剩余=${free_balance - required_margin:.2f}")
+            except Exception as e:
+                print(f"      ⚠️  获取账户信息失败: {e}")
+            
+            print(f"   {'-'*60}\n")
             
             # 动态处理posSide参数
             try:
@@ -1201,16 +1443,11 @@ class OKXTraderV2:
             print(f"\n✅ 限价单已挂: 订单ID={entry_order['id']}")
             result['entry_order'] = entry_order
             
-            # 只有开仓成功才设置止损止盈
-            if stop_loss_price:
-                result['stop_loss_order'] = self._set_stop_loss_limit(
-                    symbol, 'short', stop_loss_price, amount
-                )
-            
-            if take_profit_price:
-                result['take_profit_order'] = self._set_take_profit_limit(
-                    symbol, 'short', take_profit_price, amount
-                )
+            # 🔴 不立即挂止损止盈单，等待开仓成交后再挂
+            # 止损止盈价格会在开仓成交后通过定时检查机制挂单
+            print(f"   💡 止损止盈单将在开仓成交后自动挂单")
+            print(f"   📝 止损价格: ${stop_loss_price:.2f}" if stop_loss_price else "   📝 止损价格: 未设置")
+            print(f"   📝 止盈价格: ${take_profit_price:.2f}" if take_profit_price else "   📝 止盈价格: 未设置")
             
             print(f"{'='*60}\n")
             return result
@@ -1235,6 +1472,11 @@ class OKXTraderV2:
             print(f"      挂单价: ${limit_price:.2f}")
             print(f"   💡 执行逻辑: 价格涨至${actual_trigger_price:.2f}时触发 → 挂${limit_price:.2f}的卖单")
             
+            # 🔴 将合约张数转换为币数量（OKX API 需要币数量）
+            contract_size, _ = self.get_contract_size(symbol)
+            coin_amount = float(amount) * contract_size  # 币数量 = 合约张数 × 合约规格
+            coin_amount = round(coin_amount, 2)  # 保留两位小数
+            
             # 🔴 使用OKX的algo_order API创建开仓条件单（计划委托）
             # 注意：这不是止损止盈条件单，而是开仓条件单
             algo_params = {
@@ -1242,10 +1484,52 @@ class OKXTraderV2:
                 'tdMode': 'cross',
                 'side': 'sell',
                 'ordType': 'conditional',  # 条件单类型
-                'sz': str(amount),  # 数量
+                'sz': str(coin_amount),  # 🔴 币数量（不是合约张数）
                 'triggerPx': str(actual_trigger_price),  # 触发价
                 'orderPx': str(limit_price),  # 委托价（阻力位价格）
             }
+            
+            # 🔴 打印条件单参数详情
+            print(f"\n   📋 【条件单参数详情】")
+            print(f"      Symbol: {symbol}")
+            print(f"      Side: sell")
+            print(f"      合约张数: {amount} 张")
+            print(f"      合约规格: {contract_size} SOL/张")
+            print(f"      币数量: {coin_amount} SOL (合约张数{amount} × 规格{contract_size})")
+            print(f"      触发价: ${actual_trigger_price:.2f}")
+            print(f"      挂单价: ${limit_price:.2f}")
+            print(f"      Params: {algo_params}")
+            
+            # 获取账户余额信息
+            try:
+                balance_info = self.get_balance()
+                if balance_info:
+                    print(f"      💰 账户余额: 总余额=${balance_info.get('total', 0):.2f}, 可用=${balance_info.get('free', 0):.2f}, 已用=${balance_info.get('used', 0):.2f}")
+                
+                # 🔴 计算需要的保证金（注意：amount 已经是计算好的合约张数）
+                leverage = getattr(self, 'leverage', TRADING_CONFIG.get('leverage', 1))
+                
+                # 获取合约规格，计算实际持仓价值
+                contract_size, _ = self.get_contract_size(symbol)
+                coin_amount = float(amount) * contract_size  # 实际币数量
+                position_value = coin_amount * limit_price  # 实际持仓价值（币数量 × 挂单价）
+                required_margin = position_value / leverage  # 所需保证金（持仓价值 ÷ 杠杆）
+                
+                print(f"      💰 合约张数: {amount} 张")
+                print(f"      💰 合约规格: {contract_size} SOL/张")
+                print(f"      💰 实际币数量: {coin_amount:.4f} SOL (数量{amount} × 规格{contract_size})")
+                print(f"      💰 持仓价值: ${position_value:.2f} (币数量{coin_amount:.4f} × 挂单价${limit_price:.2f})")
+                print(f"      💰 所需保证金: ${required_margin:.2f} (持仓价值${position_value:.2f} ÷ {leverage}倍杠杆)")
+                if balance_info:
+                    free_balance = balance_info.get('free', 0)
+                    if free_balance < required_margin:
+                        print(f"      ⚠️  可用余额不足: 需要${required_margin:.2f}, 可用${free_balance:.2f}, 差额=${required_margin - free_balance:.2f}")
+                    else:
+                        print(f"      ✅ 可用余额充足: 需要${required_margin:.2f}, 可用${free_balance:.2f}, 剩余=${free_balance - required_margin:.2f}")
+            except Exception as e:
+                print(f"      ⚠️  获取账户信息失败: {e}")
+            
+            print(f"   {'-'*60}\n")
             
             # 动态处理posSide参数
             try:
