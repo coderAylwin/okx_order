@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # VIDYA 策略交易程序管理脚本
-SCRIPT_DIR="/home/ubuntu/okx_order/okx_trend_volumatic_dynamic_average"
+
+# 自动识别脚本所在目录，避免硬编码路径
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="live_trading_VIDYA.py"
 PROJECT_NAME="vidya_trading_bot"
 
@@ -11,10 +13,26 @@ LOG_DIR="$SCRIPT_DIR/logs"
 CURRENT_DATE=$(date +%Y%m%d)
 LOG_FILE="$LOG_DIR/${PROJECT_NAME}_${CURRENT_DATE}.log"
 
-# 创建必要的目录
-mkdir -p $LOG_DIR
+# 虚拟环境
+DEFAULT_VENV="$SCRIPT_DIR/../venv/bin/activate"
+if [ -n "$VENV_PATH" ]; then
+    VENV_ACTIVATE="$VENV_PATH"
+elif [ -f "$DEFAULT_VENV" ]; then
+    VENV_ACTIVATE="$DEFAULT_VENV"
+else
+    VENV_ACTIVATE=""
+fi
 
-cd $SCRIPT_DIR
+# Python 命令
+PY_CMD=${PY_CMD:-python3}
+
+# 创建必要的目录
+mkdir -p "$LOG_DIR"
+
+cd "$SCRIPT_DIR" || {
+    echo "❌ 无法进入目录: $SCRIPT_DIR"
+    exit 1
+}
 
 # 获取当前日志文件路径
 get_log_file() {
@@ -24,11 +42,11 @@ get_log_file() {
 # 检查程序是否在运行
 is_running() {
     if [ -f "$PID_FILE" ]; then
-        PID=$(cat $PID_FILE)
+        PID=$(cat "$PID_FILE")
         if ps -p $PID > /dev/null 2>&1; then
             return 0
         else
-            rm -f $PID_FILE
+            rm -f "$PID_FILE"
         fi
     fi
     return 1
@@ -39,18 +57,33 @@ case "$1" in
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动VIDYA策略交易程序..."
 
         if is_running; then
-            PID=$(cat $PID_FILE)
+            PID=$(cat "$PID_FILE")
             echo "程序已在运行 (PID: $PID)"
             exit 1
         fi
 
+        echo "📂 工作目录: $SCRIPT_DIR"
+        echo "🐍 Python命令: $PY_CMD"
+        echo "📄 脚本文件: $SCRIPT_NAME"
+
         # 激活虚拟环境并启动程序
-        source /home/ubuntu/okx_order/venv/bin/activate
-        nohup python $SCRIPT_NAME >> $(get_log_file) 2>&1 &
+        if [ -n "$VENV_ACTIVATE" ]; then
+            if [ -f "$VENV_ACTIVATE" ]; then
+                # shellcheck disable=SC1090
+                source "$VENV_ACTIVATE"
+            else
+                echo "⚠️  虚拟环境激活脚本不存在: $VENV_ACTIVATE"
+            fi
+        else
+            echo "ℹ️  未配置虚拟环境，直接使用系统Python"
+        fi
+
+        nohup $PY_CMD "$SCRIPT_NAME" >> "$(get_log_file)" 2>&1 &
 
         # 保存PID
-        echo $! > $PID_FILE
-        echo "程序已启动 (PID: $(cat $PID_FILE))"
+        echo $! > "$PID_FILE"
+        PID_VALUE=$(cat "$PID_FILE")
+        echo "程序已启动 (PID: $PID_VALUE)"
         echo "日志文件: $(get_log_file)"
         echo "使用 './manage_vidya_trading.sh logs' 查看实时日志"
         ;;
@@ -59,7 +92,7 @@ case "$1" in
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 停止VIDYA策略交易程序..."
 
         if is_running; then
-            PID=$(cat $PID_FILE)
+            PID=$(cat "$PID_FILE")
             echo "停止进程: $PID"
 
             # 先尝试正常停止
@@ -72,14 +105,14 @@ case "$1" in
                 kill -9 $PID
             fi
 
-            rm -f $PID_FILE
+            rm -f "$PID_FILE"
             echo "程序已停止"
         else
             echo "程序未在运行"
 
             # 清理可能存在的旧PID文件
             if [ -f "$PID_FILE" ]; then
-                rm -f $PID_FILE
+                rm -f "$PID_FILE"
             fi
         fi
         ;;
@@ -94,7 +127,7 @@ case "$1" in
     status)
         echo "VIDYA策略交易程序状态:"
         if is_running; then
-            PID=$(cat $PID_FILE)
+            PID=$(cat "$PID_FILE")
             echo "✅ 运行中 (PID: $PID)"
             echo "📅 启动时间: $(ps -p $PID -o lstart=)"
             echo "⏱️  运行时间: $(ps -p $PID -o etime=)"
@@ -110,37 +143,37 @@ case "$1" in
         case "$2" in
             today|"")
                 echo "查看今日实时日志 (Ctrl+C 退出):"
-                tail -f $(get_log_file)
+                tail -f "$(get_log_file)"
                 ;;
             yesterday)
                 YESTERDAY=$(date -d "yesterday" +%Y%m%d)
                 YESTERDAY_LOG="$LOG_DIR/${PROJECT_NAME}_${YESTERDAY}.log"
                 if [ -f "$YESTERDAY_LOG" ]; then
                     echo "查看昨日日志:"
-                    tail -100 $YESTERDAY_LOG
+                    tail -100 "$YESTERDAY_LOG"
                 else
                     echo "昨天的日志文件不存在: $YESTERDAY_LOG"
                 fi
                 ;;
             error)
                 echo "查看错误日志:"
-                grep -i "error\|exception\|fail\|traceback" $(get_log_file) | tail -50
+                grep -i "error\|exception\|fail\|traceback" "$(get_log_file)" | tail -50
                 ;;
             stats)
                 echo "今日日志统计:"
                 LOG_FILE=$(get_log_file)
                 if [ -f "$LOG_FILE" ]; then
-                    echo "总行数: $(wc -l < $LOG_FILE)"
-                    echo "错误数: $(grep -i "error" $LOG_FILE | wc -l)"
-                    echo "异常数: $(grep -i "exception" $LOG_FILE | wc -l)"
-                    echo "最后更新时间: $(stat -c %y $LOG_FILE)"
+                    echo "总行数: $(wc -l < "$LOG_FILE")"
+                    echo "错误数: $(grep -i "error" "$LOG_FILE" | wc -l)"
+                    echo "异常数: $(grep -i "exception" "$LOG_FILE" | wc -l)"
+                    echo "最后更新时间: $(stat -c %y "$LOG_FILE")"
                 else
                     echo "今日日志文件不存在"
                 fi
                 ;;
             list)
                 echo "可用的日志文件:"
-                ls -la $LOG_DIR/${PROJECT_NAME}_*.log 2>/dev/null | sort -r || echo "没有找到日志文件"
+                ls -la "$LOG_DIR"/${PROJECT_NAME}_*.log 2>/dev/null | sort -r || echo "没有找到日志文件"
                 ;;
             *)
                 echo "用法: $0 logs {today|yesterday|error|stats|list}"
