@@ -2,10 +2,25 @@
 
 # VIDYA 策略交易程序管理脚本
 
-# 自动识别脚本所在目录，避免硬编码路径
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="live_trading_VIDYA.py"
 PROJECT_NAME="vidya_trading_bot"
+
+# 解析脚本所在目录，并定位到含有策略脚本的目录
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+POSSIBLE_DIRS=("$BASE_DIR" "$BASE_DIR/okx_trend_volumatic_dynamic_average" "$BASE_DIR/../okx_trend_volumatic_dynamic_average")
+SCRIPT_DIR=""
+
+for dir in "${POSSIBLE_DIRS[@]}"; do
+    if [ -f "$dir/$SCRIPT_NAME" ]; then
+        SCRIPT_DIR="$dir"
+        break
+    fi
+done
+
+if [ -z "$SCRIPT_DIR" ]; then
+    echo "❌ 未找到 $SCRIPT_NAME，请检查脚本位置"
+    exit 1
+fi
 
 # 路径配置
 PID_FILE="$SCRIPT_DIR/${PROJECT_NAME}.pid"
@@ -198,7 +213,7 @@ case "$1" in
             $0 status
             echo
             echo "最近日志:"
-            tail -10 $(get_log_file) 2>/dev/null || echo "暂无日志"
+            tail -10 "$(get_log_file)" 2>/dev/null || echo "暂无日志"
             echo
             echo "按 Ctrl+C 退出监控"
             sleep 5
