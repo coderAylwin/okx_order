@@ -43,8 +43,8 @@ def get_strategy_config():
         'delta_volume_stop_loss_threshold': 0.6,  # Delta Volume止损阈值（0.6表示60%，持有多单时Delta%<-60%止损，持有空单时Delta%>+60%止损）
         
         # 🔴 钉钉消息推送配置
-        'dingtalk_webhook': 'https://oapi.dingtalk.com/robot/send?access_token=8eecf36111e7448c7dc26244f33e69d0bdd12cfb7b53457882ea725069d74cc1',
-        'dingtalk_secret': 'SEC8f4556064e9c31374422530eab63a65561f2bac0b8d1c3e7cfcaa2b8b4d44686',  # 加签密钥
+        'dingtalk_webhook': 'https://oapi.dingtalk.com/robot/send?access_token=30bfb90af56d35220b8e2c910059db527890e92b087cf9c658437882c68b1d55',
+        'dingtalk_secret': 'SEC814a2b1b07f412dc7d0543ee49903861458fe382e42659dde7851631aadd6942',  # 加签密钥
     }
     
     return config
