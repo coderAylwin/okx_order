@@ -2529,13 +2529,12 @@ class LiveTradingBotWithStopOrders:
         """启动实盘交易"""
         self.logger.log("🚀 启动实盘交易 - 止损止盈挂单版...")
         
-        # 设置杠杆
+        # 设置杠杆（无论杠杆倍数是多少，都调用接口确保设置正确）
         leverage = TRADING_CONFIG.get('leverage', 1)
         margin_mode = TRADING_CONFIG.get('margin_mode', 'cross')
         
-        if leverage > 1:
-            self.logger.log(f"⚙️  设置杠杆: {leverage}x, 模式: {margin_mode}")
-            self.trader.set_leverage(self.symbol, leverage, margin_mode)
+        self.logger.log(f"⚙️  设置杠杆: {leverage}x, 模式: {margin_mode}")
+        self.trader.set_leverage(self.symbol, leverage, margin_mode)
         
         # 预热策略
         self.warmup_strategy()
