@@ -2557,14 +2557,46 @@ class TrendVolumaticDynamicAverageStrategy:
 
     def _execute_vidya_entry(self, direction, entry_price, signal_info, vidya_result):
         """执行标准VIDYA开仓（基于支撑阻力线和ATR带宽）"""
+        # 获取时间戳用于钉钉消息
+        timestamp = signal_info.get('timestamp', datetime.now())
+        
         # 🔴 防御性检查：entry_price不能为None
         if entry_price is None:
+            reason = "开仓价格为空，无法开仓"
             print(f"  ⚠️  【开仓价格为空】无法开仓：entry_price=None")
+            # 推送钉钉消息
+            if self.dingtalk_notifier:
+                try:
+                    content = f"## ⏸️ VIDYA开仓检查 - 不开仓\n\n"
+                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
+                    content += f"---\n\n"
+                    content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
+                    content += f"**📈 开仓方向**: {direction.upper()}\n\n"
+                    content += f"**❌ 不开仓原因**: {reason}\n\n"
+                    content += f"**🔍 详细信息**: entry_price=None，无法获取开仓价格\n\n"
+                    self.dingtalk_notifier.send_message("⏸️ 不开仓 - VIDYA开仓价格为空", content)
+                except Exception as e:
+                    print(f"  ⚠️  推送钉钉消息失败: {e}")
             return
             
         # 检查是否已预热完成
         if not self.vidya_indicator.is_warmed_up:
+            reason = "VIDYA指标预热未完成，跳过开仓"
             print(f"  ⚠️  【VIDYA预热未完成】指标预热中，跳过开仓")
+            # 推送钉钉消息
+            if self.dingtalk_notifier:
+                try:
+                    content = f"## ⏸️ VIDYA开仓检查 - 不开仓\n\n"
+                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
+                    content += f"---\n\n"
+                    content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
+                    content += f"**📈 开仓方向**: {direction.upper()}\n\n"
+                    content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
+                    content += f"**❌ 不开仓原因**: {reason}\n\n"
+                    content += f"**🔍 详细信息**: VIDYA指标正在预热中，需要等待指标数据准备完成\n\n"
+                    self.dingtalk_notifier.send_message("⏸️ 不开仓 - VIDYA预热未完成", content)
+                except Exception as e:
+                    print(f"  ⚠️  推送钉钉消息失败: {e}")
             return
         
         # 🔴 检查固定周期Delta Volume过滤条件
@@ -2583,7 +2615,23 @@ class TrendVolumaticDynamicAverageStrategy:
             
         potential_invested_amount = self._get_invested_capital()
         if potential_invested_amount <= 0:
+            reason = f"资金不足，现金余额=${self.cash_balance:,.2f} <= 0"
             print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
+            # 推送钉钉消息
+            if self.dingtalk_notifier:
+                try:
+                    content = f"## ⏸️ VIDYA开仓检查 - 不开仓\n\n"
+                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
+                    content += f"---\n\n"
+                    content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
+                    content += f"**📈 开仓方向**: {direction.upper()}\n\n"
+                    content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
+                    content += f"**❌ 不开仓原因**: {reason}\n\n"
+                    content += f"**💵 现金余额**: ${self.cash_balance:,.2f}\n\n"
+                    content += f"**🔍 详细信息**: 账户资金不足，无法执行开仓操作\n\n"
+                    self.dingtalk_notifier.send_message("⏸️ 不开仓 - 资金不足", content)
+                except Exception as e:
+                    print(f"  ⚠️  推送钉钉消息失败: {e}")
             return
         
         # 🔴 防御性检查：如果vidya_result为None，使用当前VIDYA指标状态
@@ -2661,15 +2709,49 @@ class TrendVolumaticDynamicAverageStrategy:
         
         # 构建开仓原因
         if direction == 'long':
-            reason = f"标准VIDYA上升趋势开多 | 价格${entry_price:.2f} > 上轨${upper_band:.2f} | VIDYA:${smoothed_vidya:.2f} | CMO:{cmo:.1f} | Delta:{delta_volume:+,.0f}"
+            upper_band_str = f"${upper_band:.2f}" if upper_band else "N/A"
+            reason = f"标准VIDYA上升趋势开多 | 价格${entry_price:.2f} > 上轨{upper_band_str} | VIDYA:${smoothed_vidya:.2f} | CMO:{cmo:.1f} | Delta:{delta_volume:+,.0f}"
         else:
-            reason = f"标准VIDYA下降趋势开空 | 价格${entry_price:.2f} < 下轨${lower_band:.2f} | VIDYA:${smoothed_vidya:.2f} | CMO:{cmo:.1f} | Delta:{delta_volume:+,.0f}"
+            lower_band_str = f"${lower_band:.2f}" if lower_band else "N/A"
+            reason = f"标准VIDYA下降趋势开空 | 价格${entry_price:.2f} < 下轨{lower_band_str} | VIDYA:${smoothed_vidya:.2f} | CMO:{cmo:.1f} | Delta:{delta_volume:+,.0f}"
         
         print(f"  🎯 【标准VIDYA开仓】{direction.upper()} | 价格: ${entry_price:.2f}")
         print(f"  📊 VIDYA: ${smoothed_vidya:.2f} | Delta Volume: {delta_volume:+,.0f}")
         print(f"  🛡️ 止损: ${stop_loss_price:.2f} ({stop_reason})")
-        print(f"  🎯 止盈: ${take_profit_price:.2f} ({profit_reason})")
+        if take_profit_price:
+            print(f"  🎯 止盈: ${take_profit_price:.2f} ({profit_reason})")
+        else:
+            print(f"  🎯 止盈: 无 ({profit_reason})")
         print(f"  📈 风险回报比: 1:{risk_reward_ratio:.2f}")
+        
+        # 推送钉钉消息 - 满足开仓条件
+        if self.dingtalk_notifier:
+            try:
+                content = f"## 🎯 VIDYA开仓信号 - 满足开仓条件\n\n"
+                content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
+                content += f"---\n\n"
+                content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
+                content += f"**📈 开仓方向**: {direction.upper()}\n\n"
+                content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
+                content += f"**📊 VIDYA值**: ${smoothed_vidya:.2f}\n\n"
+                content += f"**📈 Delta Volume**: {delta_volume:+,.0f}\n\n"
+                content += f"**🛡️ 止损价格**: ${stop_loss_price:.2f} ({stop_reason})\n\n"
+                if take_profit_price:
+                    content += f"**🎯 止盈价格**: ${take_profit_price:.2f} ({profit_reason})\n\n"
+                else:
+                    content += f"**🎯 止盈价格**: 无 ({profit_reason})\n\n"
+                content += f"**📈 风险回报比**: 1:{risk_reward_ratio:.2f}\n\n"
+                content += f"**💵 投入金额**: ${potential_invested_amount:,.2f}\n\n"
+                content += f"**📝 开仓原因**: {reason}\n\n"
+                if direction == 'long':
+                    content += f"**📊 上轨**: ${upper_band:.2f if upper_band else 'N/A'}\n\n"
+                    content += f"**📊 下轨**: ${lower_band:.2f if lower_band else 'N/A'}\n\n"
+                else:
+                    content += f"**📊 上轨**: ${upper_band:.2f if upper_band else 'N/A'}\n\n"
+                    content += f"**📊 下轨**: ${lower_band:.2f if lower_band else 'N/A'}\n\n"
+                self.dingtalk_notifier.send_message("🎯 开仓信号 - VIDYA标准开仓", content)
+            except Exception as e:
+                print(f"  ⚠️  推送钉钉消息失败: {e}")
         
         if direction == 'long':
             self._open_long_position(entry_price, signal_info, reason, potential_invested_amount, 
