@@ -1547,8 +1547,24 @@ class LiveTradingBotWithStopOrders:
             
             if not has_okx_position:
                 self.logger.log(f"✅ OKX无持仓，程序从空仓开始")
-                # 🔴 确保本地状态为空
+                # 🔴 检查策略对象是否有持仓状态（可能是从数据库恢复的旧状态）
+                if hasattr(self, 'strategy') and self.strategy.position:
+                    self.logger.log_warning(f"⚠️  检测到策略对象有持仓状态（{self.strategy.position}），但OKX无持仓")
+                    self.logger.log_warning(f"   策略开仓价: ${self.strategy.entry_price if self.strategy.entry_price else 0:.2f}")
+                    self.logger.log_warning(f"   策略持仓数量: {self.strategy.position_shares if self.strategy.position_shares else 0}")
+                    self.logger.log_warning(f"   正在清空策略对象的持仓状态...")
+                
+                # 🔴 确保本地状态和策略对象状态都为空
                 self._clear_position_state()
+                
+                # 🔴 再次确认策略对象状态已清空
+                if hasattr(self, 'strategy'):
+                    if self.strategy.position:
+                        self.logger.log_error(f"❌ 警告：清空后策略对象仍有持仓状态（{self.strategy.position}），强制清空")
+                        self.strategy.sync_position_close("启动时OKX无持仓，清空策略状态")
+                    else:
+                        self.logger.log(f"✅ 策略对象状态已确认清空")
+                
                 self.logger.log(f"{'='*80}\n")
                 return
             
