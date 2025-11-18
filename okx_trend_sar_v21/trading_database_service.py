@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker, scoped_session
 from datetime import datetime
 import json
 from trading_database_models import (
-    Base, IndicatorSignal, OKXOrder, OKXTrade, OKXStopOrder,
+    Base, IndicatorSignal, OKXTradeOrder, OKXTrade, OKXStopOrder,
     create_all_tables
 )
 
@@ -141,80 +141,223 @@ class TradingDatabaseService:
         finally:
             self.close_session(session)
     
-    # ==================== OKX订单表操作 ====================
+    # ==================== OKX交易订单表（okx_trade_orders）操作 ====================
     
-    def save_okx_order(self, order_id, symbol, order_type, side, position_side,
-                      amount, price=None, average_price=None, filled=0, status='open',
+    def save_okx_order(self, order_id, symbol, order_type=None, side=None, position_side=None,
+                      amount=None, price=None, average_price=None, filled=0, status='open',
                       signal_id=None, trade_id=None, parent_order_id=None,
-                      invested_amount=None, order_time=None, filled_time=None):
-        """保存OKX订单
+                      invested_amount=None, order_time=None, filled_time=None,
+                      strategy_name=None, leverage=1,
+                      stop_loss_order_id=None, stop_profit_order_id=None,
+                      exit_reason=None, exit_signal_id=None,
+                      trade_fee=0, funding_fee=0, total_fee=None):
+        """创建或更新 okx_trade_orders 记录
         
-        Returns:
-            order_db_id: 数据库中的订单ID
+        兼容旧的 save_okx_order 调用：
+        - parent_order_id 为空视为开仓记录
+        - parent_order_id 不为空视为更新对应开仓记录的平仓信息
         """
         session = self.get_session()
         try:
-            # 🔴 价格保留两位小数
-            price = round(price, 2) if price is not None else None
-            average_price = round(average_price, 2) if average_price is not None else None
-            invested_amount = round(invested_amount, 2) if invested_amount is not None else None
-            
-            order = OKXOrder(
-                order_id=order_id,
-                symbol=symbol,
-                order_type=order_type,
-                side=side,
-                position_side=position_side,
-                amount=amount,
-                price=price,
-                average_price=average_price,
-                filled=filled,
-                status=status,
-                signal_id=signal_id,
-                trade_id=trade_id,
-                parent_order_id=parent_order_id,
-                invested_amount=invested_amount,
-                order_time=order_time,
-                filled_time=filled_time
-            )
-            
-            session.add(order)
-            session.commit()
-            order_db_id = order.id
-            
-            print(f"✅ 保存OKX订单: ID={order_db_id}, OKX订单ID={order_id}, 类型={order_type}")
-            return order_db_id
-            
+            entry_time = order_time or datetime.now()
+            entry_price = round(price, 2) if price is not None else 0.0
+            invested_amount = round(invested_amount, 2) if invested_amount is not None else 0.0
+            leverage = leverage or 1
+            total_fee = total_fee if total_fee is not None else 0
+            total_fee = round(total_fee, 4)
+            trade_fee = round(trade_fee or 0, 4)
+            funding_fee = round(funding_fee or 0, 4)
+
+            if parent_order_id:
+                # 平仓/更新
+                record = session.query(OKXTradeOrder).filter_by(order_id=parent_order_id).first()
+                if not record:
+                    print(f"⚠️  未找到对应的开仓记录(order_id={parent_order_id})，无法更新平仓信息")
+                    session.rollback()
+                    return None
+
+                record.exit_price = round(price, 2) if price is not None else record.exit_price
+                record.exit_time = filled_time or order_time or datetime.now()
+                record.exit_reason = exit_reason or status or record.exit_reason
+                if exit_signal_id:
+                    record.exit_signal_id = exit_signal_id
+                if stop_loss_order_id:
+                    record.stop_loss_order_id = stop_loss_order_id
+                if stop_profit_order_id:
+                    record.stop_profit_order_id = stop_profit_order_id
+                if status:
+                    record.status = status
+                record.trade_fee = trade_fee or record.trade_fee
+                record.funding_fee = funding_fee or record.funding_fee
+                record.total_fee = total_fee or record.total_fee
+                session.commit()
+                print(f"✅ 更新交易订单(平仓信息): 开仓ID={parent_order_id}, 平仓单={order_id}")
+                return record.id
+
+            # 开仓记录
+            record = session.query(OKXTradeOrder).filter_by(order_id=order_id).first()
+            if not record:
+                record = OKXTradeOrder(
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    position_side=position_side,
+                    entry_signal_id=signal_id,
+                    order_id=order_id,
+                    entry_price=entry_price,
+                    entry_time=entry_time,
+                    exit_price=entry_price,
+                    exit_time=entry_time,
+                    amount=amount,
+                    leverage=leverage,
+                    invested_amount=invested_amount,
+                    trade_fee=0,
+                    funding_fee=0,
+                    total_fee=0,
+                    status='open',
+                    stop_loss_order_id=stop_loss_order_id,
+                    stop_profit_order_id=stop_profit_order_id,
+                    max_price=entry_price,
+                    min_price=entry_price,
+                    max_rate=0.0,  # 开仓时收益率为0
+                    min_rate=0.0,  # 开仓时收益率为0
+                )
+                session.add(record)
+                session.commit()
+                print(f"✅ 记录开仓订单: OKX订单ID={order_id}, {position_side}, 价格={entry_price}")
+                return record.id
+            else:
+                # 已存在则更新基础信息
+                record.strategy_name = strategy_name or record.strategy_name
+                record.symbol = symbol
+                record.position_side = position_side
+                record.entry_signal_id = signal_id or record.entry_signal_id
+                record.entry_price = entry_price
+                record.entry_time = entry_time
+                record.amount = amount
+                record.leverage = leverage
+                record.invested_amount = invested_amount
+                record.stop_loss_order_id = stop_loss_order_id or record.stop_loss_order_id
+                record.stop_profit_order_id = stop_profit_order_id or record.stop_profit_order_id
+                if record.max_price is None or entry_price > record.max_price:
+                    record.max_price = entry_price
+                    record.max_price_time = entry_time.strftime('%Y-%m-%d %H:%M:%S')
+                    # 计算最高价对应的收益率
+                    if position_side == 'long':
+                        record.max_rate = round((entry_price - record.entry_price) / record.entry_price * 100, 4) if record.entry_price and record.entry_price > 0 else 0.0
+                    else:  # short
+                        record.max_rate = round((record.entry_price - entry_price) / record.entry_price * 100, 4) if record.entry_price and record.entry_price > 0 else 0.0
+                if record.min_price is None or entry_price < record.min_price:
+                    record.min_price = entry_price
+                    record.min_price_time = entry_time.strftime('%Y-%m-%d %H:%M:%S')
+                    # 计算最低价对应的收益率
+                    if position_side == 'long':
+                        record.min_rate = round((entry_price - record.entry_price) / record.entry_price * 100, 4) if record.entry_price and record.entry_price > 0 else 0.0
+                    else:  # short
+                        record.min_rate = round((record.entry_price - entry_price) / record.entry_price * 100, 4) if record.entry_price and record.entry_price > 0 else 0.0
+                session.commit()
+                print(f"✅ 更新开仓订单: OKX订单ID={order_id}, {position_side}, 价格={entry_price}")
+                return record.id
+
         except Exception as e:
             session.rollback()
-            print(f"❌ 保存OKX订单失败: {e}")
+            print(f"❌ 保存交易订单失败: {e}")
             return None
         finally:
             self.close_session(session)
-    
+
     def update_okx_order_status(self, order_id, status, filled=None, average_price=None, filled_time=None):
-        """更新OKX订单状态"""
+        """更新 okx_trade_orders 的状态字段"""
         session = self.get_session()
         try:
-            order = session.query(OKXOrder).filter_by(order_id=order_id).first()
-            if order:
-                order.status = status
-                if filled is not None:
-                    order.filled = filled
-                if average_price is not None:
-                    order.average_price = average_price
-                if filled_time is not None:
-                    order.filled_time = filled_time
-                
-                session.commit()
-                print(f"✅ 更新订单状态: {order_id} -> {status}")
-                return True
-            else:
-                print(f"⚠️  未找到订单: {order_id}")
+            record = session.query(OKXTradeOrder).filter_by(order_id=order_id).first()
+            if not record:
+                print(f"⚠️  未找到交易订单: {order_id}")
                 return False
+
+            record.status = status
+            if filled_time:
+                record.exit_time = filled_time
+            session.commit()
+            print(f"✅ 更新交易订单状态: {order_id} -> {status}")
+            return True
         except Exception as e:
             session.rollback()
-            print(f"❌ 更新订单状态失败: {e}")
+            print(f"❌ 更新交易订单状态失败: {e}")
+            return False
+        finally:
+            self.close_session(session)
+    
+    def update_trade_order_price_range(self, order_id, high_price, low_price, kline_timestamp):
+        """更新持仓订单的最高价和最低价（使用1分钟K线数据）
+        
+        Args:
+            order_id: 开仓订单ID（okx_trade_orders.order_id）
+            high_price: K线最高价
+            low_price: K线最低价
+            kline_timestamp: K线时间戳（datetime对象）
+        
+        Returns:
+            bool: 是否成功更新
+        """
+        session = self.get_session()
+        try:
+            record = session.query(OKXTradeOrder).filter_by(order_id=order_id).first()
+            if not record:
+                # 不打印警告，因为可能订单还未创建或已平仓
+                return False
+            
+            # 只更新状态为 'open' 的订单
+            if record.status != 'open':
+                return False
+            
+            updated = False
+            kline_time_str = kline_timestamp.strftime('%Y-%m-%d %H:%M:%S') if kline_timestamp else None
+            
+            # 需要开仓价格和持仓方向来计算收益率
+            if record.entry_price is None or record.entry_price <= 0:
+                # 如果没有开仓价格，无法计算收益率
+                return False
+            
+            # 更新最高价
+            if record.max_price is None or high_price > record.max_price:
+                record.max_price = round(high_price, 2)
+                record.max_price_time = kline_time_str
+                
+                # 计算最高价对应的收益率
+                if record.position_side == 'long':
+                    # 多单：最高价对应最高收益率
+                    record.max_rate = round((high_price - record.entry_price) / record.entry_price * 100, 4)
+                else:  # short
+                    # 空单：最高价对应最低收益率（可能是负数）
+                    record.max_rate = round((record.entry_price - high_price) / record.entry_price * 100, 4)
+                
+                updated = True
+            
+            # 更新最低价
+            if record.min_price is None or low_price < record.min_price:
+                record.min_price = round(low_price, 2)
+                record.min_price_time = kline_time_str
+                
+                # 计算最低价对应的收益率
+                if record.position_side == 'long':
+                    # 多单：最低价对应最低收益率（可能是负数）
+                    record.min_rate = round((low_price - record.entry_price) / record.entry_price * 100, 4)
+                else:  # short
+                    # 空单：最低价对应最高收益率
+                    record.min_rate = round((record.entry_price - low_price) / record.entry_price * 100, 4)
+                
+                updated = True
+            
+            if updated:
+                session.commit()
+                # 只在有更新时打印日志（避免日志过多）
+                # print(f"✅ 更新持仓价格范围: order_id={order_id}, 最高={record.max_price}({record.max_rate:.2f}%), 最低={record.min_price}({record.min_rate:.2f}%)")
+            
+            return updated
+            
+        except Exception as e:
+            session.rollback()
+            print(f"❌ 更新持仓价格范围失败: {e}")
             return False
         finally:
             self.close_session(session)
@@ -222,7 +365,9 @@ class TradingDatabaseService:
     # ==================== OKX交易记录表操作 ====================
     
     def create_okx_trade(self, symbol, position_side, entry_order_id, entry_price,
-                        entry_time, amount, invested_amount, entry_signal_id=None):
+                        entry_time, amount, invested_amount, entry_signal_id=None,
+                        strategy_name=None, leverage=1,
+                        stop_loss_order_id=None, stop_profit_order_id=None):
         """创建OKX交易记录（开仓时调用）
         
         Returns:
@@ -249,7 +394,25 @@ class TradingDatabaseService:
             session.add(trade)
             session.commit()
             trade_id = trade.id
-            
+
+            # 同步写入 okx_trade_orders（以 entry_order_id 为唯一标识）
+            self.save_okx_order(
+                order_id=entry_order_id,
+                symbol=symbol,
+                order_type='ENTRY',
+                side='buy' if position_side == 'long' else 'sell',
+                position_side=position_side,
+                amount=amount,
+                price=entry_price,
+                invested_amount=invested_amount,
+                order_time=entry_time,
+                strategy_name=strategy_name,
+                leverage=leverage,
+                signal_id=entry_signal_id,
+                stop_loss_order_id=stop_loss_order_id,
+                stop_profit_order_id=stop_profit_order_id
+            )
+
             print(f"✅ 创建交易记录: ID={trade_id}, {position_side}, 价格={entry_price}")
             return trade_id
             
@@ -321,6 +484,23 @@ class TradingDatabaseService:
             
             # 更新状态
             trade.status = 'closed'
+
+            # 同步更新 okx_trade_orders
+            trade_order = session.query(OKXTradeOrder).filter_by(order_id=trade.entry_order_id).first()
+            if trade_order:
+                trade_order.exit_price = exit_price
+                trade_order.exit_time = exit_time
+                trade_order.exit_reason = exit_reason
+                trade_order.exit_signal_id = exit_signal_id
+                trade_order.trade_fee = round(exit_fee or 0, 4)
+                trade_order.funding_fee = round(funding_fee or 0, 4)
+                trade_order.total_fee = round(entry_fee + exit_fee + funding_fee, 4)
+                trade_order.profit_loss = trade.profit_loss
+                trade_order.net_profit_loss = trade.net_profit_loss
+                trade_order.profit_loss_pct = trade.profit_loss_pct
+                trade_order.return_rate = trade.return_rate
+                trade_order.holding_duration = trade.holding_duration
+                trade_order.status = 'closed'
             
             session.commit()
             
@@ -455,7 +635,7 @@ class TradingDatabaseService:
     # ==================== 简化方法名（别名） ====================
     
     def save_order(self, **kwargs):
-        """保存订单（save_okx_order的别名）"""
+        """保存交易订单（兼容旧接口）"""
         return self.save_okx_order(**kwargs)
     
     def save_trade(self, **kwargs):

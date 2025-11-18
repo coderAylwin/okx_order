@@ -978,6 +978,8 @@ class LiveTradingBotWithStopOrders:
                 print(f"❌ 跳过止损更新:")
                 if not self.current_position:
                     print(f"   原因: 当前无持仓")
+                    # 重置持仓状态
+                    self._clear_position_state()
                 if not new_stop_loss:
                     print(f"   原因: 新止损价格为空")
                 
@@ -1429,6 +1431,7 @@ class LiveTradingBotWithStopOrders:
             
             if not position_match or not shares_match:
                 print(f"   ⚠️  状态不一致！需要同步")
+                self._clear_position_state()
             else:
                 print(f"   ✅ 状态一致")
         
@@ -2533,9 +2536,8 @@ class LiveTradingBotWithStopOrders:
         leverage = TRADING_CONFIG.get('leverage', 1)
         margin_mode = TRADING_CONFIG.get('margin_mode', 'cross')
         
-        if leverage > 1:
-            self.logger.log(f"⚙️  设置杠杆: {leverage}x, 模式: {margin_mode}")
-            self.trader.set_leverage(self.symbol, leverage, margin_mode)
+        self.logger.log(f"⚙️  设置杠杆: {leverage}x, 模式: {margin_mode}")
+        self.trader.set_leverage(self.symbol, leverage, margin_mode)
         
         # 预热策略
         self.warmup_strategy()

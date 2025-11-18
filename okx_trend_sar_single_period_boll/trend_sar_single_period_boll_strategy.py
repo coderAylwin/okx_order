@@ -101,9 +101,24 @@ class TrendFilterTimeframeManager:
         minutes = self.get_timeframe_minutes()
         period_start = self._calculate_period_start(timestamp, minutes)
         
+        # DEBUG: 打印周期判断的关键变量
+        try:
+            print(f"[TM] update_kline_data | ts={timestamp.strftime('%Y-%m-%d %H:%M:%S')} "
+                  f"| minutes={minutes} | period_start={period_start.strftime('%Y-%m-%d %H:%M:%S') if hasattr(period_start,'strftime') else period_start} "
+                  f"| current_period(before)={self.current_period.strftime('%Y-%m-%d %H:%M:%S') if hasattr(self.current_period,'strftime') else self.current_period}")
+        except Exception:
+            pass
+        
         if self.current_period is None or period_start != self.current_period:
             # 保存上一个周期的K线数据
             if (self.current_period is not None and self.current_open is not None):
+                # DEBUG: 周期切换，输出上一周期信息
+                try:
+                    print(f"[TM] period change detected → emit previous kline "
+                          f"| prev_period={self.current_period.strftime('%Y-%m-%d %H:%M:%S') if hasattr(self.current_period,'strftime') else self.current_period} "
+                          f"| open={self.current_open} high={self.current_high} low={self.current_low} close={self.current_close} vol={self.current_volume}")
+                except Exception:
+                    pass
                 kline_data = {
                     'timestamp': self.current_period,
                     'open': self.current_open,
@@ -124,6 +139,13 @@ class TrendFilterTimeframeManager:
             self.current_low = low_price
             self.current_close = close_price
             self.current_volume = volume  # 重置成交量
+            
+            # DEBUG: 新周期设定后打印
+            try:
+                print(f"[TM] new current_period={self.current_period.strftime('%Y-%m-%d %H:%M:%S') if hasattr(self.current_period,'strftime') else self.current_period} "
+                      f"| first_tick O/H/L/C/V={open_price}/{high_price}/{low_price}/{close_price}/{volume}")
+            except Exception:
+                pass
             
             return new_kline
         else:
@@ -895,6 +917,14 @@ class TrendSarStrategy:
                     new_kline['low']
                 )
                 
+                # 🔴 预热期间也同步更新趋势方向（不触发交易）
+                try:
+                    dummy_signal_info = {'signals': [], 'timestamp': new_kline['timestamp']}
+                    self._check_trend_change(result, new_kline['open'], dummy_signal_info)
+                except Exception as _:
+                    # 预热阶段仅同步方向，忽略异常以免中断
+                    pass
+                
                 # 打印周期K线信息（仅前10个，避免刷屏）
                 if kline_count <= 10:
                     # 计算时间范围
@@ -1145,7 +1175,7 @@ class TrendSarStrategy:
         print(f"\n🔄 【策略Update】正在调用 Delta Volume 计算... (显示时间: {display_timestamp.strftime('%H:%M:%S') if display_timestamp else 'N/A'})")
         self._update_fixed_delta_volume(timestamp=display_timestamp, current_price=close_price)
         
-                    # 3. 更新SAR指标（当新K线生成时）
+        # 3. 更新SAR指标（当新K线生成时）
         if new_kline is not None:
             
             timeframe_minutes = self.timeframe_manager.get_timeframe_minutes()
@@ -1600,9 +1630,9 @@ class TrendSarStrategy:
         # 使用杠杆后的实际买入数量 = 投入金额 * 杠杆 / 合约面值
         try:
             from okx_config import TRADING_CONFIG
-            leverage = TRADING_CONFIG.get('leverage', 2)
+            leverage = TRADING_CONFIG.get('leverage', 1)
         except:
-            leverage = 2  # 默认2倍杠杆
+            leverage = 1  # 默认2倍杠杆
         
         # ETH-USDT-SWAP合约面值：每张合约10 USDT
         contract_face_value = 10  # USDT per contract

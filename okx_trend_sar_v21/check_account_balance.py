@@ -20,7 +20,7 @@ def check_account_balance():
     print("="*80)
     
     # 初始化交易接口
-    trader = OKXTraderEnhanced(test_mode=TRADING_CONFIG['test_mode'], leverage=3)
+    trader = OKXTraderEnhanced(test_mode=TRADING_CONFIG['test_mode'], leverage=1)
     
     symbol = 'ETH-USDT-SWAP'
     

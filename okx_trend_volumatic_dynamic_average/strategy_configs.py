@@ -26,7 +26,7 @@ def get_strategy_config():
         'vidya_pivot_right': 3,        # 枢轴点右侧K线数量
         
         # 🔴 固定周期Delta Volume配置
-        'delta_volume_period': 14,     # 固定周期长度（使用最近N个K线）
+        'delta_volume_period': 10,     # 固定周期长度（使用最近N个K线）
         
         # 🔴 开仓条件配置（独立开关，开启的条件必须全部满足）
         'entry_condition_trend_breakthrough': False,   # 趋势突破（价格突破上下轨）
@@ -39,9 +39,9 @@ def get_strategy_config():
         # 🚀 激进配置：快速捕捉大行情，更敏感
         'enable_bb_angle_entry': True,             # 是否启用布林带角度独立开仓
         'bb_midline_period': 14,                    # EMA中轨周期 = 7根K线(3.5小时@30m) - 快速响应
-        'bb_angle_window_size': 10,                 # 角度窗口 = 7根K线(3.5小时@30m) - 短期趋势
-        'bb_angle_threshold': 0.04,                # 角度阈值 = 0.05° - 更敏感（3.5小时≈0.6%涨幅）
-        'bb_r_squared_threshold': 0.65,            # R²阈值 = 0.45 - 允许波动，大行情初期也能抓住
+        'bb_angle_window_size': 14,                 # 角度窗口 = 7根K线(3.5小时@30m) - 短期趋势
+        'bb_angle_threshold': 0.06,                # 角度阈值 = 0.05° - 更敏感（3.5小时≈0.6%涨幅）
+        'bb_r_squared_threshold': 0.55,            # R²阈值 = 0.45 - 允许波动，大行情初期也能抓住
         'bb_stop_loss_lock_periods': 3,            # 止损后锁定周期数（包含当前周期，实际等待4个完整周期=2小时）
         
         # 波动率计算器参数
@@ -53,7 +53,7 @@ def get_strategy_config():
         'basis_change_threshold': 50,  # 中轨变化率阈值（低于此值不开仓）
         
         # 止盈止损配置
-        'fixed_take_profit_pct': 1.5,  # 固定止盈百分比（0表示无固定止盈）
+        'fixed_take_profit_pct': 1.4,  # 固定止盈百分比（0表示无固定止盈）
         'max_loss_pct': 2.5,  # 最大亏损百分比（0表示无最大亏损限制）
         
         # 🔴 钉钉消息推送配置

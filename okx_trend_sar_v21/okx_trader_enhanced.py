@@ -470,7 +470,7 @@ class OKXTraderEnhanced:
             return None
     
     def update_stop_loss(self, symbol, side, new_trigger_price, amount):
-        """更新止损单（撤销旧单，挂新单）
+        """更新止损单（先限价尝试→失败回退条件单，成功后再撤旧单；含保护性市价平仓）
         
         Args:
             symbol: 交易对符号
@@ -486,45 +486,163 @@ class OKXTraderEnhanced:
             return {'id': 'TEST_SL_NEW', 'status': 'simulated'}
         
         try:
-            # 1. 撤销旧止损单（如果存在）
-            if self.stop_loss_order_id:
-                print(f"🔄 检查旧止损单状态: {self.stop_loss_order_id}")
-                order_status = self.get_order_status(symbol, self.stop_loss_order_id)
-                # 打印 order_status
-                print(f"   订单信息: {order_status}")
-                print(f"   订单状态: {order_status.get('status', 'unknown')}")
-                
-                # 如果旧单仍然有效，才需要撤销
-                if order_status.get('status') in ['live', 'effective']:
-                    print(f"🔄 撤销旧止损单: {self.stop_loss_order_id}")
-                    cancel_result = self.cancel_order(symbol, self.stop_loss_order_id)
-                    
-                    if cancel_result:
-                        print(f"✅ 旧止损单撤销成功")
-                        # 等待撤销完成，避免重复订单
-                        import time
-                        time.sleep(0.5)
-                        
-                        # 再次检查旧单是否真的被撤销
-                        verify_status = self.get_order_status(symbol, self.stop_loss_order_id)
-                        if verify_status.get('status') in ['live', 'effective']:
-                            print(f"⚠️  旧止损单撤销可能未完成，状态: {verify_status.get('status')}")
-                        else:
-                            print(f"✅ 确认旧止损单已撤销")
-                    else:
-                        print(f"❌ 旧止损单撤销失败，但继续创建新单")
+            old_order_id = getattr(self, 'stop_loss_order_id', None)
+            old_price = getattr(self, 'stop_loss_price', None)
+
+            # 1) 先尝试挂“限价止损单”（reduceOnly，按方向选择买/卖）
+            print(f"🔄 尝试限价更新止损: 价格=${new_trigger_price:.2f}，数量={amount} 张")
+            new_order = None
+            limit_params = {
+                'tdMode': 'cross',
+                'reduceOnly': True,
+            }
+            try:
+                # 优先尝试带 posSide（双向持仓）
+                limit_params_with_pos = dict(limit_params)
+                limit_params_with_pos['posSide'] = 'long' if side == 'long' else 'short'
+                if side == 'long':
+                    # 多仓止损：卖出限价单
+                    new_order = self.exchange.create_limit_sell_order(symbol, amount, new_trigger_price, limit_params_with_pos)
                 else:
-                    print(f"ℹ️  旧止损单已无效，无需撤销")
-            
-            # 2. 挂新止损单
-            print(f"🔄 创建新止损单: ${new_trigger_price:.2f}")
-            new_order = self.set_stop_loss(symbol, side, new_trigger_price, amount)
-            if new_order:
-                self.stop_loss_order_id = new_order['id']
-                print(f"✅ 止损单已更新: ${new_trigger_price:.2f} (新订单ID: {new_order['id']})")
-            else:
-                print(f"❌ 新止损单创建失败")
-            
+                    # 空仓止损：买入限价单
+                    new_order = self.exchange.create_limit_buy_order(symbol, amount, new_trigger_price, limit_params_with_pos)
+            except Exception as e_limit_pos:
+                msg = str(e_limit_pos)
+                if '51000' in msg or 'posSide' in msg:
+                    print(f"🔄 检测到单向持仓模式，改为不带posSide限价下单重试...")
+                    try:
+                        if side == 'long':
+                            new_order = self.exchange.create_limit_sell_order(symbol, amount, new_trigger_price, limit_params)
+                        else:
+                            new_order = self.exchange.create_limit_buy_order(symbol, amount, new_trigger_price, limit_params)
+                    except Exception as e_limit_plain:
+                        print(f"⚠️ 限价止损下单失败，将回退为条件单: {e_limit_plain}")
+                else:
+                    print(f"⚠️ 限价止损下单失败，将回退为条件单: {e_limit_pos}")
+
+            # 2) 若限价失败，回退到“条件单”，触发价与委托价价差=0.1%
+            if not new_order:
+                gap_ratio = 0.001  # 0.1%
+                if side == 'long':
+                    trigger_px = float(new_trigger_price) * (1 + gap_ratio)
+                else:
+                    trigger_px = float(new_trigger_price) * (1 - gap_ratio)
+                trigger_px = float(f"{trigger_px:.6f}")
+
+                print(f"🔁 回退为条件单: 触发价=${trigger_px:.4f}, 委托价=${new_trigger_price:.2f}, 差值=0.1%")
+                # 复用 set_stop_loss，并传入委托价=新止损价（该方法内部默认用触发=委托；这里重写params）
+                params = {
+                    'tdMode': 'cross',
+                    'ordType': 'conditional',
+                    'slTriggerPx': str(trigger_px),
+                    'slOrdPx': str(new_trigger_price),
+                    'reduceOnly': True,
+                }
+                try:
+                    params_pos = dict(params)
+                    params_pos['posSide'] = 'long' if side == 'long' else 'short'
+                    if side == 'long':
+                        new_order = self.exchange.create_order(symbol, 'limit', 'sell', amount, new_trigger_price, params_pos)
+                    else:
+                        new_order = self.exchange.create_order(symbol, 'limit', 'buy', amount, new_trigger_price, params_pos)
+                except Exception as e_cond_pos:
+                    msg = str(e_cond_pos)
+                    if '51000' in msg or 'posSide' in msg:
+                        print(f"🔄 条件单检测到单向持仓模式，改为不带posSide重试...")
+                        if side == 'long':
+                            new_order = self.exchange.create_order(symbol, 'limit', 'sell', amount, new_trigger_price, params)
+                        else:
+                            new_order = self.exchange.create_order(symbol, 'limit', 'buy', amount, new_trigger_price, params)
+                    else:
+                        raise
+
+            if not new_order:
+                print(f"❌ 新止损单创建失败（限价与条件单均失败）")
+                return None
+
+            print(f"✅ 新止损单创建成功: 订单ID={new_order.get('id')}, 价格=${new_trigger_price:.2f}")
+
+            # 3) 保护性检查：若当前价已触发止损阈值，且仍有对应持仓，则立即市价平仓
+            try:
+                ticker = self.exchange.fetch_ticker(symbol)
+                last_price = float(ticker.get('last') or ticker.get('close') or 0)
+                print(f"🔍 保护性检查：当前价=${last_price:.2f}, 止损价=${new_trigger_price:.2f}")
+                should_close = False
+                if side == 'long' and last_price <= float(new_trigger_price):
+                    should_close = True
+                if side == 'short' and last_price >= float(new_trigger_price):
+                    should_close = True
+                if should_close:
+                    pos = self.get_position(symbol)
+                    has_pos = pos is not None and pos.get('side') in ['long', 'short'] and float(pos.get('contracts', 0)) > 0
+                    if has_pos:
+                        print(f"🚨 保护性触发：立即市价平{pos.get('side')}，数量={amount} 张")
+                        market_params = {'tdMode': 'cross', 'reduceOnly': True}
+                        try:
+                            market_params_pos = dict(market_params)
+                            market_params_pos['posSide'] = pos.get('side')
+                            if pos.get('side') == 'long':
+                                self.exchange.create_market_sell_order(symbol, amount, market_params_pos)
+                            else:
+                                self.exchange.create_market_buy_order(symbol, amount, market_params_pos)
+                        except Exception as e_market_pos:
+                            msg = str(e_market_pos)
+                            if '51000' in msg or 'posSide' in msg:
+                                print(f"🔄 市价平仓检测到单向模式，改为不带posSide重试...")
+                                if pos.get('side') == 'long':
+                                    self.exchange.create_market_sell_order(symbol, amount, market_params)
+                                else:
+                                    self.exchange.create_market_buy_order(symbol, amount, market_params)
+                        print(f"✅ 保护性市价平仓已提交")
+            except Exception as e_protect:
+                print(f"⚠️ 保护性检查/平仓异常: {e}")
+
+            # 4) 新单已成功 → 更新内存记录（仅此时更新）
+            try:
+                self.stop_loss_order_id = new_order.get('id')
+                self.stop_loss_price = float(new_trigger_price)
+                print(f"🆔 已更新止损记录: id={self.stop_loss_order_id}, price=${self.stop_loss_price:.2f}")
+            except Exception:
+                pass
+
+            # 5) 撤销旧止损单（若存在），失败则重试最多3次；3次仍失败发送钉钉提醒
+            if old_order_id and old_order_id != self.stop_loss_order_id:
+                print(f"🔄 开始撤销旧止损单: {old_order_id}")
+                retry = 0
+                canceled = False
+                while retry < 3 and not canceled:
+                    retry += 1
+                    try:
+                        if self.cancel_order(symbol, old_order_id):
+                            canceled = True
+                            print(f"✅ 旧止损单撤销成功 (尝试第{retry}次)")
+                        else:
+                            print(f"⚠️ 撤销旧止损单失败 (第{retry}次)")
+                            time.sleep(0.6)
+                    except Exception as e_cancel:
+                        print(f"⚠️ 撤销旧止损单异常(第{retry}次): {e_cancel}")
+                        time.sleep(0.6)
+
+                if not canceled:
+                    print(f"❌ 旧止损单三次撤销失败，准备发送钉钉提醒")
+                    try:
+                        # 若在外部已注入 ding notifier，则使用；否则忽略
+                        notifier = getattr(self, 'ding_notifier', None)
+                        if notifier:
+                            title = "【止损撤单失败】告警"
+                            content = (
+                                f"### 🚨 止损撤单失败告警\n\n"
+                                f"- 交易对: {symbol}\n"
+                                f"- 旧止损单ID: `{old_order_id}`\n"
+                                f"- 新止损单ID: `{self.stop_loss_order_id}`\n"
+                                f"- 新止损价: ${float(new_trigger_price):.2f}\n"
+                                f"- 尝试次数: 3 次，仍失败\n"
+                                f"- 时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                            )
+                            notifier.send_message(title, content)
+                    except Exception as e_notify:
+                        print(f"⚠️ 发送钉钉提醒失败: {e_notify}")
+
             return new_order
             
         except Exception as e:

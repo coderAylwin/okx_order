@@ -5,16 +5,17 @@ def get_strategy_config():
     """获取单周期SAR策略配置"""
     config = {
         # 基础配置
+        'strategy_name': 'xingcheng_v2',
         'long_coin': 'ETH',
-        'initial_capital': 100000,
-        'position_size_percentage': 100,
+        'initial_capital': 100,
+        'position_size_percentage': 30,
         
         # 回测时间范围
         'start_date': '2025-10-01 00:00:00',
         'end_date': '2025-10-31 23:59:59',
         
         # 单周期SAR策略参数
-        'timeframe': '15m',
+        'timeframe': '5m',
         'length': 14,
         'damping': 0.9,
         
@@ -35,8 +36,8 @@ def get_strategy_config():
         'basis_change_threshold': 50,  # 中轨变化率阈值（低于此值不开仓）
         
         # 止盈止损配置
-        'fixed_take_profit_pct': 0.55,  # 固定止盈百分比（0表示无固定止盈）
-        'max_stop_loss_pct': 2.5,  # 最大止损百分比（0表示无最大止损限制，与SAR止损对比选择更近的，同时也作为硬性保护位）
+        'fixed_take_profit_pct': 0.2,  # 固定止盈百分比（0表示无固定止盈）
+        'max_stop_loss_pct': 2,  # 最大止损百分比（0表示无最大止损限制，与SAR止损对比选择更近的，同时也作为硬性保护位）
         
         # 🔴 Delta Volume配置（用于止损）
         'delta_volume_period': 14,  # 固定周期Delta Volume长度（使用最近N个K线）

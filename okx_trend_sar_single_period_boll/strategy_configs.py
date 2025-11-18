@@ -7,14 +7,14 @@ def get_strategy_config():
         # 基础配置
         'long_coin': 'ETH',
         'initial_capital': 100000,
-        'position_size_percentage': 30,
+        'position_size_percentage': 10,
         
         # 回测时间范围
         'start_date': '2025-10-01 00:00:00',
         'end_date': '2025-10-31 23:59:59',
         
         # 单周期SAR策略参数
-        'timeframe': '5m',
+        'timeframe': '15m',
         'length': 14,
         'damping': 0.9,
         

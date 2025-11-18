@@ -20,25 +20,25 @@ OKX API 配置文件
 #         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
 #     }
 # }
-# OKX_API_CONFIG = {
-#     'api_key': '3afaa787-5b41-4662-8a19-d08f593b8cba',           # 替换为你的 API Key
-#     'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
-#     'password': 'Ayw.72203991',          # 替换为你的 API Password
-#     'enableRateLimit': True,
-#     'options': {
-#         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
-#     }
-# }
-
 OKX_API_CONFIG = {
-    'api_key': 'e49ed869-03a0-4f93-adb8-74e45715a657',           # 替换为你的 API Key
-    'secret': '3DAAACA026EF07A6F68A4318065F8F18',          # 替换为你的 Secret Key
-    'password': 'Testone2026.',          # 替换为你的 API Password
+    'api_key': '3afaa787-5b41-4662-8a19-d08f593b8cba',           # 替换为你的 API Key
+    'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
+    'password': 'Ayw.72203991',          # 替换为你的 API Password
     'enableRateLimit': True,
     'options': {
         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
     }
 }
+
+# OKX_API_CONFIG = {
+#     'api_key': 'e49ed869-03a0-4f93-adb8-74e45715a657',           # 替换为你的 API Key
+#     'secret': '3DAAACA026EF07A6F68A4318065F8F18',          # 替换为你的 Secret Key
+#     'password': 'Testone2026.',          # 替换为你的 API Password
+#     'enableRateLimit': True,
+#     'options': {
+#         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
+#     }
+# }
 
 # 交易配置
 TRADING_CONFIG = {
@@ -54,7 +54,7 @@ TRADING_CONFIG = {
     
     # 杠杆配置
     'leverage': 1,              # 杠杆倍数（1-125），建议1-5倍
-    'margin_mode': 'cross',     # 保证金模式：'cross'=全仓, 'isolated'=逐仓
+    'margin_mode': 'isolated',     # 保证金模式：'cross'=全仓, 'isolated'=逐仓
     
     # 风险控制
     'max_position_value': 10000,  # 最大持仓价值（USDT）

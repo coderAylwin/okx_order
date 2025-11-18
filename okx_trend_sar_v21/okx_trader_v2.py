@@ -26,6 +26,7 @@ class OKXTraderV2:
         """
         self.test_mode = test_mode or TRADING_CONFIG['test_mode']
         self.leverage = leverage
+        self.margin_mode = TRADING_CONFIG.get('margin_mode', 'cross')
         
         # 初始化CCXT交易所
         try:
@@ -430,12 +431,16 @@ class OKXTraderV2:
             else:
                 params['posSide'] = 'short'
             
+            if getattr(self, 'margin_mode', None):
+                params['tdMode'] = self.margin_mode
+            
             try:
                 order = self.exchange.create_limit_order(symbol, side, amount, price, params)
             except Exception as e1:
                 if '51000' in str(e1) or 'posSide' in str(e1):
                     print(f"   🔄 检测到单向持仓模式")
-                    order = self.exchange.create_limit_order(symbol, side, amount, price)
+                    retry_params = {k: v for k, v in params.items() if k != 'posSide'}
+                    order = self.exchange.create_limit_order(symbol, side, amount, price, retry_params)
                 else:
                     raise e1
             
@@ -581,7 +586,8 @@ class OKXTraderV2:
             # 🔴 尝试 Post-Only 限价单（OKX会自动拒绝会立即成交的订单）
             params = {
                 'reduceOnly': True,
-                'postOnly': True  # 🔴 只做Maker，如果会立即成交则拒绝
+                'postOnly': True,  # 🔴 只做Maker，如果会立即成交则拒绝
+                'tdMode': self.margin_mode
             }
             
             try:
@@ -780,14 +786,18 @@ class OKXTraderV2:
             print(f"   💡 执行逻辑: 价格触及${actual_trigger_price:.2f}时触发 → 挂${order_price:.2f}的限价单")
             
             params = {
-                'slTriggerPx': str(actual_trigger_price),  # 🎯 触发价（略高于/低于挂单价）
-                'slOrdPx': str(order_price),              # 🎯 挂单价（策略要求的止损价）
-                'reduceOnly': True
+                'instId': symbol,
+                'ordType': 'conditional',
+                'side': order_side,
+                'posSide': side,
+                'tdMode': self.margin_mode,
+                'slTriggerPx': str(actual_trigger_price),
+                'slOrdPx': str(order_price),
+                'sz': str(amount)
             }
             
             # 🔴 动态处理posSide参数
             try:
-                params['posSide'] = side
                 order = self.exchange.create_order(
                     symbol, 'limit', order_side, amount, order_price, params
                 )
@@ -843,7 +853,8 @@ class OKXTraderV2:
             # 🔴 尝试 Post-Only 限价单（OKX会自动拒绝会立即成交的订单）
             params = {
                 'reduceOnly': True,
-                'postOnly': True  # 🔴 只做Maker，如果会立即成交则拒绝
+                'postOnly': True,  # 🔴 只做Maker，如果会立即成交则拒绝
+                'tdMode': self.margin_mode
             }
             
             try:
@@ -899,14 +910,19 @@ class OKXTraderV2:
                 print(f"   💡 执行逻辑: 价格触及${actual_trigger_price:.2f}时触发 → 挂${order_price:.2f}的限价单")
                 
                 params = {
-                    'tpTriggerPx': str(actual_trigger_price),  # 🎯 触发价（略低于/高于挂单价）
-                    'tpOrdPx': str(order_price),              # 🎯 挂单价（策略要求的止盈价）
-                    'reduceOnly': True
+                    'instId': symbol,
+                    'ordType': 'conditional',
+                    'side': order_side,
+                    'posSide': side,
+                    'tdMode': self.margin_mode,
+                    'tpTriggerPx': str(actual_trigger_price),
+                    'tpOrdPx': str(order_price),
+                    'reduceOnly': True,
+                    'sz': str(amount)
                 }
                 
                 # 动态处理posSide参数
                 try:
-                    params['posSide'] = side
                     order = self.exchange.create_order(
                         symbol, 'limit', order_side, amount, order_price, params
                     )
@@ -1066,14 +1082,19 @@ class OKXTraderV2:
                 order_side = 'buy'
             
             params = {
+                'instId': symbol,
+                'ordType': 'conditional',
+                'side': order_side,
+                'posSide': side,
+                'tdMode': self.margin_mode,
                 'tpTriggerPx': str(actual_trigger_price),
                 'tpOrdPx': str(order_price),
-                'reduceOnly': True
+                'reduceOnly': True,
+                'sz': str(amount)
             }
             
             # 动态处理posSide参数
             try:
-                params['posSide'] = side
                 order = self.exchange.create_order(
                     symbol, 'limit', order_side, amount, order_price, params
                 )
@@ -1229,12 +1250,42 @@ class OKXTraderV2:
             if response.get('code') == '0':
                 print(f"✅ 杠杆设置成功: {symbol}, {leverage}x")
                 self.leverage = leverage
+                self.margin_mode = margin_mode
                 return True
-            else:
-                print(f"❌ 杠杆设置失败: {response.get('msg')}")
+            
+            error_msg = response.get('msg', '')
+            print(f"⚠️ 默认模式设置杠杆失败: {error_msg}")
+            
+            # 双向持仓模式需要分别设置 long/short
+            if ('posSide' in error_msg) or (response.get('code') == '51000'):
+                print(f"🔄 尝试以 posSide=long/short 重新设置杠杆...")
+                success_long = self._set_leverage_with_pos_side(symbol, leverage, margin_mode, 'long')
+                success_short = self._set_leverage_with_pos_side(symbol, leverage, margin_mode, 'short')
+                if success_long and success_short:
+                    print(f"✅ 杠杆设置成功: {symbol}, long/short 均为 {leverage}x")
+                    self.leverage = leverage
+                    self.margin_mode = margin_mode
+                    return True
+                print(f"❌ 杠杆设置失败: long={success_long}, short={success_short}")
                 return False
-                
+            
+            return False
+            
         except Exception as e:
+            error_msg = str(e)
+            if 'posSide' in error_msg or '51000' in error_msg:
+                print(f"⚠️ 默认模式设置杠杆异常: {error_msg}")
+                print(f"🔄 尝试以 posSide=long/short 重新设置杠杆...")
+                success_long = self._set_leverage_with_pos_side(symbol, leverage, margin_mode, 'long')
+                success_short = self._set_leverage_with_pos_side(symbol, leverage, margin_mode, 'short')
+                if success_long and success_short:
+                    print(f"✅ 杠杆设置成功: {symbol}, long/short 均为 {leverage}x")
+                    self.leverage = leverage
+                    self.margin_mode = margin_mode
+                    return True
+                print(f"❌ 杠杆设置失败: long={success_long}, short={success_short}")
+                return False
+
             print(f"❌ 设置杠杆失败: {e}")
             return False
     
@@ -1558,6 +1609,25 @@ class OKXTraderV2:
                     self.stop_loss_order_type = None
                 else:
                     print(f"   ⚠️  检查止损单状态失败: {e}")
+
+    def _set_leverage_with_pos_side(self, symbol, leverage, margin_mode, pos_side):
+        """在双向持仓模式下，指定 posSide 设置杠杆"""
+        try:
+            params = {
+                'instId': symbol,
+                'lever': str(leverage),
+                'mgnMode': margin_mode,
+                'posSide': pos_side,
+            }
+            response = self.exchange.private_post_account_set_leverage(params)
+            if response.get('code') == '0':
+                print(f"   ✅ {pos_side} 杠杆设置成功")
+                return True
+            print(f"   ❌ {pos_side} 杠杆设置失败: {response.get('msg')}")
+            return False
+        except Exception as e:
+            print(f"   ❌ {pos_side} 杠杆设置异常: {e}")
+            return False
 
 if __name__ == '__main__':
     print("🧪 测试 OKX交易接口V2\n")

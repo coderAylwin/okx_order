@@ -25,9 +25,9 @@ OKX API 配置文件
 #     'secret': 'D2E84F55B79E8786556A304EB778AC36',          # 替换为你的 Secret Key
 #     'password': 'Ayw.72203991',          # 替换为你的 API Password
 #     'enableRateLimit': True,
-#     'proxies': {
-#         'https': 'http://127.0.0.1:10887',
-#     },
+    # 'proxies': {
+    #     'https': 'http://127.0.0.1:10887',
+    # },
 #     'options': {
 #         'defaultType': 'swap',            # 默认交易类型：swap（永续合约）
 #     }

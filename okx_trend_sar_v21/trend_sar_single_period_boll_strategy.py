@@ -101,9 +101,24 @@ class TrendFilterTimeframeManager:
         minutes = self.get_timeframe_minutes()
         period_start = self._calculate_period_start(timestamp, minutes)
         
+        # DEBUG: 打印周期判断的关键变量
+        try:
+            print(f"[TM] update_kline_data | ts={timestamp.strftime('%Y-%m-%d %H:%M:%S')} "
+                  f"| minutes={minutes} | period_start={period_start.strftime('%Y-%m-%d %H:%M:%S') if hasattr(period_start,'strftime') else period_start} "
+                  f"| current_period(before)={self.current_period.strftime('%Y-%m-%d %H:%M:%S') if hasattr(self.current_period,'strftime') else self.current_period}")
+        except Exception:
+            pass
+        
         if self.current_period is None or period_start != self.current_period:
             # 保存上一个周期的K线数据
             if (self.current_period is not None and self.current_open is not None):
+                # DEBUG: 周期切换，输出上一周期信息
+                try:
+                    print(f"[TM] period change detected → emit previous kline "
+                          f"| prev_period={self.current_period.strftime('%Y-%m-%d %H:%M:%S') if hasattr(self.current_period,'strftime') else self.current_period} "
+                          f"| open={self.current_open} high={self.current_high} low={self.current_low} close={self.current_close} vol={self.current_volume}")
+                except Exception:
+                    pass
                 kline_data = {
                     'timestamp': self.current_period,
                     'open': self.current_open,
@@ -124,6 +139,13 @@ class TrendFilterTimeframeManager:
             self.current_low = low_price
             self.current_close = close_price
             self.current_volume = volume  # 重置成交量
+            
+            # DEBUG: 新周期设定后打印
+            try:
+                print(f"[TM] new current_period={self.current_period.strftime('%Y-%m-%d %H:%M:%S') if hasattr(self.current_period,'strftime') else self.current_period} "
+                      f"| first_tick O/H/L/C/V={open_price}/{high_price}/{low_price}/{close_price}/{volume}")
+            except Exception:
+                pass
             
             return new_kline
         else:
@@ -769,11 +791,19 @@ class TrendSarStrategy:
         
         # 单周期交易状态
         self.position = None
+        self.position_state = None  # 当前实际持仓状态: long/short/pending/None
+        self.pending_direction = None  # 挂单意向方向
         self.entry_price = None
         self.stop_loss_level = None
         self.take_profit_level = None
         self.current_invested_amount = None
         self.position_shares = None
+        
+        # 🔴 持仓期间的最高价和最低价跟踪
+        self.max_price = None  # 持仓期间的最高价
+        self.min_price = None  # 持仓期间的最低价
+        self.max_price_time = None  # 最高价对应的时间
+        self.min_price_time = None  # 最低价对应的时间
         
         # 单周期趋势方向跟踪
         self.current_trend_direction = None
@@ -789,6 +819,9 @@ class TrendSarStrategy:
         self.total_pnl = 0.0
         self.win_rate = 0.0
         
+        # 预热期间生成的最后一根完整K线时间
+        self.last_warmup_kline_timestamp = None
+    
     def warmup_filter(self, historical_data):
         """使用历史数据预热单周期SAR指标"""
         if not historical_data:
@@ -837,6 +870,7 @@ class TrendSarStrategy:
             
             if new_kline is not None:
                 kline_count += 1
+                self.last_warmup_kline_timestamp = new_kline['timestamp']
                 
                 # 🔴 在周期K线生成时，保存上一根K线的成交量（按涨跌分类到Delta Volume历史）
                 prev_volume = self.current_kline_volume if self.current_kline_volume > 0 else new_kline.get('volume', 0)
@@ -894,6 +928,14 @@ class TrendSarStrategy:
                     new_kline['high'], 
                     new_kline['low']
                 )
+                
+                # 🔴 预热期间也同步更新趋势方向（不触发交易）
+                try:
+                    dummy_signal_info = {'signals': [], 'timestamp': new_kline['timestamp']}
+                    self._check_trend_change(result, new_kline['open'], dummy_signal_info)
+                except Exception as _:
+                    # 预热阶段仅同步方向，忽略异常以免中断
+                    pass
                 
                 # 打印周期K线信息（仅前10个，避免刷屏）
                 if kline_count <= 10:
@@ -1135,6 +1177,7 @@ class TrendSarStrategy:
         
         # 更新signal_info
         signal_info['new_kline'] = new_kline is not None
+        signal_info['warmup_kline'] = False
         
         sar_result = None
         
@@ -1145,7 +1188,7 @@ class TrendSarStrategy:
         print(f"\n🔄 【策略Update】正在调用 Delta Volume 计算... (显示时间: {display_timestamp.strftime('%H:%M:%S') if display_timestamp else 'N/A'})")
         self._update_fixed_delta_volume(timestamp=display_timestamp, current_price=close_price)
         
-                    # 3. 更新SAR指标（当新K线生成时）
+        # 3. 更新SAR指标（当新K线生成时）
         if new_kline is not None:
             
             timeframe_minutes = self.timeframe_manager.get_timeframe_minutes()
@@ -1232,7 +1275,7 @@ class TrendSarStrategy:
                 if self.position is not None:
                     position_info = {
                         'position': self.position,
-                        'entry_price': self.entry_price,
+                        'entry_price': self.entry_price if self.entry_price is not None else 0.0,
                         'current_price': open_price,  # 使用当前K线的开盘价作为当前价格
                         'stop_loss_level': self.stop_loss_level,
                         'take_profit_level': self.take_profit_level
@@ -1256,6 +1299,26 @@ class TrendSarStrategy:
                 print(f"  🔍 指标更新消息发送结果: {result}")
             else:
                 print(f"  ❌ dingtalk_notifier为None，跳过推送")
+        
+        # 🔴 5.5. 如果有持仓，更新最高价和最低价（使用1分钟K线数据）
+        if self.position is not None:
+            # 更新最高价
+            if self.max_price is None or high_price > self.max_price:
+                self.max_price = high_price
+                self.max_price_time = timestamp
+            
+            # 更新最低价
+            if self.min_price is None or low_price < self.min_price:
+                self.min_price = low_price
+                self.min_price_time = timestamp
+            
+            # 将价格范围信息添加到signal_info，供live_trading_v2.py使用
+            signal_info['price_range'] = {
+                'max_price': self.max_price,
+                'min_price': self.min_price,
+                'max_price_time': self.max_price_time,
+                'min_price_time': self.min_price_time
+            }
         
         # 5. 基于1分钟K线检查平仓触发
         self._check_stop_position_trigger_1min(timestamp, open_price, high_price, low_price, close_price, signal_info)
@@ -1343,7 +1406,7 @@ class TrendSarStrategy:
         
         # 更新当前方向
         self.current_trend_direction = current_direction
-        
+
         if current_direction is not None:
             print(f"  🔍 进入current_direction分支")
             if direction_changed:
@@ -1428,11 +1491,11 @@ class TrendSarStrategy:
         # 检查RSI过滤
         current_rsi = self.sar_indicator.current_rsi
         print(f"  🔍 当前RSI: {current_rsi:.2f}")
-        if direction == 'long' and current_rsi > 75: 
-            print(f"  ❌ 【RSI过滤】多单RSI过高: {current_rsi:.2f} > 75")
+        if direction == 'long' and current_rsi > 80: 
+            print(f"  ❌ 【RSI过滤】多单RSI过高: {current_rsi:.2f} > 80")
             return
-        elif direction == 'short' and current_rsi < 25:
-            print(f"  ❌ 【RSI过滤】空单RSI过低: {current_rsi:.2f} < 25")
+        elif direction == 'short' and current_rsi < 20:
+            print(f"  ❌ 【RSI过滤】空单RSI过低: {current_rsi:.2f} < 20")
             return
         
         # 检查EMA过滤
@@ -1481,8 +1544,8 @@ class TrendSarStrategy:
         print(f"🔵 开仓价格: ${entry_price:.2f}")
         print(f"🔵 开仓原因: {reason}")
         
-        self.position = 'long'
-        print(f"🔵 开仓后持仓状态: {self.position}")
+        # self.position = 'long'
+        # print(f"🔵 开仓后持仓状态: {self.position}")
         
         # 计算手续费
         transactionFee = invested_amount * 0.02 / 100
@@ -1494,6 +1557,12 @@ class TrendSarStrategy:
         
         # 开仓价格
         self.entry_price = entry_price
+        
+        # 🔴 初始化最高价和最低价为开仓价格
+        self.max_price = entry_price
+        self.min_price = entry_price
+        self.max_price_time = signal_info.get('timestamp')
+        self.min_price_time = signal_info.get('timestamp')
 
         self.current_invested_amount = actual_invested_amount
         
@@ -1503,15 +1572,15 @@ class TrendSarStrategy:
         # 使用杠杆后的实际买入数量 = 投入金额 * 杠杆 / 合约面值
         try:
             from okx_config import TRADING_CONFIG
-            leverage = TRADING_CONFIG.get('leverage', 2)
+            leverage = TRADING_CONFIG.get('leverage', 1)
         except:
-            leverage = 2  # 默认2倍杠杆
+            leverage = 1  # 默认2倍杠杆
         
         # ETH-USDT-SWAP合约面值：每张合约10 USDT
         contract_face_value = 10  # USDT per contract
         
         # 计算可开合约张数：可用保证金 × 杠杆 ÷ 合约面值
-        self.position_shares = round((actual_invested_amount * leverage) / contract_face_value, 1)
+        self.position_shares = round((actual_invested_amount * leverage) / entry_price, 2)
         
         print(f"        💰 合约仓位计算: 投入${actual_invested_amount:.2f} × {leverage}倍杠杆 ÷ ${contract_face_value}合约面值 = {self.position_shares:.1f}张合约")
         
@@ -1578,8 +1647,8 @@ class TrendSarStrategy:
         print(f"🔴 开仓价格: ${entry_price:.2f}")
         print(f"🔴 开仓原因: {reason}")
         
-        self.position = 'short'
-        print(f"🔴 开仓后持仓状态: {self.position}")
+        # self.position = 'short'
+        # print(f"🔴 开仓后持仓状态: {self.position}")
         
         # 计算手续费
         transactionFee = invested_amount * 0.02 / 100
@@ -1591,6 +1660,12 @@ class TrendSarStrategy:
         
         # 开仓价格
         self.entry_price = entry_price
+        
+        # 🔴 初始化最高价和最低价为开仓价格
+        self.max_price = entry_price
+        self.min_price = entry_price
+        self.max_price_time = signal_info.get('timestamp')
+        self.min_price_time = signal_info.get('timestamp')
 
         self.current_invested_amount = actual_invested_amount
         
@@ -1600,9 +1675,9 @@ class TrendSarStrategy:
         # 使用杠杆后的实际买入数量 = 投入金额 * 杠杆 / 合约面值
         try:
             from okx_config import TRADING_CONFIG
-            leverage = TRADING_CONFIG.get('leverage', 2)
+            leverage = TRADING_CONFIG.get('leverage', 1)
         except:
-            leverage = 2  # 默认2倍杠杆
+            leverage = 1  # 默认2倍杠杆
         
         # ETH-USDT-SWAP合约面值：每张合约10 USDT
         contract_face_value = 10  # USDT per contract
@@ -1882,6 +1957,12 @@ class TrendSarStrategy:
         self.take_profit_level = None
         self.current_invested_amount = None
         self.position_shares = None
+        
+        # 🔴 重置最高价和最低价
+        self.max_price = None
+        self.min_price = None
+        self.max_price_time = None
+        self.min_price_time = None
     
     def _get_invested_capital(self):
         """获取投入的资金量"""
@@ -1911,6 +1992,9 @@ class TrendSarStrategy:
                 - timestamp: str 交易时间
         """
         print(f"\n🔄 同步真实交易数据到策略...")
+        position_state = trade_data.get('position_state', trade_data.get('position'))
+        pending_direction = trade_data.get('pending_direction')
+        print(f"   持仓状态: {position_state}")
         print(f"   持仓方向: {trade_data.get('position', 'None')}")
         print(f"   开仓价格: ${trade_data.get('entry_price', 0):.2f}")
         print(f"   持仓数量: {trade_data.get('position_shares', 0):.4f}")
@@ -1919,7 +2003,15 @@ class TrendSarStrategy:
         print(f"   投入金额: ${trade_data.get('invested_amount', 0):.2f}")
         
         # 同步持仓状态
-        self.position = trade_data.get('position')
+        if position_state == 'pending':
+            self.position_state = 'pending'
+            self.pending_direction = pending_direction or trade_data.get('position')
+            self.position = None
+        else:
+            self.position_state = position_state
+            self.pending_direction = None
+            self.position = trade_data.get('position') or position_state
+        
         self.entry_price = trade_data.get('entry_price', 0)
         self.position_shares = trade_data.get('position_shares', 0)
         self.current_invested_amount = trade_data.get('invested_amount', 0)
@@ -1931,16 +2023,17 @@ class TrendSarStrategy:
         if trade_data.get('take_profit_price'):
             self.take_profit_level = trade_data['take_profit_price']
         
-        # 更新现金余额（扣除投入金额）
-        if self.position and trade_data.get('invested_amount'):
+        # 更新现金余额（仅在实际持仓时扣除投入金额）
+        if position_state in ['long', 'short'] and trade_data.get('invested_amount'):
             self.cash_balance -= trade_data['invested_amount']
         
-        # 更新交易统计
-        if self.position:
+        # 更新交易统计（仅在实际持仓时统计）
+        if position_state in ['long', 'short']:
             self.total_trades += 1
         
         print(f"✅ 策略状态同步完成")
-        print(f"   策略持仓: {self.position}")
+        print(f"   策略持仓状态: {self.position_state}")
+        print(f"   策略持仓方向: {self.position}")
         print(f"   策略开仓价: ${self.entry_price:.2f}")
         print(f"   策略止损位: ${self.stop_loss_level:.2f}")
         print(f"   策略止盈位: ${self.take_profit_level:.2f}")
@@ -1975,11 +2068,28 @@ class TrendSarStrategy:
         self.current_invested_amount = 0
         
         print(f"✅ 持仓状态已清空")
+    
+    def update_trade_state(self, state, direction=None):
+        """仅更新策略层面的持仓状态，不变更资金"""
+        print(f"\n🔄 更新策略持仓状态: {self.position_state} → {state}")
+        self.position_state = state
+        if state == 'pending':
+            self.pending_direction = direction
+            self.position = None
+        elif state in ['long', 'short']:
+            self.pending_direction = None
+            self.position = direction or state
+        else:
+            self.pending_direction = None
+            self.position = None
+        print(f"✅ 当前策略状态: state={self.position_state}, direction={self.position}")
 
     def get_current_status(self):
         """获取当前单周期策略状态"""
         return {
             'position': self.position,
+            'position_state': self.position_state,
+            'pending_direction': self.pending_direction,
             'entry_price': self.entry_price if self.entry_price is not None else 0,
             'stop_loss_level': self.stop_loss_level if self.stop_loss_level is not None else 0,
             'take_profit_level': self.take_profit_level if self.take_profit_level is not None else 0,

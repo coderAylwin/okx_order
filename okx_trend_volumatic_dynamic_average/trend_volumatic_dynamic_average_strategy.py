@@ -2614,25 +2614,25 @@ class TrendVolumaticDynamicAverageStrategy:
         #         return
             
         potential_invested_amount = self._get_invested_capital()
-        if potential_invested_amount <= 0:
-            reason = f"资金不足，现金余额=${self.cash_balance:,.2f} <= 0"
-            print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
-            # 推送钉钉消息
-            if self.dingtalk_notifier:
-                try:
-                    content = f"## ⏸️ VIDYA开仓检查 - 不开仓\n\n"
-                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
-                    content += f"---\n\n"
-                    content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
-                    content += f"**📈 开仓方向**: {direction.upper()}\n\n"
-                    content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
-                    content += f"**❌ 不开仓原因**: {reason}\n\n"
-                    content += f"**💵 现金余额**: ${self.cash_balance:,.2f}\n\n"
-                    content += f"**🔍 详细信息**: 账户资金不足，无法执行开仓操作\n\n"
-                    self.dingtalk_notifier.send_message("⏸️ 不开仓 - 资金不足", content)
-                except Exception as e:
-                    print(f"  ⚠️  推送钉钉消息失败: {e}")
-            return
+        # if potential_invested_amount <= 0:
+        #     reason = f"资金不足，现金余额=${self.cash_balance:,.2f} <= 0"
+        #     print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
+        #     # 推送钉钉消息
+        #     if self.dingtalk_notifier:
+        #         try:
+        #             content = f"## ⏸️ VIDYA开仓检查 - 不开仓\n\n"
+        #             content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
+        #             content += f"---\n\n"
+        #             content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
+        #             content += f"**📈 开仓方向**: {direction.upper()}\n\n"
+        #             content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
+        #             content += f"**❌ 不开仓原因**: {reason}\n\n"
+        #             content += f"**💵 现金余额**: ${self.cash_balance:,.2f}\n\n"
+        #             content += f"**🔍 详细信息**: 账户资金不足，无法执行开仓操作\n\n"
+        #             self.dingtalk_notifier.send_message("⏸️ 不开仓 - 资金不足", content)
+        #         except Exception as e:
+        #             print(f"  ⚠️  推送钉钉消息失败: {e}")
+        #     return
         
         # 🔴 防御性检查：如果vidya_result为None，使用当前VIDYA指标状态
         if vidya_result is None or not isinstance(vidya_result, dict):
