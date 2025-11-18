@@ -146,6 +146,9 @@ class OKXTrade(Base):
     # 状态
     status = Column(String(20), nullable=False, default='open', index=True)  # open/closed
     
+    # 开仓原因
+    open_reason = Column(String(255), nullable=True)  # 开仓原因：'标准VIDYA' 或 '布林带角度'
+    
     # 时间戳
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)

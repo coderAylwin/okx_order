@@ -222,8 +222,11 @@ class TradingDatabaseService:
     # ==================== OKX交易记录表操作 ====================
     
     def create_okx_trade(self, symbol, position_side, entry_order_id, entry_price,
-                        entry_time, amount, invested_amount, entry_signal_id=None):
+                        entry_time, amount, invested_amount, entry_signal_id=None, open_reason=None):
         """创建OKX交易记录（开仓时调用）
+        
+        Args:
+            open_reason: 开仓原因，'标准VIDYA' 或 '布林带角度'
         
         Returns:
             trade_id: 交易记录ID
@@ -243,7 +246,8 @@ class TradingDatabaseService:
                 entry_time=entry_time,
                 amount=amount,
                 invested_amount=invested_amount,
-                status='open'
+                status='open',
+                open_reason=open_reason  # 🔴 保存开仓原因
             )
             
             session.add(trade)

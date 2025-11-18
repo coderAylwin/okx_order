@@ -683,6 +683,8 @@ class LiveTradingBotWithStopOrders:
                         )
                         
                         # 2. 保存交易记录（无论止损单是否设置成功都要保存）
+                        # 🔴 根据entry_type设置open_reason
+                        open_reason = '标准VIDYA' if entry_type == 'limit' else '布林带角度'
                         trade_id = self.trading_db.save_trade(
                             symbol=self.symbol,
                             position_side='long',
@@ -691,7 +693,8 @@ class LiveTradingBotWithStopOrders:
                             entry_time=datetime.now(),
                             amount=contract_amount,
                             invested_amount=actual_invested,
-                            status='open'
+                            status='open',
+                            open_reason=open_reason  # 🔴 保存开仓原因
                         )
                         
                         # 🔴 保存到实例变量，供后续更新使用
@@ -1161,6 +1164,8 @@ class LiveTradingBotWithStopOrders:
                         )
                         
                         # 2. 保存交易记录（无论止损单是否设置成功都要保存）
+                        # 🔴 根据entry_type设置open_reason
+                        open_reason = '标准VIDYA' if entry_type == 'limit' else '布林带角度'
                         trade_id = self.trading_db.save_trade(
                             symbol=self.symbol,
                             position_side='short',
@@ -1169,7 +1174,8 @@ class LiveTradingBotWithStopOrders:
                             entry_time=datetime.now(),
                             amount=contract_amount,
                             invested_amount=actual_invested,
-                            status='open'
+                            status='open',
+                            open_reason=open_reason  # 🔴 保存开仓原因
                         )
                         
                         # 🔴 保存到实例变量，供后续更新使用
