@@ -187,14 +187,42 @@ class PerformanceAnalyzer:
         final_position_value = position_value
         final_nav = total_nav
         
+        # 🔍 计算已实现收益（从交易记录中统计）
+        realized_profit = 0
+        if not trades_df.empty:
+            # 统计所有平仓交易的盈亏
+            closed_trades = trades_df[trades_df['signal_type'].isin([
+                'STOP_LOSS_LONG', 'STOP_LOSS_SHORT', 'TAKE_PROFIT_LONG', 'TAKE_PROFIT_SHORT',
+                'MA_PROFIT_LONG', 'MA_LOSS_LONG', 'MA_PROFIT_SHORT', 'MA_LOSS_SHORT',
+                'MAX_STOP_LOSS_LONG', 'MAX_STOP_LOSS_SHORT'
+            ])]
+            if not closed_trades.empty:
+                realized_profit = closed_trades['profit_loss'].sum()
+        
+        # 🔍 计算未实现收益（当前持仓的盈亏）
+        unrealized_profit = 0
+        if current_position and position_shares > 0 and position_entry_price > 0:
+            # 计算当前持仓的盈亏（使用最后一天的收盘价）
+            last_price = daily_prices.iloc[-1]['close'] if not daily_prices.empty else current_price
+            if current_position == 'LONG' or current_position == 'long':
+                unrealized_profit = position_shares * (last_price - position_entry_price)
+            else:  # SHORT or short
+                unrealized_profit = position_shares * (position_entry_price - last_price)
+        
+        # 🔍 总收益 = 已实现收益 + 未实现收益
+        total_profit = realized_profit + unrealized_profit
+        
         print(f"\n🔍 净值计算结果:")
         print(f"   📅 回测期间: {nav_df['date'].min()} 至 {nav_df['date'].max()}")
         print(f"   💰 初始资金: ${self.initial_capital:,.2f}")
         print(f"   💎 最终净值: ${final_nav:,.2f}")
         print(f"   💵 最终现金: ${final_cash:,.2f}")
-        print(f"   📊 最终持仓市值: ${final_position_value:,.2f}")
-        print(f"   📊 总收益: ${final_nav - self.initial_capital:+,.2f}")
-        print(f"   📈 总收益率: {(final_nav - self.initial_capital) / self.initial_capital * 100:+.2f}%")
+        if final_position_value > 0:
+            print(f"   📊 最终持仓市值: ${final_position_value:,.2f}")
+            print(f"   📊 已实现收益: ${realized_profit:+,.2f}")
+            print(f"   📊 未实现收益: ${unrealized_profit:+,.2f}")
+        print(f"   📊 总收益: ${total_profit:+,.2f} (净值计算: ${final_nav - self.initial_capital:+,.2f})")
+        print(f"   📈 总收益率: {(total_profit / self.initial_capital * 100):+.2f}% (净值计算: {(final_nav - self.initial_capital) / self.initial_capital * 100:+.2f}%)")
         
         self.daily_nav = nav_df
         return nav_df
@@ -479,8 +507,29 @@ class PerformanceAnalyzer:
             
         actual_days = (end_date - start_date).days + 1  # +1 包含结束日
         
-        # 使用实际自然日计算年化收益率
-        annualized_return = ((final_nav / actual_initial_nav) ** (365 / actual_days) - 1) * 100 if actual_days > 0 else 0
+        # 🔍 调试信息：显示年化收益率计算过程
+        print(f"   📅 实际回测天数: {actual_days} 天")
+        print(f"   📊 净值比率: {final_nav / actual_initial_nav:.6f}")
+        print(f"   📈 复利周期: 365 / {actual_days} = {365 / actual_days:.4f}")
+        
+        # 使用实际自然日计算年化收益率（复利公式）
+        # 公式: (最终净值/初始净值) ^ (365/实际天数) - 1
+        # 注意：短期回测的年化收益率会被放大，这是正常的复利效应
+        if actual_days > 0:
+            nav_ratio = final_nav / actual_initial_nav
+            power = 365 / actual_days
+            annualized_return = (nav_ratio ** power - 1) * 100
+            print(f"   🔍 年化计算: ({nav_ratio:.6f} ^ {power:.4f} - 1) * 100 = {annualized_return:.2f}%")
+            
+            # 添加说明：短期回测的年化收益率会被放大
+            if actual_days < 90:
+                simple_annual = (total_return / actual_days) * 365
+                print(f"   💡 说明: 短期回测({actual_days}天)的年化收益率会因复利效应被放大")
+                print(f"      简单年化(线性): {simple_annual:.2f}%")
+                print(f"      复利年化(标准): {annualized_return:.2f}%")
+                print(f"      ⚠️  注意: 复利年化是标准金融计算方法，短期回测的年化收益率仅供参考")
+        else:
+            annualized_return = 0
         
         # 风险指标
         daily_returns = nav_df['daily_return'].dropna()

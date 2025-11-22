@@ -33,7 +33,7 @@ class OKXManagerCLI:
     python3 manage_okx_orders.py open-orders --symbol ETH-USDT-SWAP [--raw] [--state live,partially_filled] [--ord-types limit,post_only]
 
     # 5. 查询订单详情
-    python3 manage_okx_orders.py order-detail --symbol ETH-USDT-SWAP --order-id 3034857607517659136
+    python3 manage_okx_orders.py order-detail --symbol ETH-USDT-SWAP --order-id 3034857607517659136 [--raw]
 
     # 6. 下限价单（做多 0.2 张，价格 2500 USDT）
     python3 manage_okx_orders.py place-order --symbol ETH-USDT-SWAP \
@@ -307,14 +307,42 @@ class OKXManagerCLI:
             else:
                 print("（暂无任何未成交委托）")
 
-    def order_detail(self, symbol: Optional[str], order_id: str):
+    def order_detail(self, symbol: Optional[str], order_id: str, raw: bool = False):
         symbol = self._resolve_symbol(symbol)
         print(f"🔍 查询订单详情: {order_id} @ {symbol}")
         print("🛰️  OKX接口: GET /api/v5/trade/order")
         print("📚  文档: https://www.okx.com/docs-v5/zh/#order-book-trading-trade-get-order-details")
         print("   （条件委托对应 GET /api/v5/trade/order-algo）")
-        order = self.trader.exchange.fetch_order(order_id, symbol)
-        self._print_json(order)
+        
+        if raw:
+            # 尝试普通订单接口
+            try:
+                params = {
+                    'instId': symbol,
+                    'ordId': order_id,
+                }
+                response = self.trader.exchange.private_get_trade_order(params)
+                print("📦 原始响应（普通订单）:")
+                self._print_json(response)
+                return
+            except Exception as e:
+                # 如果普通订单接口失败，尝试算法订单接口
+                try:
+                    params = {
+                        'instId': symbol,
+                        'algoId': order_id,
+                    }
+                    response = self.trader.exchange.private_get_trade_order_algo(params)
+                    print("📦 原始响应（算法订单）:")
+                    self._print_json(response)
+                    return
+                except Exception as e2:
+                    print(f"❌ 获取原始数据失败（普通订单）: {e}")
+                    print(f"❌ 获取原始数据失败（算法订单）: {e2}")
+                    print("💡 提示: 请确认订单ID是否正确，或订单是否已过期")
+        else:
+            order = self.trader.exchange.fetch_order(order_id, symbol)
+            self._print_json(order)
 
     # ------------------------------------------------------------------
     # 下单功能
@@ -432,6 +460,7 @@ class OKXManagerCLI:
         sp_order_detail = subparsers.add_parser('order-detail', help='根据订单 ID 查看详情')
         sp_order_detail.add_argument('--symbol', required=False, help='交易对，例如 ETH-USDT-SWAP，如不指定则使用默认')
         sp_order_detail.add_argument('--order-id', required=True, help='订单ID (ordId)')
+        sp_order_detail.add_argument('--raw', action='store_true', help='显示OKX原始返回数据')
 
         # 5. 下单
         sp_place_order = subparsers.add_parser('place-order', help='下单接口：限价 / 高级限价 / 条件单')
@@ -464,7 +493,7 @@ class OKXManagerCLI:
                 algo_types=args.algo_types
             )
         elif args.command == 'order-detail':
-            cli.order_detail(args.symbol, args.order_id)
+            cli.order_detail(args.symbol, args.order_id, raw=args.raw)
         elif args.command == 'place-order':
             cli.place_order(
                 symbol=args.symbol,

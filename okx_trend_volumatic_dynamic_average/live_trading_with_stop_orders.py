@@ -319,8 +319,21 @@ class LiveTradingBotWithStopOrders:
             
             entry_price = signal.get('price', 0)
             entry_type = signal.get('entry_type', 'immediate')  # 🔴 获取开仓类型：'limit' 或 'immediate'
-            stop_loss = round(signal.get('stop_loss'), 1)  # SAR 止损位，保留1位小数
+            stop_loss = round(signal.get('stop_loss'), 1)  # 止损位，保留1位小数
+            max_loss = signal.get('max_loss')  # 🔴 获取最大亏损位
+            max_loss = round(max_loss, 1) if max_loss is not None else None  # 保留1位小数
             take_profit = round(signal.get('take_profit'), 1)  # 固定止盈位，保留1位小数
+            
+            # 🔴 对比 stop_loss 和 max_loss，保留更大的那个（多单：更大的更接近entry_price，更严格）
+            if max_loss is not None:
+                original_stop_loss = stop_loss
+                stop_loss = max(stop_loss, max_loss)
+                if stop_loss != original_stop_loss:
+                    print(f"🔍 止损价调整: ${original_stop_loss:.1f} → ${stop_loss:.1f} (使用max_loss，更严格)")
+                else:
+                    print(f"🔍 止损价对比: stop_loss=${stop_loss:.1f} >= max_loss=${max_loss:.1f}，使用stop_loss")
+            else:
+                print(f"🔍 止损价: ${stop_loss:.1f} (无max_loss)")
             
             print(f"\n🔍 ========== OPEN_LONG 信号处理 ==========")
             print(f"🔍 信号价格: ${entry_price:.2f}")
@@ -336,11 +349,17 @@ class LiveTradingBotWithStopOrders:
             print(f"   止损比例: {stop_loss_pct:.2f}%")
             print(f"   止盈比例: {take_profit_pct:.2f}%")
             
-            if stop_loss_pct < take_profit_pct:
+            # if stop_loss_pct < take_profit_pct:
+            #     print(f"❌ 风险收益比不合理，拒绝开仓:")
+            #     print(f"   止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+            #     print(f"   风险大于收益，不符合交易原则")
+            #     self.logger.log_warning(f"⚠️  拒绝开多仓: 止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+            #     return
+            if stop_loss_pct < take_profit_pct / 2:
                 print(f"❌ 风险收益比不合理，拒绝开仓:")
-                print(f"   止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+                print(f"   止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)的一半")
                 print(f"   风险大于收益，不符合交易原则")
-                self.logger.log_warning(f"⚠️  拒绝开多仓: 止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+                self.logger.log_warning(f"⚠️  拒绝开多仓: 止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)的一半")
                 return
             
             print(f"✅ 风险收益比合理: 止损比例({stop_loss_pct:.2f}%) >= 止盈比例({take_profit_pct:.2f}%)")
@@ -373,7 +392,7 @@ class LiveTradingBotWithStopOrders:
             
             # 计算实际持仓价值（用于显示）
             # calculate_contract_amount 内部：safe_margin = actual_invested * 0.95, position_value = safe_margin * leverage
-            safe_margin = actual_invested * 0.95
+            safe_margin = actual_invested * 1.0
             actual_position_value = safe_margin * leverage
             
             print(f"💰 账户余额: 可用=${self.account_balance:.2f} | 总余额=${getattr(self, 'account_total_balance', 0):.2f} | 已用=${getattr(self, 'account_used_balance', 0):.2f}")
@@ -798,8 +817,21 @@ class LiveTradingBotWithStopOrders:
             invested_amount = signal.get('invested_amount', 0)
             entry_price = signal.get('price', 0)
             entry_type = signal.get('entry_type', 'immediate')  # 🔴 获取开仓类型：'limit' 或 'immediate'
-            stop_loss = round(signal.get('stop_loss'), 1)  # SAR 止损位，保留1位小数
+            stop_loss = round(signal.get('stop_loss'), 1)  # 止损位，保留1位小数
+            max_loss = signal.get('max_loss')  # 🔴 获取最大亏损位
+            max_loss = round(max_loss, 1) if max_loss is not None else None  # 保留1位小数
             take_profit = round(signal.get('take_profit'), 1)  # 固定止盈位，保留1位小数
+            
+            # 🔴 对比 stop_loss 和 max_loss，保留更小的那个（空单：更小的更接近entry_price，更严格）
+            if max_loss is not None:
+                original_stop_loss = stop_loss
+                stop_loss = min(stop_loss, max_loss)
+                if stop_loss != original_stop_loss:
+                    print(f"🔍 止损价调整: ${original_stop_loss:.1f} → ${stop_loss:.1f} (使用更小的值，更严格)")
+                else:
+                    print(f"🔍 止损价对比: stop_loss=${stop_loss:.1f} <= max_loss=${max_loss:.1f}，使用stop_loss（更严格）")
+            else:
+                print(f"🔍 止损价: ${stop_loss:.1f} (无max_loss)")
             
             print(f"\n🔍 ========== OPEN_SHORT 信号处理 ==========")
             print(f"🔍 信号价格: ${entry_price:.2f}")
@@ -815,11 +847,17 @@ class LiveTradingBotWithStopOrders:
             print(f"   止损比例: {stop_loss_pct:.2f}%")
             print(f"   止盈比例: {take_profit_pct:.2f}%")
             
-            if stop_loss_pct < take_profit_pct:
+            # if stop_loss_pct < take_profit_pct:
+            #     print(f"❌ 风险收益比不合理，拒绝开仓:")
+            #     print(f"   止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+            #     print(f"   风险大于收益，不符合交易原则")
+            #     self.logger.log_warning(f"⚠️  拒绝开空仓: 止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+            #     return
+            if stop_loss_pct < take_profit_pct / 2:
                 print(f"❌ 风险收益比不合理，拒绝开仓:")
-                print(f"   止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+                print(f"   止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)的一半")
                 print(f"   风险大于收益，不符合交易原则")
-                self.logger.log_warning(f"⚠️  拒绝开空仓: 止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)")
+                self.logger.log_warning(f"⚠️  拒绝开空仓: 止损比例({stop_loss_pct:.2f}%) < 止盈比例({take_profit_pct:.2f}%)的一半")
                 return
             
             print(f"✅ 风险收益比合理: 止损比例({stop_loss_pct:.2f}%) >= 止盈比例({take_profit_pct:.2f}%)")
@@ -1426,22 +1464,9 @@ class LiveTradingBotWithStopOrders:
             new_stop_loss = signal.get('new_stop_loss') or signal.get('price')
             new_stop_loss = round(new_stop_loss, 1) if new_stop_loss is not None else None  # 保留1位小数
             
-            # 🔴 获取旧止损价（优先从信号，其次从策略）
-            old_stop_loss = signal.get('old_stop_loss')
-            if old_stop_loss is None:
-                # 从策略获取当前止损价
-                if hasattr(self.strategy, 'stop_loss_level') and self.strategy.stop_loss_level is not None:
-                    old_stop_loss = self.strategy.stop_loss_level
-                    print(f"   📊 从策略获取旧止损价: ${old_stop_loss:.2f}")
-                else:
-                    print(f"   ⚠️  策略中无止损价记录")
-            
-            old_stop_loss = round(old_stop_loss, 1) if old_stop_loss is not None else None  # 保留1位小数
-            
             print(f"\n🔍 ========== UPDATE_STOP_LOSS 信号处理 ==========")
             print(f"🔍 当前持仓: {self.current_position}")
             print(f"🔍 新止损: {new_stop_loss}")
-            print(f"🔍 旧止损: {old_stop_loss}")
             print(f"🔍 current_trade_id: {self.current_trade_id}")
             print(f"🔍 current_entry_order_id: {self.current_entry_order_id}")
             print(f"🔍 current_stop_loss_order_id: {self.current_stop_loss_order_id}")
@@ -1490,9 +1515,81 @@ class LiveTradingBotWithStopOrders:
                     print(f"   💡 为安全起见，跳过挂止损单，等待开仓订单成交后再挂")
                     return
             
-            # 🔴 比较新旧止损价，如果有变化才更新
+            # 🔴 从OKX获取当前挂单的止损价（优先使用实际挂单价格，而不是策略中的价格）
+            current_okx_stop_loss = None
+            if self.current_stop_loss_order_id:
+                try:
+                    print(f"🔍 查询当前挂单止损价: {self.current_stop_loss_order_id}")
+                    
+                    # 方法1: 尝试查询条件单（止损单通常是条件单）
+                    try:
+                        params = {
+                            'instId': self.symbol,
+                            'algoId': str(self.current_stop_loss_order_id),
+                        }
+                        response = self.trader.exchange.private_get_trade_orders_algo_pending(params)
+                        
+                        if response.get('code') == '0' and response.get('data') and len(response['data']) > 0:
+                            algo_data = response['data'][0]
+                            # 从条件单数据中获取止损触发价格
+                            current_okx_stop_loss = self.safe_float(algo_data.get('slTriggerPx'))
+                            if current_okx_stop_loss:
+                                print(f"   ✅ 从条件单获取当前止损价: ${current_okx_stop_loss:.2f}")
+                    except Exception as e1:
+                        print(f"   ⚠️  查询条件单失败: {e1}")
+                        
+                        # 方法2: 尝试查询普通订单（可能是限价单）
+                        try:
+                            order_info = self.trader.exchange.fetch_order(self.current_stop_loss_order_id, self.symbol)
+                            # 限价单的价格
+                            current_okx_stop_loss = self.safe_float(order_info.get('price'))
+                            if current_okx_stop_loss:
+                                print(f"   ✅ 从限价单获取当前止损价: ${current_okx_stop_loss:.2f}")
+                        except Exception as e2:
+                            print(f"   ⚠️  查询限价单失败: {e2}")
+                            
+                            # 方法3: 从数据库获取（备用方案）
+                            if self._is_trading_db_available():
+                                try:
+                                    from trading_database_models import OKXStopOrder
+                                    session = self.trading_db.get_session()
+                                    stop_order = session.query(OKXStopOrder).filter_by(
+                                        order_id=str(self.current_stop_loss_order_id),
+                                        status='active'
+                                    ).first()
+                                    if stop_order and stop_order.trigger_price:
+                                        current_okx_stop_loss = float(stop_order.trigger_price)
+                                        print(f"   ✅ 从数据库获取当前止损价: ${current_okx_stop_loss:.2f}")
+                                    self.trading_db.close_session(session)
+                                except Exception as e3:
+                                    print(f"   ⚠️  从数据库获取失败: {e3}")
+                    
+                except Exception as e:
+                    print(f"   ⚠️  查询当前挂单止损价异常: {e}")
+            
+            # 🔴 如果没有查询到当前挂单止损价，使用策略中的止损价作为备用
+            if current_okx_stop_loss is None:
+                # 从信号或策略获取旧止损价（备用）
+                old_stop_loss = signal.get('old_stop_loss')
+                if old_stop_loss is None:
+                    if hasattr(self.strategy, 'stop_loss_level') and self.strategy.stop_loss_level is not None:
+                        old_stop_loss = self.strategy.stop_loss_level
+                        print(f"   📊 从策略获取旧止损价（备用）: ${old_stop_loss:.2f}")
+                    else:
+                        print(f"   ⚠️  无法获取当前止损价，将执行更新")
+                        old_stop_loss = None
+                else:
+                    old_stop_loss = round(old_stop_loss, 1)
+                    print(f"   📊 从信号获取旧止损价（备用）: ${old_stop_loss:.2f}")
+            else:
+                # 使用从OKX查询到的实际挂单止损价
+                current_okx_stop_loss = round(current_okx_stop_loss, 1)
+                old_stop_loss = current_okx_stop_loss
+                print(f"   📊 使用OKX实际挂单止损价: ${old_stop_loss:.2f}")
+            
+            # 🔴 比较新止损价与当前挂单止损价，如果有变化才更新
             if old_stop_loss is not None and abs(new_stop_loss - old_stop_loss) < 0.01:  # 价格差异小于0.01，认为是相同价格
-                print(f"✅ 跳过止损更新: 新止损价${new_stop_loss:.2f}与旧止损价${old_stop_loss:.2f}相同，无需更新")
+                print(f"✅ 跳过止损更新: 新止损价${new_stop_loss:.2f}与当前挂单止损价${old_stop_loss:.2f}相同，无需更新")
                 return
             
             if old_stop_loss is not None:

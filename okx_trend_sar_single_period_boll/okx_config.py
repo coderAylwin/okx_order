@@ -6,7 +6,7 @@ OKX API 配置文件
 请妥善保管API密钥，不要泄露！
 """
 
-# OKX API 配置
+# OKX API 配置 账号 aylwin01
 OKX_API_CONFIG = {
     'api_key': 'a1ffa3fd-834c-4ed8-8f1a-aa83aceaa892',           # 替换为你的 API Key
     'secret': '3968DCAB3420DFEF2110FD451625E61F',          # 替换为你的 Secret Key

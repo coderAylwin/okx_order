@@ -62,8 +62,9 @@ def export_trades_to_excel(trades, config, output_dir):
         print("❌ 没有交易记录，跳过Excel导出")
         return None
     
-    # 生成文件名（去掉时间戳）
-    filename = os.path.join(output_dir, "交易记录.xlsx")
+    # 生成文件名（添加时间戳）
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(output_dir, f"交易记录_{timestamp}.xlsx")
     
     # 合并开仓和平仓记录，按时间顺序
     trade_data = []
@@ -1259,7 +1260,9 @@ def main():
         bb_midline_period=config.get('bb_midline_period', 14),
         bb_angle_window_size=config.get('bb_angle_window_size', 14),
         bb_angle_threshold=config.get('bb_angle_threshold', 0.3),
-        bb_r_squared_threshold=config.get('bb_r_squared_threshold', 0.6)
+        bb_r_squared_threshold=config.get('bb_r_squared_threshold', 0.6),
+        bb_stop_loss_lock_periods=config.get('bb_stop_loss_lock_periods', 5),
+        bb_max_loss_pct=config.get('bb_max_loss_pct', 1.0)  # 🔴 布林带角度开仓的最大亏损百分比
     )
 
     print(f"\n纯VIDYA策略初始化完成")
@@ -1285,7 +1288,7 @@ def main():
 
     # 🔥 滤波器预热：获取回测开始前的历史数据
     start_timestamp = pd.to_datetime(config['start_date'])
-    warmup_days = 60  # 🔥 数据预热（确保VIDYA指标完全稳定，接近TradingView效果）
+    warmup_days = 25  # 🔥 数据预热（确保VIDYA指标完全稳定，接近TradingView效果）
     warmup_start = start_timestamp - pd.Timedelta(days=warmup_days)
     warmup_start_str = warmup_start.strftime('%Y-%m-%d %H:%M:%S')
     warmup_end_str = config['start_date']
@@ -1567,11 +1570,14 @@ def main():
             # 🔧 使用更精确的时间戳：如果有exit_timestamp且不为None就用它，否则用当前时间戳
             signal_timestamp = signal.get('exit_timestamp') if signal.get('exit_timestamp') is not None else timestamp
             
+            # 🔧 安全获取价格：优先使用 price，其次使用 new_stop_loss、current_price，最后使用当前收盘价
+            signal_price = signal.get('price') or signal.get('new_stop_loss') or signal.get('current_price') or close_price
+            
             trade_info = {
                 'timestamp': signal_timestamp,
                 'signal_type': signal['type'],
-                'price': signal['price'],
-                'reason': signal['reason']
+                'price': signal_price,
+                'reason': signal.get('reason', '')
             }
             
             # 添加止损止盈信息（只有开仓信号才有）
@@ -1606,8 +1612,8 @@ def main():
             chart_signal = {
                 'time': signal_timestamp.strftime('%Y-%m-%d %H:%M:%S'),
                 'type': signal['type'],
-                'price': round(signal['price'], 2),
-                'reason': signal['reason']
+                'price': round(signal_price, 2),
+                'reason': signal.get('reason', '')
             }
             chart_data['tradeSignals'].append(chart_signal)
             
@@ -1626,10 +1632,10 @@ def main():
                 current_position = 'long'
                 stop_loss = signal.get('stop_loss', 0)
                 take_profit = signal.get('take_profit', None)
-                risk = abs(signal['price'] - stop_loss) if stop_loss else 0
+                risk = abs(signal_price - stop_loss) if stop_loss else 0
                 
                 if take_profit is not None:
-                    reward = abs(take_profit - signal['price'])
+                    reward = abs(take_profit - signal_price)
                     risk_reward_ratio = reward / risk if risk > 0 else 0
                     print(f"    💰 资金: ${initial_capital:,.2f} | 风险: ${risk:.2f} | 预期收益: ${reward:.2f} | 风险收益比: 1:{risk_reward_ratio:.2f}")
                 else:
@@ -1639,10 +1645,10 @@ def main():
                 current_position = 'short'
                 stop_loss = signal.get('stop_loss', 0)
                 take_profit = signal.get('take_profit', None)
-                risk = abs(stop_loss - signal['price']) if stop_loss else 0
+                risk = abs(stop_loss - signal_price) if stop_loss else 0
                 
                 if take_profit is not None:
-                    reward = abs(signal['price'] - take_profit)
+                    reward = abs(signal_price - take_profit)
                     risk_reward_ratio = reward / risk if risk > 0 else 0
                     print(f"    💰 资金: ${initial_capital:,.2f} | 风险: ${risk:.2f} | 预期收益: ${reward:.2f} | 风险收益比: 1:{risk_reward_ratio:.2f}")
                 else:

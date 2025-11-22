@@ -1584,6 +1584,7 @@ class TrendVolumaticDynamicAverageStrategy:
                  bb_angle_threshold=0.3,
                  bb_r_squared_threshold=0.6,
                  bb_stop_loss_lock_periods=5,
+                 bb_max_loss_pct=1.0,
                  enable_bb_angle_entry=False, **kwargs):
         """
         初始化纯VIDYA策略
@@ -1707,6 +1708,7 @@ class TrendVolumaticDynamicAverageStrategy:
         # 止盈止损配置
         self.fixed_take_profit_pct = fixed_take_profit_pct
         self.max_loss_pct = max_loss_pct
+        self.bb_max_loss_pct = bb_max_loss_pct  # 🔴 布林带角度开仓的最大亏损百分比
         
         # 单周期交易状态
         self.position = None
@@ -2665,7 +2667,7 @@ class TrendVolumaticDynamicAverageStrategy:
         if direction == 'long':
             # 做多止损：支撑线下方或下轨下方
             if lower_band is not None and lower_band < entry_price:
-                stop_loss_price = lower_band * 0.99  # 下轨下方1%
+                stop_loss_price = lower_band  # 下轨
                 stop_reason = f"下轨{lower_band:.2f}下方"
             else:
                 # 🔴 备用：基于开仓价格的固定百分比止损
@@ -2674,7 +2676,7 @@ class TrendVolumaticDynamicAverageStrategy:
         else:
             # 做空止损：阻力线上方或上轨上方
             if upper_band is not None and upper_band > entry_price:
-                stop_loss_price = upper_band * 1.01  # 上轨上方1%
+                stop_loss_price = upper_band  # 上轨
                 stop_reason = f"上轨{upper_band:.2f}上方"
             else:
                 # 🔴 备用：基于开仓价格的固定百分比止损
@@ -2781,9 +2783,13 @@ class TrendVolumaticDynamicAverageStrategy:
         self.stop_loss_level = stop_loss_price if stop_loss_price is not None else entry_price * 0.98
         self.take_profit_level = take_profit_price if take_profit_price is not None else entry_price * 1.015
         
-        # 计算最大亏损位
-        if self.max_loss_pct > 0:
-            self.max_loss_level = self.entry_price * (1 - self.max_loss_pct / 100)
+        # 🔴 计算最大亏损位：根据开仓类型使用不同的最大亏损百分比
+        # 如果是布林带角度开仓，使用bb_max_loss_pct；否则使用max_loss_pct
+        is_bb_angle_entry = '布林带角度' in reason
+        max_loss_pct_to_use = self.bb_max_loss_pct if is_bb_angle_entry else self.max_loss_pct
+        
+        if max_loss_pct_to_use > 0:
+            self.max_loss_level = self.entry_price * (1 - max_loss_pct_to_use / 100)
         else:
             self.max_loss_level = None
         
@@ -2858,9 +2864,13 @@ class TrendVolumaticDynamicAverageStrategy:
         self.stop_loss_level = stop_loss_price if stop_loss_price is not None else entry_price * 1.02
         self.take_profit_level = take_profit_price if take_profit_price is not None else entry_price * 0.985
         
-        # 计算最大亏损位
-        if self.max_loss_pct > 0:
-            self.max_loss_level = self.entry_price * (1 + self.max_loss_pct / 100)
+        # 🔴 计算最大亏损位：根据开仓类型使用不同的最大亏损百分比
+        # 如果是布林带角度开仓，使用bb_max_loss_pct；否则使用max_loss_pct
+        is_bb_angle_entry = '布林带角度' in reason
+        max_loss_pct_to_use = self.bb_max_loss_pct if is_bb_angle_entry else self.max_loss_pct
+        
+        if max_loss_pct_to_use > 0:
+            self.max_loss_level = self.entry_price * (1 + max_loss_pct_to_use / 100)
         else:
             self.max_loss_level = None
         
@@ -3045,14 +3055,14 @@ class TrendVolumaticDynamicAverageStrategy:
             return
         
         potential_invested_amount = self._get_invested_capital()
-        if potential_invested_amount <= 0:
-            print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
-            return
+        # if potential_invested_amount <= 0:
+        #     print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
+        #     return
         
-        # 计算止盈止损（使用固定百分比）
+        # 🔴 计算止盈止损（使用布林带专用的最大亏损百分比）
         if direction == 'long':
-            # 做多止损：固定百分比
-            stop_loss_price = entry_price * (1 - self.max_loss_pct / 100)
+            # 做多止损：使用bb_max_loss_pct
+            stop_loss_price = entry_price * (1 - self.bb_max_loss_pct / 100)
             
             # 做多止盈：固定百分比
             if self.fixed_take_profit_pct > 0:
@@ -3060,8 +3070,8 @@ class TrendVolumaticDynamicAverageStrategy:
             else:
                 take_profit_price = None
         else:
-            # 做空止损：固定百分比
-            stop_loss_price = entry_price * (1 + self.max_loss_pct / 100)
+            # 做空止损：使用bb_max_loss_pct
+            stop_loss_price = entry_price * (1 + self.bb_max_loss_pct / 100)
             
             # 做空止盈：固定百分比
             if self.fixed_take_profit_pct > 0:
@@ -3070,7 +3080,7 @@ class TrendVolumaticDynamicAverageStrategy:
                 take_profit_price = None
         
         print(f"  🎯 【布林带角度开仓】{direction.upper()} | 价格: ${entry_price:.2f}")
-        print(f"  🛡️ 止损: ${stop_loss_price:.2f} (固定{self.max_loss_pct}%)")
+        print(f"  🛡️ 止损: ${stop_loss_price:.2f} (固定{self.bb_max_loss_pct}%)")
         print(f"  🎯 止盈: ${take_profit_price:.2f} (固定{self.fixed_take_profit_pct}%)")
         
         if direction == 'long':
@@ -3509,32 +3519,70 @@ class TrendVolumaticDynamicAverageStrategy:
             print(f"  ⚠️  【更新止损单】无可用止损价格")
             return
         
-        # 🔴 选择距离当前价格最近的一个（计算所有止损价到当前价格的距离）
-        best_stop_loss = None
-        best_index = None
-        min_distance = float('inf')
+        # 🔴 过滤止损价：确保在正确的方向（多单止损在价格下方，空单止损在价格上方）
+        valid_stop_loss_prices = []
+        valid_stop_loss_reasons = []
         
         for i, price in enumerate(stop_loss_prices):
-            distance = abs(price - current_price)
-            if distance < min_distance:
-                min_distance = distance
-                best_stop_loss = price
-                best_index = i
+            if self.position == 'long':
+                # 多单：止损价应该在当前价格下方
+                if price < current_price:
+                    valid_stop_loss_prices.append(price)
+                    valid_stop_loss_reasons.append(stop_loss_reasons[i])
+            else:  # short
+                # 空单：止损价应该在当前价格上方
+                if price > current_price:
+                    valid_stop_loss_prices.append(price)
+                    valid_stop_loss_reasons.append(stop_loss_reasons[i])
         
-        # 计算百分比距离
-        distance_pct = (min_distance / current_price) * 100
+        if not valid_stop_loss_prices:
+            print(f"  ⚠️  【更新止损单】无有效止损价格（方向检查失败）")
+            return
         
-        print(f"  🔍 【更新止损单】比较三个止损价格:")
-        for i, (price, reason) in enumerate(zip(stop_loss_prices, stop_loss_reasons)):
+        # 🔴 选择最优止损价：
+        # - 多单：选择最高的止损价（最接近当前价格，锁定更多利润）
+        # - 空单：选择最低的止损价（最接近当前价格，锁定更多利润）
+        best_stop_loss = None
+        best_index = None
+        
+        if self.position == 'long':
+            # 多单：选择最高的止损价
+            best_stop_loss = max(valid_stop_loss_prices)
+            best_index = valid_stop_loss_prices.index(best_stop_loss)
+        else:  # short
+            # 空单：选择最低的止损价
+            best_stop_loss = min(valid_stop_loss_prices)
+            best_index = valid_stop_loss_prices.index(best_stop_loss)
+        
+        # 计算距离
+        distance = abs(best_stop_loss - current_price)
+        distance_pct = (distance / current_price) * 100
+        
+        print(f"  🔍 【更新止损单】比较止损价格:")
+        for i, (price, reason) in enumerate(zip(valid_stop_loss_prices, valid_stop_loss_reasons)):
             marker = "✅" if i == best_index else "  "
             price_distance = abs(price - current_price)
             price_distance_pct = (price_distance / current_price) * 100
-            print(f"     {marker} {reason} | 距离: ${price_distance:.2f} ({price_distance_pct:.2f}%)")
+            direction_marker = "↓" if self.position == 'long' else "↑"
+            print(f"     {marker} {reason} | 价格: ${price:.2f} | 距离: ${price_distance:.2f} ({price_distance_pct:.2f}%) {direction_marker}")
         
-        print(f"  🎯 【选择止损价】{stop_loss_reasons[best_index]} | 距离: ${distance:.2f} ({distance_pct:.2f}%)")
+        print(f"  🎯 【选择止损价】{valid_stop_loss_reasons[best_index]} | 价格: ${best_stop_loss:.2f} | 距离: ${distance:.2f} ({distance_pct:.2f}%)")
         
         # 🔴 获取当前止损价（用于比较）
         old_stop_loss = self.stop_loss_level
+        
+        # 🔴 确保新止损价比旧止损价更有利（止损只能向有利方向移动）
+        if old_stop_loss is not None:
+            if self.position == 'long':
+                # 多单：新止损价应该 >= 旧止损价（向上移动，锁定更多利润）
+                if best_stop_loss < old_stop_loss:
+                    print(f"  ⚠️  【止损价检查】新止损价${best_stop_loss:.2f} < 旧止损价${old_stop_loss:.2f}，不更新（多单止损只能向上移动）")
+                    return
+            else:  # short
+                # 空单：新止损价应该 <= 旧止损价（向下移动，锁定更多利润）
+                if best_stop_loss > old_stop_loss:
+                    print(f"  ⚠️  【止损价检查】新止损价${best_stop_loss:.2f} > 旧止损价${old_stop_loss:.2f}，不更新（空单止损只能向下移动）")
+                    return
         
         # 生成更新止损单信号
         signal_info['signals'].append({
@@ -3542,10 +3590,10 @@ class TrendVolumaticDynamicAverageStrategy:
             'position': self.position,
             'new_stop_loss': best_stop_loss,  # 🔴 使用 new_stop_loss 字段
             'old_stop_loss': old_stop_loss,  # 🔴 添加旧止损价
-            'reason': f'周期结束更新止损单: {stop_loss_reasons[best_index]}',
+            'reason': f'周期结束更新止损单: {valid_stop_loss_reasons[best_index]}',
             'current_price': current_price,
-            'all_stop_loss_prices': stop_loss_prices,
-            'all_stop_loss_reasons': stop_loss_reasons
+            'all_stop_loss_prices': valid_stop_loss_prices,  # 🔴 使用过滤后的有效止损价列表
+            'all_stop_loss_reasons': valid_stop_loss_reasons  # 🔴 使用过滤后的有效原因列表
         })
     
     def get_current_status(self):
