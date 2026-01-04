@@ -84,16 +84,35 @@ logging.info("ETF抓取日志系统初始化完成")
 logging.info(f"日志文件路径: {os.path.join(log_dir, 'etf_scraper.log')}")
 logging.info(f"调度间隔: 每小时执行一次 ({cron_timezone})")
 
-# 设置 Chrome 选项
-chrome_options = Options()
-chrome_options.add_argument(
-    "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-chrome_options.add_experimental_option('useAutomationExtension', False)
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--headless=new")
+# 设置 Chrome 选项（服务器环境优化）
+def get_chrome_options():
+    """获取配置好的 Chrome 选项"""
+    chrome_options = Options()
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    # 服务器环境必需的选项
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+    chrome_options.add_argument("--disable-renderer-backgrounding")
+    chrome_options.add_argument("--disable-features=TranslateUI")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--start-maximized")
+    
+    # 设置日志级别，减少输出
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    
+    return chrome_options
 
 
 def is_valid_numeric_value(value):
@@ -277,7 +296,32 @@ def scrape_etf_data_for_coin(coin_symbol):
     simple_header = config['simple_header']
     
     logging.info(f"开始执行 {coin_name} ETF数据抓取 ({coin_symbol})")
-    driver = webdriver.Chrome(options=chrome_options)
+    
+    # 创建 Chrome WebDriver，带错误处理
+    driver = None
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            chrome_options = get_chrome_options()
+            driver = webdriver.Chrome(options=chrome_options)
+            break  # 成功创建，退出循环
+        except Exception as e:
+            retry_count += 1
+            if retry_count >= max_retries:
+                logging.error(f"{coin_name} ETF: 创建 Chrome WebDriver 失败（已重试 {max_retries} 次）: {str(e)}")
+                logging.error("提示：请确保已安装 Chrome 浏览器和 ChromeDriver，并且版本匹配")
+                logging.error("安装命令示例：")
+                logging.error("  # Ubuntu/Debian: apt-get install -y google-chrome-stable chromium-chromedriver")
+                logging.error("  # 或使用: pip install webdriver-manager")
+                raise
+            else:
+                logging.warning(f"{coin_name} ETF: 创建 Chrome WebDriver 失败，{retry_count}/{max_retries} 次重试: {str(e)}")
+                time.sleep(2)  # 等待后重试
+    
+    if driver is None:
+        raise Exception("无法创建 Chrome WebDriver")
     
     try:
         driver.get(url)
@@ -470,7 +514,12 @@ def scrape_etf_data_for_coin(coin_symbol):
         logging.error(f"{coin_name} ETF: 发生错误: {str(e)}", exc_info=True)
     
     finally:
-        driver.quit()
+        # 安全关闭 driver
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception as e:
+                logging.warning(f"{coin_name} ETF: 关闭 WebDriver 时出错: {str(e)}")
 
 
 def scrape_all_etf_data():
