@@ -27,8 +27,7 @@ DB_CONFIG = {
     'port': 3306,
     'user': 'payment_pro',
     'password': 'nS4kO7tG1jH7cI6oR4b',# 请修改为您的MySQL密码
-    'database': 'quantify',# 数据库名称
-    'charset': 'utf8mb4',
+    'database': 'quantify'
 }
 
 FRED_KEY = "dbb32d7a650dcfdc831ff5c26693100b"
