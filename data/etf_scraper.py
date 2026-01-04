@@ -45,7 +45,11 @@ ETF_CONFIGS = {
 
 # 读取配置文件
 config = configparser.ConfigParser()
-config.read('config.ini')
+# 使用脚本所在目录的配置文件
+config_file = os.path.join(os.path.dirname(__file__), 'config.ini')
+config.read(config_file)
+if 'liq_scraper' not in config:
+    raise KeyError(f"配置文件中缺少 [liq_scraper] 节，请检查配置文件: {config_file}")
 scraper_config = config['liq_scraper']
 cron_timezone = scraper_config.get('timezone', 'Asia/Shanghai')
 log_dir = os.path.expanduser(scraper_config.get('log_dir', '~/liq_data'))
