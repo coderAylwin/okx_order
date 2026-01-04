@@ -3,18 +3,35 @@
 
 import math
 import numpy as np
+import gc
 from datetime import datetime, timedelta
 from volatility_calculator import VolatilityCalculator
 from ema_calculator import EMACalculator
-from dingtalk_notifier import DingTalkNotifier
 
 def timeframe_to_minutes(timeframe):
-    """将时间周期字符串转换为分钟数"""
-    timeframe_map = {
-        '5m': 5, '15m': 15, '20m': 20, '24m': 24, '30m': 30, '1h': 60,
-        '2h': 120, '4h': 240, '8h': 480, '1d': 1440
-    }
-    return timeframe_map.get(timeframe, 30)
+    """将时间周期字符串转换为分钟数（支持任意时间周期，如3m, 1.5h, 2d等）"""
+    import re
+    
+    if not timeframe:
+        return 30
+    
+    # 使用正则表达式匹配时间周期格式：数字 + m/M/h/H/d/D
+    pattern = r'^(\d+(?:\.\d+)?)\s*([mMhHdD])$'
+    match = re.match(pattern, str(timeframe).strip())
+    
+    if match:
+        value = float(match.group(1))
+        unit = match.group(2).lower()
+        
+        if unit == 'm':  # 分钟
+            return int(value)
+        elif unit == 'h':  # 小时
+            return int(value * 60)
+        elif unit == 'd':  # 天
+            return int(value * 1440)
+    
+    # 如果无法解析，返回默认值30分钟
+    return 30
 
 def minutes_to_timeframe(minutes):
     """将分钟数转换为时间周期字符串"""
@@ -41,61 +58,57 @@ class TrendFilterTimeframeManager:
         self.current_volume = 0  # 🔴 新增：聚合成交量
         
     def _calculate_period_start(self, timestamp, minutes):
-        """计算时间周期的开始时间"""
-        if minutes == 5:
-            minute = timestamp.minute
-            period_minute = (minute // 5) * 5
-            return timestamp.replace(minute=period_minute, second=0, microsecond=0)
-        elif minutes == 15:
-            minute = timestamp.minute
-            if minute < 15:
-                return timestamp.replace(minute=0, second=0, microsecond=0)
-            elif minute < 30:
-                return timestamp.replace(minute=15, second=0, microsecond=0)
-            elif minute < 45:
-                return timestamp.replace(minute=30, second=0, microsecond=0)
-            else:
-                return timestamp.replace(minute=45, second=0, microsecond=0)
-        elif minutes == 20:
-            minute = timestamp.minute
-            if minute < 20:
-                return timestamp.replace(minute=0, second=0, microsecond=0)
-            elif minute < 40:
-                return timestamp.replace(minute=20, second=0, microsecond=0)
-            else:
-                return timestamp.replace(minute=40, second=0, microsecond=0)
-        elif minutes == 30:
-            minute = timestamp.minute
-            if minute < 30:
-                return timestamp.replace(minute=0, second=0, microsecond=0)
-            else:
-                return timestamp.replace(minute=30, second=0, microsecond=0)
-        elif minutes == 60:
-            return timestamp.replace(minute=0, second=0, microsecond=0)
-        elif minutes == 120:
-            hour = timestamp.hour
-            period_hour = (hour // 2) * 2
-            return timestamp.replace(hour=period_hour, minute=0, second=0, microsecond=0)
-        elif minutes == 240:
-            hour = timestamp.hour
-            period_hour = (hour // 4) * 4
-            return timestamp.replace(hour=period_hour, minute=0, second=0, microsecond=0)
-        elif minutes == 480:
-            hour = timestamp.hour
-            period_hour = (hour // 8) * 8
-            return timestamp.replace(hour=period_hour, minute=0, second=0, microsecond=0)
-        elif minutes == 1440:
-            return timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
+        """计算时间周期的开始时间（支持任意分钟数）"""
+        if minutes <= 0:
             return timestamp
+        
+        # 如果小于60分钟，按分钟计算周期开始时间
+        if minutes < 60:
+            minute = timestamp.minute
+            period_minute = (minute // minutes) * minutes
+            return timestamp.replace(minute=period_minute, second=0, microsecond=0)
+        
+        # 如果小于1440分钟（1天），按小时计算周期开始时间
+        elif minutes < 1440:
+            hours = minutes // 60
+            hour = timestamp.hour
+            period_hour = (hour // hours) * hours
+            return timestamp.replace(hour=period_hour, minute=0, second=0, microsecond=0)
+        
+        # 如果大于等于1440分钟（1天），按天计算周期开始时间
+        else:
+            days = minutes // 1440
+            # 计算从1970-01-01开始的天数，然后按周期对齐
+            # 使用 (days_since_epoch - 1) // days * days + 1 来确保周期对齐正确
+            days_since_epoch = timestamp.toordinal()
+            period_days = ((days_since_epoch - 1) // days) * days + 1
+            period_date = datetime.fromordinal(period_days)
+            return period_date.replace(hour=0, minute=0, second=0, microsecond=0)
     
     def get_timeframe_minutes(self):
-        """获取时间周期对应的分钟数"""
-        timeframe_minutes = {
-            '5m': 5, '15m': 15, '20m': 20, '30m': 30, '1h': 60,
-            '2h': 120, '4h': 240, '8h': 480, '1d': 1440
-        }
-        return timeframe_minutes.get(self.timeframe, 30)
+        """获取时间周期对应的分钟数（支持任意时间周期，如3m, 1.5h, 2d等）"""
+        import re
+        
+        if not self.timeframe:
+            return 30
+        
+        # 使用正则表达式匹配时间周期格式：数字 + m/M/h/H/d/D
+        pattern = r'^(\d+(?:\.\d+)?)\s*([mMhHdD])$'
+        match = re.match(pattern, self.timeframe.strip())
+        
+        if match:
+            value = float(match.group(1))
+            unit = match.group(2).lower()
+            
+            if unit == 'm':  # 分钟
+                return int(value)
+            elif unit == 'h':  # 小时
+                return int(value * 60)
+            elif unit == 'd':  # 天
+                return int(value * 1440)
+        
+        # 如果无法解析，返回默认值30分钟
+        return 30
     
     def update_kline_data(self, timestamp, open_price, high_price, low_price, close_price, volume=0):
         """更新K线数据（处理1分钟数据聚合，包含成交量）"""
@@ -362,24 +375,14 @@ class BollingerMidlineAngleCalculator:
                 'can_check_now': bool  # 🆕 当前是否可以检查开仓
             }
         """
-        # 🔴 调试打印：开始计算
-        print(f"\n  📐 ========== BB中轨角度信号计算 ==========")
-        print(f"  📊 数据状态:")
-        print(f"     ├─ 中轨历史长度: {len(self.midline_history)} (需要{self.window_size})")
-        print(f"     ├─ 当前持仓: {current_position}")
-        print(f"     ├─ 锁定状态: {'🔒 已锁定' if self.is_locked else '🔓 未锁定'}")
-        print(f"     ├─ 整点检查: {'是' if is_kline_end else '否'}")
-        print(f"     ├─ 随时开仓: {'是' if self.can_open_anytime else '否'}（止盈后=是）")
-        midline_str = f"{self.current_ema_midline:.2f}" if self.current_ema_midline is not None else "N/A"
-        print(f"     └─ EMA中轨值: {midline_str}")
         
         # 🆕 检查锁定状态（止损后）
         if self.is_locked:
             if current_time is not None and self.lock_end_time is not None:
                 if current_time < self.lock_end_time:
                     remaining_minutes = (self.lock_end_time - current_time).total_seconds() / 60
-                    print(f"  🔒 【锁定中】解锁时间: {self.lock_end_time.strftime('%H:%M')}")
-                    print(f"     剩余时间: {remaining_minutes:.0f}分钟")
+                    # print(f"  🔒 【锁定中】解锁时间: {self.lock_end_time.strftime('%H:%M')}")
+                    # print(f"     剩余时间: {remaining_minutes:.0f}分钟")
                     return {
                         'can_open_long': False,
                         'can_open_short': False,
@@ -391,13 +394,13 @@ class BollingerMidlineAngleCalculator:
                     self.is_locked = False
                     self.lock_end_time = None
                     self.can_open_anytime = False  # 止损锁定期结束后，只能整点开仓
-                    print(f"  🔓 【解锁】止损锁定期结束，恢复整点开仓检查")
+                    # print(f"  🔓 【解锁】止损锁定期结束，恢复整点开仓检查")
         
         # 🆕 检查是否可以在当前时刻检查开仓
         # 规则1：整点时（is_kline_end=True）永远可以检查
         # 规则2：非整点时，只有止盈后（can_open_anytime=True）才能检查
         if not is_kline_end and not self.can_open_anytime:
-            print(f"  ⏰ 【非整点】当前非整点且非止盈后，不检查开仓（等待整点）")
+            # print(f"  ⏰ 【非整点】当前非整点且非止盈后，不检查开仓（等待整点）")
             return {
                 'can_open_long': False,
                 'can_open_short': False,
@@ -407,7 +410,7 @@ class BollingerMidlineAngleCalculator:
         
         # 如果指标未就绪，不开仓
         if len(self.midline_history) < self.window_size:
-            print(f"  ❌ 指标未就绪：中轨历史不足")
+            # print(f"  ❌ 指标未就绪：中轨历史不足")
             return {
                 'can_open_long': False,
                 'can_open_short': False,
@@ -415,20 +418,9 @@ class BollingerMidlineAngleCalculator:
                 'can_check_now': True  # 已经通过时机检查，但指标未就绪
             }
         
-        # 🔴 打印当前计算结果
-        print(f"  📈 计算结果:")
-        print(f"     ├─ 角度 (angle): {self.current_angle:.4f}°")
-        print(f"     ├─ 斜率 (slope): {self.current_slope:.4f}%/bar")
-        print(f"     ├─ R² (拟合度): {self.current_r_squared:.4f}")
-        print(f"     └─ 趋势判断: {self.current_trend}")
-        
-        print(f"  🎯 阈值条件:")
-        print(f"     ├─ 角度阈值: {self.angle_threshold}°")
-        print(f"     └─ R²阈值: {self.r_squared_threshold}")
-        
         # 检查R²是否满足阈值（必须是明确趋势，非震荡）
         if self.current_r_squared < self.r_squared_threshold:
-            print(f"  ❌ R²不满足: {self.current_r_squared:.4f} < {self.r_squared_threshold} (震荡市场)")
+            # print(f"  ❌ R²不满足: {self.current_r_squared:.4f} < {self.r_squared_threshold} (震荡市场)")
             return {
                 'can_open_long': False,
                 'can_open_short': False,
@@ -450,32 +442,17 @@ class BollingerMidlineAngleCalculator:
             current_position != 'short'  # 没有持空仓
         )
         
-        # 🔴 详细的条件检查打印
-        print(f"  🔍 开多条件检查:")
-        print(f"     ├─ 角度 > {self.angle_threshold}°: {self.current_angle:.4f}° > {self.angle_threshold}° = {self.current_angle > self.angle_threshold}")
-        print(f"     ├─ R² ≥ {self.r_squared_threshold}: {self.current_r_squared:.4f} ≥ {self.r_squared_threshold} = {self.current_r_squared >= self.r_squared_threshold}")
-        print(f"     ├─ 无持多仓: {current_position} != 'long' = {current_position != 'long'}")
-        print(f"     └─ 最终结果: {'✅ 可开多' if can_open_long else '❌ 不可开多'}")
-        
-        print(f"  🔍 开空条件检查:")
-        print(f"     ├─ 角度 < -{self.angle_threshold}°: {self.current_angle:.4f}° < -{self.angle_threshold}° = {self.current_angle < -self.angle_threshold}")
-        print(f"     ├─ R² ≥ {self.r_squared_threshold}: {self.current_r_squared:.4f} ≥ {self.r_squared_threshold} = {self.current_r_squared >= self.r_squared_threshold}")
-        print(f"     ├─ 无持空仓: {current_position} != 'short' = {current_position != 'short'}")
-        print(f"     └─ 最终结果: {'✅ 可开空' if can_open_short else '❌ 不可开空'}")
-        
         reason = ''
         if can_open_long:
             reason = f'上升趋势：角度={self.current_angle:.2f}° > {self.angle_threshold}°，R²={self.current_r_squared:.3f}'
-            print(f"  🟢 【开多信号】{reason}")
+            # print(f"  🟢 【开多信号】{reason}")
         elif can_open_short:
             reason = f'下降趋势：角度={self.current_angle:.2f}° < -{self.angle_threshold}°，R²={self.current_r_squared:.3f}'
-            print(f"  🔴 【开空信号】{reason}")
+            # print(f"  🔴 【开空信号】{reason}")
         else:
             reason = f'无信号：角度={self.current_angle:.2f}°，R²={self.current_r_squared:.3f}'
-            print(f"  ⚪ 【无信号】{reason}")
-        
-        print(f"  ==========================================\n")
-        
+            # print(f"  ⚪ 【无信号】{reason}")
+                
         # 🆕 开仓后清除"随时开仓"标记（只允许一次快速开仓）
         if can_open_long or can_open_short:
             self.can_open_anytime = False  # 开仓后恢复只能整点开仓
@@ -517,13 +494,6 @@ class BollingerMidlineAngleCalculator:
         
         # 计算总等待时间（用于显示）
         total_wait_minutes = (self.lock_end_time - current_time).total_seconds() / 60
-        
-        print(f"  🔒 【止损锁定】锁定{self.lock_period_count}个周期（包含当前周期）")
-        print(f"     止损时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"     当前周期结束: {current_period_end.strftime('%H:%M')}")
-        print(f"     再等待: {remaining_periods}个完整周期")
-        print(f"     解锁时间: {self.lock_end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"     总等待时长: {total_wait_minutes:.0f}分钟")
     
     def unlock_after_take_profit(self):
         """止盈后解锁（下一分钟立即可以开仓）"""
@@ -531,7 +501,7 @@ class BollingerMidlineAngleCalculator:
         self.lock_end_time = None
         self.last_close_reason = 'profit'
         self.can_open_anytime = True  # 🆕 止盈后可以随时开仓（每1分钟检查）
-        print(f"  🔓 【止盈解锁】下一分钟立即检查开仓（不等整点）")
+        # print(f"  🔓 【止盈解锁】下一分钟立即检查开仓（不等整点）")
     
     def _calculate_next_period_start(self, timestamp, timeframe_minutes):
         """
@@ -755,27 +725,27 @@ class ATRCalculator:
         # 打印ATR计算结果（显示当前周期的计算）
         if len(self.atr_periods) > 0:
             current_tr_value = self.atr_periods[-1]
-            print(f"    📊 ATR当前周期TR: {current_tr_value:.6f}")
+            # print(f"    📊 ATR当前周期TR: {current_tr_value:.6f}")
             
             # 如果累积数据足够，显示3周期和14周期的ATR平均值
             if len(self.atr_periods) >= 3:
                 atr_3_avg = sum(self.atr_periods[-3:]) / 3
-                print(f"        3周期ATR平均: {atr_3_avg:.6f}")
+                # print(f"        3周期ATR平均: {atr_3_avg:.6f}")
             
             if len(self.atr_periods) >= 14:
                 atr_14_avg = sum(self.atr_periods) / 14
-                print(f"        14周期ATR平均: {atr_14_avg:.6f}")
+                # print(f"        14周期ATR平均: {atr_14_avg:.6f}")
                 if len(self.atr_periods) >= 3:
                     atr_3_avg = sum(self.atr_periods[-3:]) / 3
                     atr_ratio = atr_3_avg / atr_14_avg if atr_14_avg > 0 else 0
-                    print(f"        波动率比率: {atr_ratio:.4f} (3周期/14周期)")
+                    # print(f"        波动率比率: {atr_ratio:.4f} (3周期/14周期)")
                     # 打印14周期全部波动率
-                    print(f"        14周期全部波动率: {self.atr_periods}")
+                    # print(f"        14周期全部波动率: {self.atr_periods}")
                     # 判断是否通过过滤条件
-                    if atr_ratio <= 1.3:
-                        print(f"        ✅ ATR波动率: 通过过滤 ({atr_ratio:.4f} ≤ 1.3)")
-                    else:
-                        print(f"        ❌ ATR波动率: 过高 ({atr_ratio:.4f} > 1.3)")
+                    # if atr_ratio <= 1.3:
+                        # print(f"        ✅ ATR波动率: 通过过滤 ({atr_ratio:.4f} ≤ 1.3)")
+                    # else:
+                        # print(f"        ❌ ATR波动率: 过高 ({atr_ratio:.4f} > 1.3)")
     
     def get_atr_volatility_ratio(self):
         """
@@ -1072,72 +1042,49 @@ class VIDYAIndicator:
         pivot_low = None
         
         if len(high_prices) < self.pivot_left + self.pivot_right + 1:
-            print(f"    🔍 【枢轴点检测】数据不足: {len(high_prices)} < {self.pivot_left + self.pivot_right + 1}")
             return pivot_high, pivot_low
         
         # 检测枢轴高点
         current_idx = len(high_prices) - self.pivot_right - 1
-        print(f"    🔍 【枢轴点检测】检查位置: idx={current_idx} (总长度={len(high_prices)}, 右侧偏移={self.pivot_right})")
-        
         if current_idx >= self.pivot_left:
             current_high = high_prices[current_idx]
             is_pivot_high = True
-            left_range_high = list(range(current_idx - self.pivot_left, current_idx))
-            right_range_high = list(range(current_idx + 1, current_idx + self.pivot_right + 1))
             
             # 检查左侧
-            for i in left_range_high:
+            for i in range(current_idx - self.pivot_left, current_idx):
                 if high_prices[i] >= current_high:
                     is_pivot_high = False
-                    print(f"    🔍 【枢轴高点检测】左侧K线{i}的高点{high_prices[i]:.2f} >= 当前高点{current_high:.2f}，不是枢轴高点")
                     break
             
             # 检查右侧
             if is_pivot_high:
-                for i in right_range_high:
+                for i in range(current_idx + 1, current_idx + self.pivot_right + 1):
                     if high_prices[i] >= current_high:
                         is_pivot_high = False
-                        print(f"    🔍 【枢轴高点检测】右侧K线{i}的高点{high_prices[i]:.2f} >= 当前高点{current_high:.2f}，不是枢轴高点")
                         break
             
             if is_pivot_high:
                 pivot_high = current_high
-                print(f"    ✅ 【枢轴高点】检测到: idx={current_idx}, 高点={pivot_high:.2f}")
-                print(f"      左侧范围: {left_range_high}, 右侧范围: {right_range_high}")
-                print(f"      左侧高点: {[f'{high_prices[i]:.2f}' for i in left_range_high]}")
-                print(f"      右侧高点: {[f'{high_prices[i]:.2f}' for i in right_range_high]}")
-            else:
-                print(f"    ❌ 【枢轴高点】未检测到: idx={current_idx}, 高点={current_high:.2f}")
         
         # 检测枢轴低点
         current_low = low_prices[current_idx]
         is_pivot_low = True
-        left_range_low = list(range(current_idx - self.pivot_left, current_idx))
-        right_range_low = list(range(current_idx + 1, current_idx + self.pivot_right + 1))
         
         # 检查左侧
-        for i in left_range_low:
+        for i in range(current_idx - self.pivot_left, current_idx):
             if low_prices[i] <= current_low:
                 is_pivot_low = False
-                print(f"    🔍 【枢轴低点检测】左侧K线{i}的低点{low_prices[i]:.2f} <= 当前低点{current_low:.2f}，不是枢轴低点")
                 break
         
         # 检查右侧
         if is_pivot_low:
-            for i in right_range_low:
+            for i in range(current_idx + 1, current_idx + self.pivot_right + 1):
                 if low_prices[i] <= current_low:
                     is_pivot_low = False
-                    print(f"    🔍 【枢轴低点检测】右侧K线{i}的低点{low_prices[i]:.2f} <= 当前低点{current_low:.2f}，不是枢轴低点")
                     break
         
         if is_pivot_low:
             pivot_low = current_low
-            print(f"    ✅ 【枢轴低点】检测到: idx={current_idx}, 低点={pivot_low:.2f}")
-            print(f"      左侧范围: {left_range_low}, 右侧范围: {right_range_low}")
-            print(f"      左侧低点: {[f'{low_prices[i]:.2f}' for i in left_range_low]}")
-            print(f"      右侧低点: {[f'{low_prices[i]:.2f}' for i in right_range_low]}")
-        else:
-            print(f"    ❌ 【枢轴低点】未检测到: idx={current_idx}, 低点={current_low:.2f}")
         
         return pivot_high, pivot_low
     
@@ -1186,14 +1133,18 @@ class VIDYAIndicator:
             if self.current_kline_volume > 0 and open_price is not None:
                 # 🔴 使用传入的聚合K线的开盘价和收盘价判断涨跌
                 if close_price > open_price:
-                    # 阳线：总成交量归为买入量
-                    self.buy_volume_history.append(self.current_kline_volume)
+                    # 阳线：总成交量归为买入量，只记实体住
+                    real_volume = self.current_kline_volume * (close_price - open_price) / (high_price - low_price)
+                    self.buy_volume_history.append(real_volume)
+                    # self.buy_volume_history.append(self.current_kline_volume)
                     self.sell_volume_history.append(0)
                     kline_type = "阳线(买入)"
                 elif close_price < open_price:
                     # 阴线：总成交量归为卖出量
+                    real_volume = self.current_kline_volume * (open_price -close_price) / (high_price - low_price)
+                    self.sell_volume_history.append(real_volume)
                     self.buy_volume_history.append(0)
-                    self.sell_volume_history.append(self.current_kline_volume)
+                    # self.sell_volume_history.append(self.current_kline_volume)
                     kline_type = "阴线(卖出)"
                 else:
                     # 十字星：不计入买卖量
@@ -1206,7 +1157,7 @@ class VIDYAIndicator:
                     self.buy_volume_history = self.buy_volume_history[-self.delta_volume_period:]
                     self.sell_volume_history = self.sell_volume_history[-self.delta_volume_period:]
                 
-                print(f"    📊 【固定周期DV】K线完成，保存: {kline_type} Open={open_price:.2f}, Close={close_price:.2f}, Vol={self.current_kline_volume:,.0f} | 历史长度={len(self.buy_volume_history)}")
+                # print(f"    📊 【固定周期DV】K线完成，保存: {kline_type} Open={open_price:.2f}, Close={close_price:.2f}, Vol={self.current_kline_volume:,.0f} | 历史长度={len(self.buy_volume_history)}")
             
             # 重置当前K线累积（开始新的聚合周期）
             self.current_kline_volume = 0
@@ -1310,26 +1261,16 @@ class VIDYAIndicator:
                     # 支撑位：枢轴低点在当前价格下方
                     if pivot_low < close_price:
                         support_level = pivot_low
-                        print(f"    📈 【支撑位检测】添加支撑位: {support_level:.2f} (枢轴低点 < 当前价格{close_price:.2f})")
-                    else:
-                        print(f"    ⚠️  【支撑位检测】枢轴低点{pivot_low:.2f} >= 当前价格{close_price:.2f}，不添加为支撑位")
-                else:
-                    print(f"    ⚠️  【支撑位检测】未检测到枢轴低点")
+                        # print(f"    📈 检测到支撑位: {support_level:.2f} (枢轴低点 < 当前价格{close_price:.2f})")
                 
                 if pivot_high is not None:
                     # 阻力位：枢轴高点在当前价格上方
                     if pivot_high > close_price:
                         resistance_level = pivot_high
-                        print(f"    📉 【阻力位检测】添加阻力位: {resistance_level:.2f} (枢轴高点 > 当前价格{close_price:.2f})")
-                    else:
-                        print(f"    ⚠️  【阻力位检测】枢轴高点{pivot_high:.2f} <= 当前价格{close_price:.2f}，不添加为阻力位")
-                else:
-                    print(f"    ⚠️  【阻力位检测】未检测到枢轴高点")
+                        # print(f"    📉 检测到阻力位: {resistance_level:.2f} (枢轴高点 > 当前价格{close_price:.2f})")
                 
                 # 更新支撑阻力历史
-                print(f"    💾 【支撑阻力存储】更新前 - 支撑位历史: {self.support_levels}, 阻力位历史: {self.resistance_levels}")
                 self._update_support_resistance(pivot_high, pivot_low, support_level, resistance_level)
-                print(f"    💾 【支撑阻力存储】更新后 - 支撑位历史: {self.support_levels}, 阻力位历史: {self.resistance_levels}")
             
             # 🔴 修正：基于穿越逻辑判断趋势方向（符合Pine Script逻辑）
             self.previous_trend = self.current_trend
@@ -1393,7 +1334,7 @@ class VIDYAIndicator:
             
             # 🔴 当穿越信号变化时重置成交量（Pine Script逻辑）
             if cross_up_changed or cross_down_changed:
-                print(f"    🔄 穿越信号变化，重置成交量: cross_up({self.prev_trend_cross_up}→{self.trend_cross_up}), cross_down({self.prev_trend_cross_down}→{self.trend_cross_down})")
+                # print(f"    🔄 穿越信号变化，重置成交量: cross_up({self.prev_trend_cross_up}→{self.trend_cross_up}), cross_down({self.prev_trend_cross_down}→{self.trend_cross_down})")
                 self.buy_volume = 0
                 self.sell_volume = 0
                 # 🔴 不再清空支撑阻力位，保留历史数据用于交易决策
@@ -1465,39 +1406,7 @@ class VIDYAIndicator:
             # 检查预热状态
             if not self.is_warmed_up and self.warmup_data_count >= self.required_warmup:
                 self.is_warmed_up = True
-                print(f"    ✅ 标准VIDYA指标预热完成！")
-        
-            # 调试信息
-            if self.is_warmed_up:
-                print(f"    📊 VIDYA: {self.current_vidya:.2f} | 平滑VIDYA: {smoothed_vidya:.2f}")
-                print(f"    💫 CMO: {abs_cmo:.2f} | Alpha: {adjusted_alpha:.4f}")
-                
-                # 🔴 显示VIDYA斜率信息
-                slope_direction = "📈上升" if self.vidya_is_rising else "📉下降" if self.vidya_is_falling else "➡️平缓"
-                print(f"    🎯 VIDYA斜率: {self.vidya_slope:.4f} ({slope_direction})")
-                if current_atr is not None:
-                    print(f"    📏 ATR: {current_atr:.2f} | 上轨: {upper_band:.2f} | 下轨: {lower_band:.2f}")
-                print(f"    🎯 趋势: {self.current_trend} | 价格: {close_price:.2f}")
-                
-                # 🔴 显示EMA指标
-                ema_slope_direction = "📈上升" if self.ema_120_is_rising else "📉下降" if self.ema_120_is_falling else "➡️平缓"
-                print(f"    📈 EMA50: {self.current_ema_50:.2f} | EMA120(原始): {self.current_ema_120:.2f} | EMA120(SMA50平滑): {self.current_ema_120_smoothed:.2f}")
-                print(f"    📊 EMA120斜率: {self.ema_120_slope:.2f} ({ema_slope_direction})")
-                print(f"    📊 成交量压力(动态): 买入={self.buy_volume:,.0f} | 卖出={self.sell_volume:,.0f} | Delta={self.delta_volume:+,.0f}")
-                print(f"    📊 固定周期DV({self.delta_volume_period}): Delta%={self.delta_volume_percent_fixed:+.2f}% | Delta={self.delta_volume_fixed:+,.0f} | 当前K线量={self.current_kline_volume:,.0f}")
-                if pivot_high is not None:
-                    print(f"    🔺 枢轴高点: {pivot_high:.2f}")
-                if pivot_low is not None:
-                    print(f"    🔻 枢轴低点: {pivot_low:.2f}")
-                if self.support_levels:
-                    print(f"    📈 支撑线: {self.support_levels[-1]:.2f}")
-                if self.resistance_levels:
-                    print(f"    📉 阻力线: {self.resistance_levels[-1]:.2f}")
-                
-                if trend_changed:
-                    print(f"    🔄 【VIDYA趋势转换】{self.previous_trend} → {self.current_trend}")
-            else:
-                print(f"    🔥 VIDYA预热中 {self.warmup_data_count}/{self.required_warmup} | VIDYA: {self.current_vidya:.2f}")
+                # print(f"    ✅ 标准VIDYA指标预热完成！")
             
             return {
                 'vidya': self.current_vidya,
@@ -1535,7 +1444,7 @@ class VIDYAIndicator:
             }
         else:
             # 数据不足
-            print(f"    🔥 VIDYA预热中 {self.warmup_data_count}/{self.required_warmup} | 数据累积: {len(self.close_history)}/{self.vidya_momentum + 1}")
+            # print(f"    🔥 VIDYA预热中 {self.warmup_data_count}/{self.required_warmup} | 数据累积: {len(self.close_history)}/{self.vidya_momentum + 1}")
             return {
                 'vidya': None,
                 'smoothed_vidya': None,
@@ -1584,7 +1493,7 @@ class TrendVolumaticDynamicAverageStrategy:
                  bb_angle_threshold=0.3,
                  bb_r_squared_threshold=0.6,
                  bb_stop_loss_lock_periods=5,
-                 bb_max_loss_pct=1.0,
+                 bb_max_loss_pct=2.0,
                  enable_bb_angle_entry=False, **kwargs):
         """
         初始化纯VIDYA策略
@@ -1630,9 +1539,9 @@ class TrendVolumaticDynamicAverageStrategy:
             pivot_right=vidya_pivot_right,
             delta_volume_period=delta_volume_period  # 🔴 传入固定周期Delta Volume参数
         )
-        print(f"📊 标准VIDYA指标已初始化: length={vidya_length}, momentum={vidya_momentum}, smooth={vidya_smooth}")
-        print(f"📏 ATR带宽: distance={vidya_band_distance}, period={vidya_atr_period}")
-        print(f"🔍 枢轴点: left={vidya_pivot_left}, right={vidya_pivot_right}")
+        # print(f"📊 标准VIDYA指标已初始化: length={vidya_length}, momentum={vidya_momentum}, smooth={vidya_smooth}")
+        # print(f"📏 ATR带宽: distance={vidya_band_distance}, period={vidya_atr_period}")
+        # print(f"🔍 枢轴点: left={vidya_pivot_left}, right={vidya_pivot_right}")
         
         # 🔴 初始化布林带中轨角度计算器（基于30分钟K线）
         self.bb_angle_calculator = BollingerMidlineAngleCalculator(
@@ -1650,20 +1559,20 @@ class TrendVolumaticDynamicAverageStrategy:
         midline_time_hours = (bb_midline_period * timeframe_minutes) / 60
         window_time_hours = (bb_angle_window_size * timeframe_minutes) / 60
         
-        print(f"📐 布林带中轨角度计算器已初始化（基于{timeframe}周期，整点开仓）:")
-        print(f"   ├─ EMA中轨周期: {bb_midline_period}根K线 (≈{midline_time_hours:.1f}小时) - 第一层平滑")
-        print(f"   ├─ 角度计算窗口: {bb_angle_window_size}根K线 (≈{window_time_hours:.1f}小时) - 第二层分析")
-        print(f"   ├─ 角度阈值: {bb_angle_threshold}° (趋势判断)")
-        print(f"   ├─ R²阈值: {bb_r_squared_threshold} (趋势质量过滤)")
-        print(f"   ├─ 止损锁定: {bb_stop_loss_lock_periods}个周期 (包含当前周期，实际等待{bb_stop_loss_lock_periods-1}个完整周期)")
-        print(f"   └─ 独立开仓: {'✅ 启用' if enable_bb_angle_entry else '❌ 禁用'}")
+        # print(f"📐 布林带中轨角度计算器已初始化（基于{timeframe}周期，整点开仓）:")
+        # print(f"   ├─ EMA中轨周期: {bb_midline_period}根K线 (≈{midline_time_hours:.1f}小时) - 第一层平滑")
+        # print(f"   ├─ 角度计算窗口: {bb_angle_window_size}根K线 (≈{window_time_hours:.1f}小时) - 第二层分析")
+        # print(f"   ├─ 角度阈值: {bb_angle_threshold}° (趋势判断)")
+        # print(f"   ├─ R²阈值: {bb_r_squared_threshold} (趋势质量过滤)")
+        # print(f"   ├─ 止损锁定: {bb_stop_loss_lock_periods}个周期 (包含当前周期，实际等待{bb_stop_loss_lock_periods-1}个完整周期)")
+        # print(f"   └─ 独立开仓: {'✅ 启用' if enable_bb_angle_entry else '❌ 禁用'}")
         
         if enable_bb_angle_entry:
             lock_time_hours = (bb_stop_loss_lock_periods - 1) * timeframe_minutes / 60
-            print(f"   💡 提示: ")
-            print(f"      • 整点开仓：只在{timeframe}周期结束时检查开仓（初始状态）")
-            print(f"      • 止盈后：下一分钟立即可开仓（不等整点）✨")
-            print(f"      • 止损后：锁定约{lock_time_hours:.1f}小时，然后整点才可开仓")
+            # print(f"   💡 提示: ")
+            # print(f"      • 整点开仓：只在{timeframe}周期结束时检查开仓（初始状态）")
+            # print(f"      • 止盈后：下一分钟立即可开仓（不等整点）✨")
+            # print(f"      • 止损后：锁定约{lock_time_hours:.1f}小时，然后整点才可开仓")
         
         # 🔴 开仓条件配置（独立开关）
         self.entry_condition_trend_breakthrough = entry_condition_trend_breakthrough
@@ -1672,12 +1581,12 @@ class TrendVolumaticDynamicAverageStrategy:
         self.entry_condition_delta_volume = entry_condition_delta_volume
         self.entry_condition_ema_120_slope = entry_condition_ema_120_slope
         
-        print(f"🎯 开仓条件配置（开启的条件必须全部满足）:")
-        print(f"   1️⃣ 趋势突破: {'✅' if entry_condition_trend_breakthrough else '❌'}")
-        print(f"   2️⃣ 箭头信号: {'✅' if entry_condition_arrow_signal else '❌'}")
-        print(f"   3️⃣ VIDYA斜率: {'✅' if entry_condition_vidya_slope else '❌'}")
-        print(f"   4️⃣ Delta Volume: {'✅' if entry_condition_delta_volume else '❌'}")
-        print(f"   5️⃣ EMA120斜率: {'✅' if entry_condition_ema_120_slope else '❌'}")
+        # print(f"🎯 开仓条件配置（开启的条件必须全部满足）:")
+        # print(f"   1️⃣ 趋势突破: {'✅' if entry_condition_trend_breakthrough else '❌'}")
+        # print(f"   2️⃣ 箭头信号: {'✅' if entry_condition_arrow_signal else '❌'}")
+        # print(f"   3️⃣ VIDYA斜率: {'✅' if entry_condition_vidya_slope else '❌'}")
+        # print(f"   4️⃣ Delta Volume: {'✅' if entry_condition_delta_volume else '❌'}")
+        # print(f"   5️⃣ EMA120斜率: {'✅' if entry_condition_ema_120_slope else '❌'}")
         
         # 初始化独立的波动率计算器
         self.volatility_calculator = VolatilityCalculator(
@@ -1698,7 +1607,7 @@ class TrendVolumaticDynamicAverageStrategy:
         # 初始化ATR计算器
         self.atr_calculator = ATRCalculator()
         
-        print(f"📊 纯VIDYA策略模式: 主周期({timeframe})")
+        # print(f"📊 纯VIDYA策略模式: 主周期({timeframe})")
         
         # 资金配置
         self.initial_capital = initial_capital
@@ -1708,7 +1617,7 @@ class TrendVolumaticDynamicAverageStrategy:
         # 止盈止损配置
         self.fixed_take_profit_pct = fixed_take_profit_pct
         self.max_loss_pct = max_loss_pct
-        self.bb_max_loss_pct = bb_max_loss_pct  # 🔴 布林带角度开仓的最大亏损百分比
+        self.bb_max_loss_pct = bb_max_loss_pct  # 布林带角度开仓专用止损比例
         
         # 单周期交易状态
         self.position = None
@@ -1750,28 +1659,11 @@ class TrendVolumaticDynamicAverageStrategy:
         # 开单类型是VIDYA还是布林带角度
         self.is_bb_angle_entry = False
         
-        # 🔴 初始化钉钉推送器
-        dingtalk_webhook = kwargs.get('dingtalk_webhook', None)
-        dingtalk_secret = kwargs.get('dingtalk_secret', None)
-        print(f"🔍 钉钉配置调试: webhook={dingtalk_webhook}, secret={dingtalk_secret}")
-        if dingtalk_webhook:
-            self.dingtalk_notifier = DingTalkNotifier(dingtalk_webhook, dingtalk_secret)
-            if dingtalk_secret:
-                print(f"📱 钉钉消息推送已启用（加签模式）")
-            else:
-                print(f"📱 钉钉消息推送已启用")
-        else:
-            self.dingtalk_notifier = None
-            print(f"📱 钉钉消息推送未配置")
-        
     def warmup_filter(self, historical_data):
         """使用历史数据预热VIDYA指标"""
         if not historical_data:
-            print("⚠️  没有历史数据可用于预热")
+            # print("⚠️  没有历史数据可用于预热")
             return
-            
-        print(f"🔥 开始使用 {len(historical_data)} 条历史数据预热指标...")
-        print(f"   📊 VIDYA指标、波动率计算器、EMA计算器")
         
         kline_count = 0
         
@@ -1818,21 +1710,79 @@ class TrendVolumaticDynamicAverageStrategy:
                 if kline_count <= 5:
                     vidya_value = vidya_result.get('vidya')
                     vidya_str = f"{vidya_value:.2f}" if vidya_value is not None else 'N/A'
-                    print(f"    🟢 {self.timeframe} K线 #{kline_count}: {new_kline['timestamp'].strftime('%H:%M')} | "
-                          f"VIDYA: {vidya_str}")
-            
-            if (i + 1) % 100 == 0:
-                print(f"    预热进度: {i+1}/{len(historical_data)} | {self.timeframe} K线: {kline_count}个")
-        
-        print(f"✅ 指标预热完成！")
-        print(f"  📊 {self.timeframe}周期: {kline_count}个K线")
-        print(f"  🎯 VIDYA预热状态: {'完成' if self.vidya_indicator.is_warmed_up else '未完成'}")
+                    # print(f"    🟢 {self.timeframe} K线 #{kline_count}: {new_kline['timestamp'].strftime('%H:%M')} | "
+                        #   f"VIDYA: {vidya_str}")
         
         # 预热后重置方向，确保第一次运行能检测到方向改变
         self.current_trend_direction = None
         self.previous_trend_direction = None
         
-        print(f"📊 策略已准备好，等待{self.timeframe}VIDYA趋势改变触发开仓！")
+    
+    def cleanup_memory(self):
+        """清理内存，防止批量回测时内存过大"""
+        try:
+            # 1. 清理历史数据（保留最近的数据）
+            max_history_size = 500  # 最多保留500个历史数据点（内存优化）
+            
+            # 清理价格历史
+            if hasattr(self, 'close_history') and len(self.close_history) > max_history_size:
+                self.close_history = self.close_history[-max_history_size:]
+            
+            # 清理成交量历史
+            if hasattr(self, 'buy_volume_history') and len(self.buy_volume_history) > max_history_size:
+                self.buy_volume_history = self.buy_volume_history[-max_history_size:]
+                self.sell_volume_history = self.sell_volume_history[-max_history_size:]
+            
+            # 清理支撑阻力位历史（保留最近30个）
+            if hasattr(self, 'support_levels') and len(self.support_levels) > 30:
+                self.support_levels = self.support_levels[-30:]
+            if hasattr(self, 'resistance_levels') and len(self.resistance_levels) > 30:
+                self.resistance_levels = self.resistance_levels[-30:]
+            
+            # 清理ATR历史
+            if hasattr(self, 'atr_periods') and len(self.atr_periods) > 50:
+                self.atr_periods = self.atr_periods[-50:]
+            
+            # 2. 清理布林带角度计算器的历史数据
+            if hasattr(self, 'bb_angle_calculator'):
+                if hasattr(self.bb_angle_calculator, 'midline_history') and len(self.bb_angle_calculator.midline_history) > max_history_size:
+                    self.bb_angle_calculator.midline_history = self.bb_angle_calculator.midline_history[-max_history_size:]
+            
+            # 3. 清理VIDYA指标的历史数据
+            if hasattr(self, 'vidya_indicator'):
+                if hasattr(self.vidya_indicator, 'close_history') and len(self.vidya_indicator.close_history) > max_history_size:
+                    self.vidya_indicator.close_history = self.vidya_indicator.close_history[-max_history_size:]
+                
+                if hasattr(self.vidya_indicator, 'vidya_history') and len(self.vidya_indicator.vidya_history) > max_history_size:
+                    self.vidya_indicator.vidya_history = self.vidya_indicator.vidya_history[-max_history_size:]
+            
+            # 4. 清理EMA计算器的历史数据
+            if hasattr(self, 'ema_calculator'):
+                if hasattr(self.ema_calculator, 'close_history') and len(self.ema_calculator.close_history) > max_history_size:
+                    self.ema_calculator.close_history = self.ema_calculator.close_history[-max_history_size:]
+            
+            # 5. 清理波动率计算器的历史数据
+            if hasattr(self, 'volatility_calculator'):
+                if hasattr(self.volatility_calculator, 'close_history') and len(self.volatility_calculator.close_history) > max_history_size:
+                    self.volatility_calculator.close_history = self.volatility_calculator.close_history[-max_history_size:]
+            
+            # 6. 强制垃圾回收
+            gc.collect()
+            
+        except Exception as e:
+            # 内存清理失败不应该影响策略运行
+            pass
+    
+    def periodic_memory_cleanup(self, cleanup_interval=1000):
+        """定期内存清理，在特定间隔调用"""
+        if not hasattr(self, '_update_count'):
+            self._update_count = 0
+        
+        self._update_count += 1
+        
+        # 每1000次更新清理一次内存
+        if self._update_count % cleanup_interval == 0:
+            self.cleanup_memory()
         
     def _update_fixed_delta_volume(self):
         """每1分钟更新固定周期Delta Volume计算"""
@@ -1869,21 +1819,7 @@ class TrendVolumaticDynamicAverageStrategy:
     
     def update(self, timestamp, open_price, high_price, low_price, close_price, volume=0):
         """处理1分钟K线数据 - 单周期模式（集成VIDYA）"""
-        # 🔴 启动时验证：如果策略认为有持仓但entry_price无效，清空状态（避免误判）
-        if self.position is not None:
-            if self.entry_price is None or self.entry_price <= 0:
-                print(f"  ⚠️  【启动验证】策略状态显示有持仓(position={self.position})，但无有效开仓价格(entry_price={self.entry_price})")
-                print(f"  ⚠️  清空策略持仓状态，避免生成错误的UPDATE_STOP_LOSS信号")
-                self.position = None
-                self.entry_price = None
-                self.stop_loss_level = None
-                self.take_profit_level = None
-                self.max_loss_level = None
-                self.position_shares = None
-                self.current_invested_amount = 0
-                self.waiting_for_dv_target = False
-                self.target_dv_percent = None
-        
+
         signal_info = {
             'timestamp': timestamp,
             'timeframe': self.timeframe,
@@ -1923,13 +1859,13 @@ class TrendVolumaticDynamicAverageStrategy:
         if new_kline is not None:
             
             timeframe_minutes = self.timeframe_manager.get_timeframe_minutes()
-            print(f"[{self.timeframe}] 新K线生成: {new_kline['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} | "
-                  f"OHLC: {new_kline['open']:.2f}/{new_kline['high']:.2f}/{new_kline['low']:.2f}/{new_kline['close']:.2f}")
+            # print(f"[{self.timeframe}] 新K线生成: {new_kline['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} | "
+                #   f"OHLC: {new_kline['open']:.2f}/{new_kline['high']:.2f}/{new_kline['low']:.2f}/{new_kline['close']:.2f}")
             
             kline_end_time = new_kline['timestamp'] + timedelta(minutes=timeframe_minutes-1, seconds=59)
             indicator_available_time = new_kline['timestamp'] + timedelta(minutes=timeframe_minutes)
             
-            print(f"      📅 K线数据时间范围: {new_kline['timestamp'].strftime('%H:%M')} - {kline_end_time.strftime('%H:%M')}")
+            # print(f"      📅 K线数据时间范围: {new_kline['timestamp'].strftime('%H:%M')} - {kline_end_time.strftime('%H:%M')}")
             
             # 3.1. 在新K线生成时计算ATR（整个周期结束时）
             self.atr_calculator.update_kline_end(
@@ -1966,24 +1902,9 @@ class TrendVolumaticDynamicAverageStrategy:
             # 🔴 保存当前的EMA120平滑值（用于1分钟平仓检查）
             self.current_ema_120_smoothed = vidya_result.get('ema_120')
             
-            # 🔴 显示VIDYA信息
-            if vidya_result.get('vidya') is not None:
-                print(f"  🎯 {self.timeframe} VIDYA: {vidya_result['vidya']:.2f} | "
-                      f"平滑VIDYA: {vidya_result['smoothed_vidya']:.2f} | "
-                      f"趋势: {vidya_result['trend']}")
-                print(f"  💫 {self.timeframe} CMO: {vidya_result['cmo']:.2f} | "
-                      f"Alpha: {vidya_result['alpha']:.4f}")
-                if vidya_result.get('delta_volume', 0) != 0:
-                    print(f"  📊 {self.timeframe} 成交量压力: "
-                          f"买入={vidya_result['buy_volume']:,.0f} | "
-                          f"卖出={vidya_result['sell_volume']:,.0f} | "
-                          f"Delta={vidya_result['delta_volume']:+,.0f}")
-            
-            print(f"  🎯 {self.timeframe}指标可用时间: {indicator_available_time.strftime('%H:%M')} (K线完成后)")
-            
             # 🆕 3.4. 检查布林带角度整点开仓（优先级最高）
             self._check_bb_angle_entry_at_kline_end(
-                new_kline['open'],  # 🔴 使用下一根K线的开盘价（即当前K线的收盘价）
+                open_price,  # 🔴 使用下一根K线的开盘价（即当前K线的收盘价）
                 timestamp,
                 signal_info,
                 bb_angle_result
@@ -1991,33 +1912,10 @@ class TrendVolumaticDynamicAverageStrategy:
             
             # 3.5. 使用VIDYA交易逻辑（只在没有被布林带角度开仓时执行）
             if self.position is None:
-                self._check_vidya_trend_change(vidya_result, open_price, signal_info)
-
-            print(f"  🔍 new_kline: {new_kline}")
-
-            # 🔴 3.6. 周期结束时更新止损单（比较三个止损价，选择距离当前价格最近的一个）
-            # 🔴 增加严格检查：必须有持仓且开仓价格有效（确保是真的有持仓，而不是状态不一致）
-            if self.position is not None:
-                if self.entry_price is not None and self.entry_price > 0:
-                    print(f"  🔍 检查持仓状态: position={self.position}, entry_price={self.entry_price}")
-                    self._update_stop_loss_order(new_kline['close'], signal_info)
-                else:
-                    # 🔴 状态不一致：有持仓标识但无有效开仓价格，清空策略状态，避免生成错误的UPDATE_STOP_LOSS信号
-                    print(f"  ⚠️  【警告】策略状态显示有持仓(position={self.position})，但无有效开仓价格(entry_price={self.entry_price})")
-                    print(f"  ⚠️  可能状态不一致，清空策略持仓状态，避免生成错误的UPDATE_STOP_LOSS信号")
-                    print(f"  💡 清空后，策略会在下次周期检查开仓条件")
-                    self.position = None
-                    self.entry_price = None
-                    self.stop_loss_level = None
-                    self.take_profit_level = None
-                    self.max_loss_level = None
-                    self.position_shares = None
-                    self.current_invested_amount = 0
-
-            # 4. 🔴 不再使用VIDYA动态止损（已取消）
-            # if self.position is not None:
-            #     # 🔴 VIDYA追踪止损（跟随带宽）
-            #     self._update_vidya_trailing_stop(vidya_result, signal_info)
+                self._check_vidya_trend_change(vidya_result, open_price, signal_info,timestamp)
+            
+            # 3.6. 定期内存清理
+            self.periodic_memory_cleanup(cleanup_interval=200)  # 每200次更新清理一次（内存优化）
         
         # 5. 基于1分钟K线检查平仓触发（每个1分钟数据都检查）
         self._check_stop_position_trigger_1min(timestamp, open_price, high_price, low_price, close_price, signal_info)
@@ -2046,123 +1944,25 @@ class TrendVolumaticDynamicAverageStrategy:
             is_kline_end=True  # 🆕 标记为整点检查
         )
         
-        print(f"\n  📐 ========== 整点布林带角度开仓检查 ==========")
-        print(f"  🕐 时间: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"  📊 锁定状态: {'🔒 已锁定' if self.bb_angle_calculator.is_locked else '🔓 未锁定'}")
-        
         if self.bb_angle_calculator.is_locked:
-            lock_reason = f"止损锁定中，解锁时间: {self.bb_angle_calculator.lock_end_time.strftime('%H:%M')}"
-            print(f"  ⏳ 解锁时间: {self.bb_angle_calculator.lock_end_time.strftime('%H:%M')}")
-            
-            # 🔴 推送不开仓消息（锁定状态）
-            print(f"\n{'='*60}")
-            print(f"📊 【周期结束 - 不开仓】")
-            print(f"  原因: {lock_reason}")
-            print(f"{'='*60}\n")
-            
-            if self.dingtalk_notifier:
-                try:
-                    content = f"## ⏸️ 周期结束 - 不开仓\n\n"
-                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    content += f"---\n\n"
-                    content += f"**📊 开仓类型**: 布林带角度开仓\n\n"
-                    content += f"**❌ 状态**: 不开仓\n\n"
-                    content += f"**📝 原因**: {lock_reason}\n\n"
-                    content += f"**🔒 解锁时间**: {self.bb_angle_calculator.lock_end_time.strftime('%H:%M')}\n\n"
-                    self.dingtalk_notifier.send_message("⏸️ 不开仓 - 止损锁定中", content)
-                except Exception as e:
-                    print(f"  ⚠️  推送钉钉消息失败: {e}")
-            
-            print(f"  =============================================\n")
+            # print(f"  ⏳ 解锁时间: {self.bb_angle_calculator.lock_end_time.strftime('%H:%M')}")
+            # print(f"  =============================================\n")
             return
         
         # 🔴 判断开仓信号
         if bb_angle_signal['can_open_long']:
             reason = f"布林带角度整点开多 | {bb_angle_signal['reason']}"
-            print(f"  🟢 【布林带角度开多】{bb_angle_signal['reason']}")
-            
-            # 🔴 打印开仓信息并推送钉钉
-            entry_type = "布林带角度立即开仓"
-            print(f"\n{'='*60}")
-            print(f"📊 【周期结束 - 开仓信号】")
-            print(f"  开仓类型: {entry_type}")
-            print(f"  开仓方向: 做多 (LONG)")
-            print(f"  开仓价格: ${entry_price:.2f}")
-            print(f"  立即挂单（使用买3/卖3价格）")
-            print(f"{'='*60}\n")
-            
-            # 推送钉钉消息
-            if self.dingtalk_notifier:
-                try:
-                    content = f"## 🎯 周期结束 - 开仓信号\n\n"
-                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    content += f"---\n\n"
-                    content += f"**📊 开仓类型**: {entry_type}\n\n"
-                    content += f"**📈 开仓方向**: 做多 (LONG)\n\n"
-                    content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
-                    content += f"**⚡ 挂单方式**: 立即挂单（使用买3/卖3价格）\n\n"
-                    content += f"**📝 原因**: {reason}\n\n"
-                    self.dingtalk_notifier.send_message("🎯 开仓信号 - 布林带角度立即开仓", content)
-                except Exception as e:
-                    print(f"  ⚠️  推送钉钉消息失败: {e}")
-            
+            # print(f"  🟢 【布林带角度开多】{bb_angle_signal['reason']}")
             self._execute_bb_angle_entry('long', entry_price, signal_info, reason)
             
         elif bb_angle_signal['can_open_short']:
             reason = f"布林带角度整点开空 | {bb_angle_signal['reason']}"
-            print(f"  🔴 【布林带角度开空】{bb_angle_signal['reason']}")
-            
-            # 🔴 打印开仓信息并推送钉钉
-            entry_type = "布林带角度立即开仓"
-            print(f"\n{'='*60}")
-            print(f"📊 【周期结束 - 开仓信号】")
-            print(f"  开仓类型: {entry_type}")
-            print(f"  开仓方向: 做空 (SHORT)")
-            print(f"  开仓价格: ${entry_price:.2f}")
-            print(f"  立即挂单（使用买3/卖3价格）")
-            print(f"{'='*60}\n")
-            
-            # 推送钉钉消息
-            if self.dingtalk_notifier:
-                try:
-                    content = f"## 🎯 周期结束 - 开仓信号\n\n"
-                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    content += f"---\n\n"
-                    content += f"**📊 开仓类型**: {entry_type}\n\n"
-                    content += f"**📉 开仓方向**: 做空 (SHORT)\n\n"
-                    content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
-                    content += f"**⚡ 挂单方式**: 立即挂单（使用买3/卖3价格）\n\n"
-                    content += f"**📝 原因**: {reason}\n\n"
-                    self.dingtalk_notifier.send_message("🎯 开仓信号 - 布林带角度立即开仓", content)
-                except Exception as e:
-                    print(f"  ⚠️  推送钉钉消息失败: {e}")
-            
+            # print(f"  🔴 【布林带角度开空】{bb_angle_signal['reason']}")
             self._execute_bb_angle_entry('short', entry_price, signal_info, reason)
-        else:
-            # 🔴 没有开仓信号，推送不开仓消息
-            no_entry_reason = bb_angle_signal.get('reason', '无开仓信号')
-            print(f"\n{'='*60}")
-            print(f"📊 【周期结束 - 不开仓】")
-            print(f"  开仓类型: 布林带角度开仓")
-            print(f"  原因: {no_entry_reason}")
-            print(f"{'='*60}\n")
-            
-            # 推送钉钉消息
-            if self.dingtalk_notifier:
-                try:
-                    content = f"## ⏸️ 周期结束 - 不开仓\n\n"
-                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    content += f"---\n\n"
-                    content += f"**📊 开仓类型**: 布林带角度开仓\n\n"
-                    content += f"**❌ 状态**: 不开仓\n\n"
-                    content += f"**📝 原因**: {no_entry_reason}\n\n"
-                    self.dingtalk_notifier.send_message("⏸️ 不开仓 - 布林带角度", content)
-                except Exception as e:
-                    print(f"  ⚠️  推送钉钉消息失败: {e}")
         
-        print(f"  =============================================\n")
+        # print(f"  =============================================\n")
 
-    def _check_vidya_trend_change(self, vidya_result, open_price, signal_info):
+    def _check_vidya_trend_change(self, vidya_result, open_price, signal_info,timestamp):
         """检查VIDYA方向改变，触发标准VIDYA交易信号（新逻辑：支撑阻力位开仓）"""
         # 检查VIDYA是否预热完成且有有效数据
         if not vidya_result.get('is_warmed_up', False) or vidya_result.get('smoothed_vidya') is None:
@@ -2180,30 +1980,14 @@ class TrendVolumaticDynamicAverageStrategy:
         all_support_levels = self.vidya_indicator.support_levels if self.vidya_indicator.support_levels else []
         all_resistance_levels = self.vidya_indicator.resistance_levels if self.vidya_indicator.resistance_levels else []
         
-        print(f"\n  🔍 【支撑阻力筛选】开始筛选 (当前价格: {open_price:.2f})")
-        print(f"     所有支撑位历史: {[f'{s:.2f}' for s in all_support_levels]} (共{len(all_support_levels)}个)")
-        print(f"     所有阻力位历史: {[f'{r:.2f}' for r in all_resistance_levels]} (共{len(all_resistance_levels)}个)")
-        
         # 🔴 筛选有效的支撑阻力位（基于当前价格，不过滤距离）
         # 支撑位：在当前价格下方，选择最接近的（价格最高的）
         valid_supports = [s for s in all_support_levels if s < open_price]
-        supports_above = [s for s in all_support_levels if s >= open_price]
-        print(f"     价格下方支撑位: {[f'{s:.2f}' for s in valid_supports]} (共{len(valid_supports)}个)")
-        if supports_above:
-            print(f"     价格上方支撑位(已跌破): {[f'{s:.2f}' for s in supports_above]} (共{len(supports_above)}个)")
         support_level = max(valid_supports) if valid_supports else None  # 价格下方最高的
         
         # 阻力位：在当前价格上方，选择最接近的（价格最低的）
         valid_resistances = [r for r in all_resistance_levels if r > open_price]
-        resistances_below = [r for r in all_resistance_levels if r <= open_price]
-        print(f"     价格上方阻力位: {[f'{r:.2f}' for r in valid_resistances]} (共{len(valid_resistances)}个)")
-        if resistances_below:
-            print(f"     价格下方阻力位(已突破): {[f'{r:.2f}' for r in resistances_below]} (共{len(resistances_below)}个)")
         resistance_level = min(valid_resistances) if valid_resistances else None  # 价格上方最低的
-        
-        support_str = f"{support_level:.2f}" if support_level is not None else "None"
-        resistance_str = f"{resistance_level:.2f}" if resistance_level is not None else "None"
-        print(f"     最终选择 - 支撑位: {support_str}, 阻力位: {resistance_str}")
         
         # 🔴 获取VIDYA斜率信息
         vidya_slope = vidya_result.get('vidya_slope', 0)
@@ -2215,43 +1999,33 @@ class TrendVolumaticDynamicAverageStrategy:
         ema_120_is_rising = vidya_result.get('ema_120_is_rising', False)
         ema_120_is_falling = vidya_result.get('ema_120_is_falling', False)
         
-        print(f"  🔍 标准VIDYA交易检查:")
-        print(f"       📊 VIDYA趋势: {current_vidya_trend}")
-        print(f"       🔄 趋势改变: {trend_changed}")
-        print(f"       💫 平滑VIDYA: {smoothed_vidya:.2f}")
-        print(f"       💰 当前价格: {open_price:.2f}")
-        print(f"       🎯 VIDYA斜率: {vidya_slope:.4f} (上升:{vidya_is_rising}, 下降:{vidya_is_falling})")
-        if upper_band is not None and lower_band is not None:
-            print(f"       📏 上轨: {upper_band:.2f} | 下轨: {lower_band:.2f}")
-        print(f"       📊 Delta Volume: {delta_volume:+,.0f}")
-        
         # 支撑位信息
         if all_support_levels:
-            print(f"       📈 全部支撑位({len(all_support_levels)}个): {[f'{s:.2f}' for s in all_support_levels]}")
+            # print(f"       📈 全部支撑位({len(all_support_levels)}个): {[f'{s:.2f}' for s in all_support_levels]}")
             if valid_supports:
-                print(f"       ✅ 价格下方支撑位({len(valid_supports)}个): {[f'{s:.2f}' for s in valid_supports]}")
+                # print(f"       ✅ 价格下方支撑位({len(valid_supports)}个): {[f'{s:.2f}' for s in valid_supports]}")
                 if support_level is not None:
                     distance = open_price - support_level
                     distance_pct = (distance / open_price) * 100
-                    print(f"       🎯 目标支撑位: {support_level:.2f} (距离: {distance:.2f}, {distance_pct:.2f}%)")
-            else:
-                print(f"       ❌ 无有效支撑位（价格下方无支撑）")
-        else:
-            print(f"       📈 全部支撑位: 无")
+        #             print(f"       🎯 目标支撑位: {support_level:.2f} (距离: {distance:.2f}, {distance_pct:.2f}%)")
+        #     else:
+        #         print(f"       ❌ 无有效支撑位（价格下方无支撑）")
+        # else:
+        #     print(f"       📈 全部支撑位: 无")
         
         # 阻力位信息
         if all_resistance_levels:
-            print(f"       📉 全部阻力位({len(all_resistance_levels)}个): {[f'{r:.2f}' for r in all_resistance_levels]}")
+            # print(f"       📉 全部阻力位({len(all_resistance_levels)}个): {[f'{r:.2f}' for r in all_resistance_levels]}")
             if valid_resistances:
-                print(f"       ✅ 价格上方阻力位({len(valid_resistances)}个): {[f'{r:.2f}' for r in valid_resistances]}")
+                # print(f"       ✅ 价格上方阻力位({len(valid_resistances)}个): {[f'{r:.2f}' for r in valid_resistances]}")
                 if resistance_level is not None:
                     distance = resistance_level - open_price
                     distance_pct = (distance / open_price) * 100
-                    print(f"       🎯 目标阻力位: {resistance_level:.2f} (距离: {distance:.2f}, {distance_pct:.2f}%)")
-            else:
-                print(f"       ❌ 无有效阻力位（价格上方无阻力）")
-        else:
-            print(f"       📉 全部阻力位: 无")
+                    # print(f"       🎯 目标阻力位: {resistance_level:.2f} (距离: {distance:.2f}, {distance_pct:.2f}%)")
+        #     else:
+        #         print(f"       ❌ 无有效阻力位（价格上方无阻力）")
+        # else:
+        #     print(f"       📉 全部阻力位: 无")
         
         # 🔴 新逻辑：设置目标开仓价格（不立即开仓，等待每分钟触发）
         if current_vidya_trend == 'up':
@@ -2259,7 +2033,7 @@ class TrendVolumaticDynamicAverageStrategy:
             if self.position is None:
                 if support_level is not None:
                     # 检查开启的条件
-                    can_open, failed_conditions = self._check_entry_conditions(
+                    can_open = self._check_entry_conditions(
                         'long', trend_changed, vidya_is_rising, vidya_is_falling,
                         delta_volume, ema_120_is_rising, ema_120_is_falling,
                         vidya_slope, ema_120_slope
@@ -2273,77 +2047,17 @@ class TrendVolumaticDynamicAverageStrategy:
                         self.target_entry_vidya_result = vidya_result if vidya_result else None
                         # 🔴 允许使用支撑/阻力线作为止损（趋势转变）
                         self.can_use_support_resistance_stop = True
-                        print(f"  🎯 【设置目标开仓】上升趋势，目标价格=${support_level:.2f}（支撑位），立即挂单")
-                        
-                        # 🔴 立即生成开仓信号（限价单模式），让交易系统去挂限价单或条件单
-                        self._execute_vidya_entry('long', support_level, signal_info, vidya_result)
+                        # print(f"  🎯 【设置目标开仓】上升趋势，目标价格=${support_level:.2f}（支撑位），等待触发")
                     else:
                         # 条件不满足，清除目标
-                        failed_reason = f"开仓条件不满足"
-                        if failed_conditions:
-                            failed_reason += f": {', '.join(failed_conditions)}"
-                        print(f"  ⏳ 【条件不满足】{failed_reason}")
                         self.target_entry_price = None
                         self.target_entry_direction = None
                         self.target_entry_vidya_result = None
-                        
-                        # 🔴 推送不开仓消息（条件不满足）
-                        print(f"\n{'='*60}")
-                        print(f"📊 【周期结束 - 不开仓】")
-                        print(f"  开仓类型: 支撑位限价单")
-                        print(f"  开仓方向: 做多 (LONG)")
-                        print(f"  原因: {failed_reason}")
-                        print(f"{'='*60}\n")
-                        
-                        if self.dingtalk_notifier:
-                            try:
-                                timestamp_str = signal_info.get('timestamp', datetime.now())
-                                if isinstance(timestamp_str, datetime):
-                                    timestamp_str = timestamp_str.strftime('%Y-%m-%d %H:%M:%S')
-                                content = f"## ⏸️ 周期结束 - 不开仓\n\n"
-                                content += f"**⏰ 时间**: {timestamp_str}\n\n"
-                                content += f"---\n\n"
-                                content += f"**📊 开仓类型**: 支撑位限价单\n\n"
-                                content += f"**📈 期望方向**: 做多 (LONG)\n\n"
-                                content += f"**❌ 状态**: 不开仓\n\n"
-                                content += f"**📝 原因**: {failed_reason}\n\n"
-                                content += f"**💵 当前价格**: ${open_price:.2f}\n\n"
-                                if failed_conditions:
-                                    content += f"**❌ 失败条件**: {', '.join(failed_conditions)}\n\n"
-                                self.dingtalk_notifier.send_message("⏸️ 不开仓 - 条件不满足", content)
-                            except Exception as e:
-                                print(f"  ⚠️  推送钉钉消息失败: {e}")
                 else:
-                    no_support_reason = f"当前无支撑位数据，等待检测"
-                    print(f"  ⏳ 【等待支撑位】{no_support_reason}")
+                    # print(f"  ⏳ 【等待支撑位】当前无支撑位数据，等待检测")
                     self.target_entry_price = None
                     self.target_entry_direction = None
                     self.target_entry_vidya_result = None
-                    
-                    # 🔴 推送不开仓消息（无支撑位）
-                    print(f"\n{'='*60}")
-                    print(f"📊 【周期结束 - 不开仓】")
-                    print(f"  开仓类型: 支撑位限价单")
-                    print(f"  开仓方向: 做多 (LONG)")
-                    print(f"  原因: {no_support_reason}")
-                    print(f"{'='*60}\n")
-                    
-                    if self.dingtalk_notifier:
-                        try:
-                            timestamp_str = signal_info.get('timestamp', datetime.now())
-                            if isinstance(timestamp_str, datetime):
-                                timestamp_str = timestamp_str.strftime('%Y-%m-%d %H:%M:%S')
-                            content = f"## ⏸️ 周期结束 - 不开仓\n\n"
-                            content += f"**⏰ 时间**: {timestamp_str}\n\n"
-                            content += f"---\n\n"
-                            content += f"**📊 开仓类型**: 支撑位限价单\n\n"
-                            content += f"**📈 期望方向**: 做多 (LONG)\n\n"
-                            content += f"**❌ 状态**: 不开仓\n\n"
-                            content += f"**📝 原因**: {no_support_reason}\n\n"
-                            content += f"**💵 当前价格**: ${open_price:.2f}\n\n"
-                            self.dingtalk_notifier.send_message("⏸️ 不开仓 - 等待支撑位", content)
-                        except Exception as e:
-                            print(f"  ⚠️  推送钉钉消息失败: {e}")
             elif self.position == 'short':
                 # 🔄 持空单，趋势转多，设置开多目标价格（不立即平仓）
                 if support_level is not None:
@@ -2353,9 +2067,12 @@ class TrendVolumaticDynamicAverageStrategy:
                     self.target_entry_vidya_result = vidya_result if vidya_result else None
                     # 🔴 允许使用支撑/阻力线作为止损（趋势转变）
                     self.can_use_support_resistance_stop = True
-                    print(f"  🔄 【趋势转多】持有空单，等待价格回调至支撑位${support_level:.2f}开多（使用上轨平空）")
+                    # print(f"  🔄 【趋势转多】持有空单，等待价格回调至支撑位${support_level:.2f}开多（使用上轨平空）")
+                    print(f"  🔄 【趋势转多】持有空单，立即平仓")
+                    # 平仓
+                    self._close_position(open_price, signal_info, timestamp, True, "VIDYA趋势转多，平仓")
                 else:
-                    print(f"  🔄 【趋势转多】持有空单，但无支撑位数据")
+                    # print(f"  🔄 【趋势转多】持有空单，但无支撑位数据")
                     self.target_entry_price = None
                     self.target_entry_direction = None
                     self.target_entry_vidya_result = None
@@ -2365,7 +2082,7 @@ class TrendVolumaticDynamicAverageStrategy:
             if self.position is None:
                 if resistance_level is not None:
                     # 检查开启的条件
-                    can_open, failed_conditions = self._check_entry_conditions(
+                    can_open = self._check_entry_conditions(
                         'short', trend_changed, vidya_is_rising, vidya_is_falling,
                         delta_volume, ema_120_is_rising, ema_120_is_falling,
                         vidya_slope, ema_120_slope
@@ -2379,77 +2096,17 @@ class TrendVolumaticDynamicAverageStrategy:
                         self.target_entry_vidya_result = vidya_result if vidya_result else None
                         # 🔴 允许使用支撑/阻力线作为止损（趋势转变）
                         self.can_use_support_resistance_stop = True
-                        print(f"  🎯 【设置目标开仓】下降趋势，目标价格=${resistance_level:.2f}（阻力位），立即挂单")
-                        
-                        # 🔴 立即生成开仓信号（限价单模式），让交易系统去挂限价单或条件单
-                        self._execute_vidya_entry('short', resistance_level, signal_info, vidya_result)
+                        # print(f"  🎯 【设置目标开仓】下降趋势，目标价格=${resistance_level:.2f}（阻力位），等待触发")
                     else:
                         # 条件不满足，清除目标
-                        failed_reason = f"开仓条件不满足"
-                        if failed_conditions:
-                            failed_reason += f": {', '.join(failed_conditions)}"
-                        print(f"  ⏳ 【条件不满足】{failed_reason}")
                         self.target_entry_price = None
                         self.target_entry_direction = None
                         self.target_entry_vidya_result = None
-                        
-                        # 🔴 推送不开仓消息（条件不满足）
-                        print(f"\n{'='*60}")
-                        print(f"📊 【周期结束 - 不开仓】")
-                        print(f"  开仓类型: 阻力位限价单")
-                        print(f"  开仓方向: 做空 (SHORT)")
-                        print(f"  原因: {failed_reason}")
-                        print(f"{'='*60}\n")
-                        
-                        if self.dingtalk_notifier:
-                            try:
-                                timestamp_str = signal_info.get('timestamp', datetime.now())
-                                if isinstance(timestamp_str, datetime):
-                                    timestamp_str = timestamp_str.strftime('%Y-%m-%d %H:%M:%S')
-                                content = f"## ⏸️ 周期结束 - 不开仓\n\n"
-                                content += f"**⏰ 时间**: {timestamp_str}\n\n"
-                                content += f"---\n\n"
-                                content += f"**📊 开仓类型**: 阻力位限价单\n\n"
-                                content += f"**📉 期望方向**: 做空 (SHORT)\n\n"
-                                content += f"**❌ 状态**: 不开仓\n\n"
-                                content += f"**📝 原因**: {failed_reason}\n\n"
-                                content += f"**💵 当前价格**: ${open_price:.2f}\n\n"
-                                if failed_conditions:
-                                    content += f"**❌ 失败条件**: {', '.join(failed_conditions)}\n\n"
-                                self.dingtalk_notifier.send_message("⏸️ 不开仓 - 条件不满足", content)
-                            except Exception as e:
-                                print(f"  ⚠️  推送钉钉消息失败: {e}")
                 else:
-                    no_resistance_reason = f"当前无阻力位数据，等待检测"
-                    print(f"  ⏳ 【等待阻力位】{no_resistance_reason}")
+                    # print(f"  ⏳ 【等待阻力位】当前无阻力位数据，等待检测")
                     self.target_entry_price = None
                     self.target_entry_direction = None
                     self.target_entry_vidya_result = None
-                    
-                    # 🔴 推送不开仓消息（无阻力位）
-                    print(f"\n{'='*60}")
-                    print(f"📊 【周期结束 - 不开仓】")
-                    print(f"  开仓类型: 阻力位限价单")
-                    print(f"  开仓方向: 做空 (SHORT)")
-                    print(f"  原因: {no_resistance_reason}")
-                    print(f"{'='*60}\n")
-                    
-                    if self.dingtalk_notifier:
-                        try:
-                            timestamp_str = signal_info.get('timestamp', datetime.now())
-                            if isinstance(timestamp_str, datetime):
-                                timestamp_str = timestamp_str.strftime('%Y-%m-%d %H:%M:%S')
-                            content = f"## ⏸️ 周期结束 - 不开仓\n\n"
-                            content += f"**⏰ 时间**: {timestamp_str}\n\n"
-                            content += f"---\n\n"
-                            content += f"**📊 开仓类型**: 阻力位限价单\n\n"
-                            content += f"**📉 期望方向**: 做空 (SHORT)\n\n"
-                            content += f"**❌ 状态**: 不开仓\n\n"
-                            content += f"**📝 原因**: {no_resistance_reason}\n\n"
-                            content += f"**💵 当前价格**: ${open_price:.2f}\n\n"
-                            self.dingtalk_notifier.send_message("⏸️ 不开仓 - 等待阻力位", content)
-                        except Exception as e:
-                            print(f"  ⚠️  推送钉钉消息失败: {e}")
             elif self.position == 'long':
                 # 🔄 持多单，趋势转空，设置开空目标价格（不立即平仓）
                 if resistance_level is not None:
@@ -2459,63 +2116,34 @@ class TrendVolumaticDynamicAverageStrategy:
                     self.target_entry_vidya_result = vidya_result if vidya_result else None
                     # 🔴 允许使用支撑/阻力线作为止损（趋势转变）
                     self.can_use_support_resistance_stop = True
-                    print(f"  🔄 【趋势转空】持有多单，等待价格反弹至阻力位${resistance_level:.2f}开空（使用下轨平多）")
+                    # print(f"  🔄 【趋势转空】持有多单，等待价格反弹至阻力位${resistance_level:.2f}开空（使用下轨平多）")
+                    print(f"  🔄 【趋势转空】持有多单，立即平仓")
+                    # 平仓
+                    self._close_position(open_price, signal_info, timestamp, True, "VIDYA趋势转空，平仓")
                 else:
-                    print(f"  🔄 【趋势转空】持有多单，但无阻力位数据")
+                    # print(f"  🔄 【趋势转空】持有多单，但无阻力位数据")
                     self.target_entry_price = None
                     self.target_entry_direction = None
                     self.target_entry_vidya_result = None
         
         elif current_vidya_trend == 'neutral':
             # 价格在带宽内，中性状态，清除目标
-            neutral_reason = f"价格{open_price:.2f}在带宽内，等待突破"
-            print(f"  ⚪ 【VIDYA中性】{neutral_reason}")
+            # print(f"  ⚪ 【VIDYA中性】价格{open_price:.2f}在带宽内，等待突破")
             if self.position is None:
                 self.target_entry_price = None
                 self.target_entry_direction = None
                 self.target_entry_vidya_result = None
-                
-                # 🔴 推送不开仓消息（中性状态）
-                print(f"\n{'='*60}")
-                print(f"📊 【周期结束 - 不开仓】")
-                print(f"  开仓类型: VIDYA策略")
-                print(f"  原因: {neutral_reason}")
-                print(f"{'='*60}\n")
-                
-                if self.dingtalk_notifier:
-                    try:
-                        timestamp_str = signal_info.get('timestamp', datetime.now())
-                        if isinstance(timestamp_str, datetime):
-                            timestamp_str = timestamp_str.strftime('%Y-%m-%d %H:%M:%S')
-                        content = f"## ⏸️ 周期结束 - 不开仓\n\n"
-                        content += f"**⏰ 时间**: {timestamp_str}\n\n"
-                        content += f"---\n\n"
-                        content += f"**📊 开仓类型**: VIDYA策略\n\n"
-                        content += f"**❌ 状态**: 不开仓\n\n"
-                        content += f"**📝 原因**: {neutral_reason}\n\n"
-                        content += f"**💵 当前价格**: ${open_price:.2f}\n\n"
-                        if upper_band is not None and lower_band is not None:
-                            content += f"**📏 上轨**: ${upper_band:.2f}\n\n"
-                            content += f"**📏 下轨**: ${lower_band:.2f}\n\n"
-                        self.dingtalk_notifier.send_message("⏸️ 不开仓 - VIDYA中性", content)
-                    except Exception as e:
-                        print(f"  ⚠️  推送钉钉消息失败: {e}")
     
     def _check_entry_conditions(self, direction, trend_changed, vidya_is_rising, vidya_is_falling,
                                 delta_volume, ema_120_is_rising, ema_120_is_falling,
                                 vidya_slope, ema_120_slope):
-        """
-        检查开仓条件（提取为独立方法）
-        
-        Returns:
-            tuple: (can_open: bool, failed_conditions: list)
-        """
+        """检查开仓条件（提取为独立方法）"""
         can_open = True
         failed_conditions = []
         
         # 1. 趋势突破（如果开启）
-        if self.entry_condition_trend_breakthrough:
-            print(f"  ✅ 趋势突破: 已确认")
+        # if self.entry_condition_trend_breakthrough:
+            # print(f"  ✅ 趋势突破: 已确认")
         
         # 2. 箭头信号（如果开启）
         if self.entry_condition_arrow_signal:
@@ -2524,7 +2152,7 @@ class TrendVolumaticDynamicAverageStrategy:
             else:
                 can_open = False
                 failed_conditions.append("箭头信号")
-                print(f"  ❌ 箭头信号: 无趋势转换")
+                # print(f"  ❌ 箭头信号: 无趋势转换")
         
         # 3. VIDYA斜率（如果开启）
         if self.entry_condition_vidya_slope:
@@ -2535,7 +2163,7 @@ class TrendVolumaticDynamicAverageStrategy:
             else:
                 can_open = False
                 failed_conditions.append("VIDYA斜率")
-                print(f"  ❌ VIDYA斜率: 不支持{direction} (斜率{vidya_slope:.4f})")
+                # print(f"  ❌ VIDYA斜率: 不支持{direction} (斜率{vidya_slope:.4f})")
         
         # 4. Delta Volume（如果开启）
         if self.entry_condition_delta_volume:
@@ -2544,7 +2172,7 @@ class TrendVolumaticDynamicAverageStrategy:
             else:
                 can_open = False
                 failed_conditions.append("Delta Volume")
-                print(f"  ❌ Delta Volume: 不支持{direction} ({delta_volume:+,.0f})")
+                # print(f"  ❌ Delta Volume: 不支持{direction} ({delta_volume:+,.0f})")
         
         # 5. EMA120斜率（如果开启）
         if self.entry_condition_ema_120_slope:
@@ -2553,95 +2181,30 @@ class TrendVolumaticDynamicAverageStrategy:
             else:
                 can_open = False
                 failed_conditions.append("EMA120斜率")
-                print(f"  ❌ EMA120斜率: 不支持{direction} (斜率{ema_120_slope:.2f})")
-        
-        if not can_open:
-            print(f"  ❌ 开仓条件不满足，缺少: {', '.join(failed_conditions)}")
-        
-        return can_open, failed_conditions
+                # print(f"  ❌ EMA120斜率: 不支持{direction} (斜率{ema_120_slope:.2f})")
+                
+        return can_open
 
     def _execute_vidya_entry(self, direction, entry_price, signal_info, vidya_result):
         """执行标准VIDYA开仓（基于支撑阻力线和ATR带宽）"""
-        # 获取时间戳用于钉钉消息
-        timestamp = signal_info.get('timestamp', datetime.now())
-        
         # 🔴 防御性检查：entry_price不能为None
         if entry_price is None:
-            reason = "开仓价格为空，无法开仓"
-            print(f"  ⚠️  【开仓价格为空】无法开仓：entry_price=None")
-            # 推送钉钉消息
-            if self.dingtalk_notifier:
-                try:
-                    content = f"## ⏸️ VIDYA开仓检查 - 不开仓\n\n"
-                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
-                    content += f"---\n\n"
-                    content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
-                    content += f"**📈 开仓方向**: {direction.upper()}\n\n"
-                    content += f"**❌ 不开仓原因**: {reason}\n\n"
-                    content += f"**🔍 详细信息**: entry_price=None，无法获取开仓价格\n\n"
-                    self.dingtalk_notifier.send_message("⏸️ 不开仓 - VIDYA开仓价格为空", content)
-                except Exception as e:
-                    print(f"  ⚠️  推送钉钉消息失败: {e}")
+            # print(f"  ⚠️  【开仓价格为空】无法开仓：entry_price=None")
             return
             
         # 检查是否已预热完成
         if not self.vidya_indicator.is_warmed_up:
-            reason = "VIDYA指标预热未完成，跳过开仓"
-            print(f"  ⚠️  【VIDYA预热未完成】指标预热中，跳过开仓")
-            # 推送钉钉消息
-            if self.dingtalk_notifier:
-                try:
-                    content = f"## ⏸️ VIDYA开仓检查 - 不开仓\n\n"
-                    content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
-                    content += f"---\n\n"
-                    content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
-                    content += f"**📈 开仓方向**: {direction.upper()}\n\n"
-                    content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
-                    content += f"**❌ 不开仓原因**: {reason}\n\n"
-                    content += f"**🔍 详细信息**: VIDYA指标正在预热中，需要等待指标数据准备完成\n\n"
-                    self.dingtalk_notifier.send_message("⏸️ 不开仓 - VIDYA预热未完成", content)
-                except Exception as e:
-                    print(f"  ⚠️  推送钉钉消息失败: {e}")
+            # print(f"  ⚠️  【VIDYA预热未完成】指标预热中，跳过开仓")
             return
-        
-        # 🔴 检查固定周期Delta Volume过滤条件
-        # current_dv_percent_fixed = self.vidya_indicator.delta_volume_percent_fixed / 100.0  # 转换为小数
-        
-        # if direction == 'long':
-        #     # 🔴 开多仓：如果固定DV < -0.4（-40%），不开仓
-        #     if current_dv_percent_fixed < -0.4:
-        #         print(f"  ❌ 【Delta Volume过滤】开多仓被拒绝：固定DV={current_dv_percent_fixed*100:.2f}% < -50%，市场卖压过大")
-        #         return
-        # elif direction == 'short':
-        #     # 🔴 开空仓：如果固定DV > 0.4（40%），不开仓
-        #     if current_dv_percent_fixed > 0.4:
-        #         print(f"  ❌ 【Delta Volume过滤】开空仓被拒绝：固定DV={current_dv_percent_fixed*100:.2f}% > 50%，市场买压过大")
-        #         return
             
         potential_invested_amount = self._get_invested_capital()
-        # if potential_invested_amount <= 0:
-        #     reason = f"资金不足，现金余额=${self.cash_balance:,.2f} <= 0"
-        #     print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
-        #     # 推送钉钉消息
-        #     if self.dingtalk_notifier:
-        #         try:
-        #             content = f"## ⏸️ VIDYA开仓检查 - 不开仓\n\n"
-        #             content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
-        #             content += f"---\n\n"
-        #             content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
-        #             content += f"**📈 开仓方向**: {direction.upper()}\n\n"
-        #             content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
-        #             content += f"**❌ 不开仓原因**: {reason}\n\n"
-        #             content += f"**💵 现金余额**: ${self.cash_balance:,.2f}\n\n"
-        #             content += f"**🔍 详细信息**: 账户资金不足，无法执行开仓操作\n\n"
-        #             self.dingtalk_notifier.send_message("⏸️ 不开仓 - 资金不足", content)
-        #         except Exception as e:
-        #             print(f"  ⚠️  推送钉钉消息失败: {e}")
-        #     return
+        if potential_invested_amount <= 0:
+            # print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
+            return
         
         # 🔴 防御性检查：如果vidya_result为None，使用当前VIDYA指标状态
         if vidya_result is None or not isinstance(vidya_result, dict):
-            print(f"  ⚠️  【vidya_result为空】使用当前VIDYA指标状态")
+            # print(f"  ⚠️  【vidya_result为空】使用当前VIDYA指标状态")
             all_support_levels = self.vidya_indicator.support_levels if self.vidya_indicator.support_levels else []
             all_resistance_levels = self.vidya_indicator.resistance_levels if self.vidya_indicator.resistance_levels else []
             
@@ -2665,12 +2228,15 @@ class TrendVolumaticDynamicAverageStrategy:
         smoothed_vidya = vidya_result.get('smoothed_vidya', 0)
         delta_volume = vidya_result.get('delta_volume', 0)
         cmo = vidya_result.get('cmo', 0)
+
+        # 打印delta_volume
+        print(f"  🔴 【delta_volume】{delta_volume}")
         
         # 计算止损价格（基于支撑阻力线或ATR）
         if direction == 'long':
             # 做多止损：支撑线下方或下轨下方
             if lower_band is not None and lower_band < entry_price:
-                stop_loss_price = lower_band  # 下轨
+                stop_loss_price = lower_band * 0.99  # 下轨下方1%
                 stop_reason = f"下轨{lower_band:.2f}下方"
             else:
                 # 🔴 备用：基于开仓价格的固定百分比止损
@@ -2679,7 +2245,7 @@ class TrendVolumaticDynamicAverageStrategy:
         else:
             # 做空止损：阻力线上方或上轨上方
             if upper_band is not None and upper_band > entry_price:
-                stop_loss_price = upper_band  # 上轨
+                stop_loss_price = upper_band * 1.01  # 上轨上方1%
                 stop_reason = f"上轨{upper_band:.2f}上方"
             else:
                 # 🔴 备用：基于开仓价格的固定百分比止损
@@ -2714,53 +2280,19 @@ class TrendVolumaticDynamicAverageStrategy:
         
         # 构建开仓原因
         if direction == 'long':
-            upper_band_str = f"${upper_band:.2f}" if upper_band else "N/A"
-            reason = f"标准VIDYA上升趋势开多 | 价格${entry_price:.2f} > 上轨{upper_band_str} | VIDYA:${smoothed_vidya:.2f} | CMO:{cmo:.1f} | Delta:{delta_volume:+,.0f}"
+            reason = f"标准VIDYA上升趋势开多 | 价格${entry_price:.2f} > 上轨${upper_band:.2f} | VIDYA:${smoothed_vidya:.2f} | CMO:{cmo:.1f} | Delta:{delta_volume:+,.0f}"
         else:
-            lower_band_str = f"${lower_band:.2f}" if lower_band else "N/A"
-            reason = f"标准VIDYA下降趋势开空 | 价格${entry_price:.2f} < 下轨{lower_band_str} | VIDYA:${smoothed_vidya:.2f} | CMO:{cmo:.1f} | Delta:{delta_volume:+,.0f}"
+            reason = f"标准VIDYA下降趋势开空 | 价格${entry_price:.2f} < 下轨${lower_band:.2f} | VIDYA:${smoothed_vidya:.2f} | CMO:{cmo:.1f} | Delta:{delta_volume:+,.0f}"
         
-        print(f"  🎯 【标准VIDYA开仓】{direction.upper()} | 价格: ${entry_price:.2f}")
-        print(f"  📊 VIDYA: ${smoothed_vidya:.2f} | Delta Volume: {delta_volume:+,.0f}")
-        print(f"  🛡️ 止损: ${stop_loss_price:.2f} ({stop_reason})")
-        if take_profit_price:
-            print(f"  🎯 止盈: ${take_profit_price:.2f} ({profit_reason})")
-        else:
-            print(f"  🎯 止盈: 无 ({profit_reason})")
-        print(f"  📈 风险回报比: 1:{risk_reward_ratio:.2f}")
-        
-        # 推送钉钉消息 - 满足开仓条件
-        if self.dingtalk_notifier:
-            try:
-                content = f"## 🎯 VIDYA开仓信号 - 满足开仓条件\n\n"
-                content += f"**⏰ 时间**: {timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, datetime) else timestamp}\n\n"
-                content += f"---\n\n"
-                content += f"**📊 开仓类型**: 标准VIDYA开仓\n\n"
-                content += f"**📈 开仓方向**: {direction.upper()}\n\n"
-                content += f"**💰 开仓价格**: ${entry_price:.2f}\n\n"
-                content += f"**📊 VIDYA值**: ${smoothed_vidya:.2f}\n\n"
-                content += f"**📈 Delta Volume**: {delta_volume:+,.0f}\n\n"
-                content += f"**🛡️ 止损价格**: ${stop_loss_price:.2f} ({stop_reason})\n\n"
-                if take_profit_price:
-                    content += f"**🎯 止盈价格**: ${take_profit_price:.2f} ({profit_reason})\n\n"
-                else:
-                    content += f"**🎯 止盈价格**: 无 ({profit_reason})\n\n"
-                content += f"**📈 风险回报比**: 1:{risk_reward_ratio:.2f}\n\n"
-                content += f"**💵 投入金额**: ${potential_invested_amount:,.2f}\n\n"
-                content += f"**📝 开仓原因**: {reason}\n\n"
-                if direction == 'long':
-                    content += f"**📊 上轨**: ${upper_band:.2f if upper_band else 'N/A'}\n\n"
-                    content += f"**📊 下轨**: ${lower_band:.2f if lower_band else 'N/A'}\n\n"
-                else:
-                    content += f"**📊 上轨**: ${upper_band:.2f if upper_band else 'N/A'}\n\n"
-                    content += f"**📊 下轨**: ${lower_band:.2f if lower_band else 'N/A'}\n\n"
-                self.dingtalk_notifier.send_message("🎯 开仓信号 - VIDYA标准开仓", content)
-            except Exception as e:
-                print(f"  ⚠️  推送钉钉消息失败: {e}")
+        # print(f"  🎯 【标准VIDYA开仓】{direction.upper()} | 价格: ${entry_price:.2f}")
+        # print(f"  📊 VIDYA: ${smoothed_vidya:.2f} | Delta Volume: {delta_volume:+,.0f}")
+        # print(f"  🛡️ 止损: ${stop_loss_price:.2f} ({stop_reason})")
+        # print(f"  🎯 止盈: ${take_profit_price:.2f} ({profit_reason})")
+        # print(f"  📈 风险回报比: 1:{risk_reward_ratio:.2f}")
 
         # 开单类型是VIDYA还是布林带角度
         self.is_bb_angle_entry = False
-
+        
         if direction == 'long':
             self._open_long_position(entry_price, signal_info, reason, potential_invested_amount, 
                                     stop_loss_price, take_profit_price)
@@ -2768,7 +2300,7 @@ class TrendVolumaticDynamicAverageStrategy:
             self._open_short_position(entry_price, signal_info, reason, potential_invested_amount,
                                      stop_loss_price, take_profit_price)
     
-    def _open_long_position(self, entry_price, signal_info, reason, invested_amount, stop_loss_price=None, take_profit_price=None):
+    def _open_long_position(self, entry_price, signal_info, reason, invested_amount, stop_loss_price=None, take_profit_price=None, max_loss_pct_override=None):
         """开多单"""
         self.position = 'long'
         # 计算手续费
@@ -2789,34 +2321,16 @@ class TrendVolumaticDynamicAverageStrategy:
         self.stop_loss_level = stop_loss_price if stop_loss_price is not None else entry_price * 0.98
         self.take_profit_level = take_profit_price if take_profit_price is not None else entry_price * 1.015
         
-        # 🔴 计算最大亏损位：根据开仓类型使用不同的最大亏损百分比
-        # 如果是布林带角度开仓，使用bb_max_loss_pct；否则使用max_loss_pct
-        is_bb_angle_entry = '布林带角度' in reason
-        max_loss_pct_to_use = self.bb_max_loss_pct if is_bb_angle_entry else self.max_loss_pct
-        
-        if max_loss_pct_to_use > 0:
-            self.max_loss_level = self.entry_price * (1 - max_loss_pct_to_use / 100)
+        # 计算最大亏损位
+        effective_max_loss_pct = max_loss_pct_override if max_loss_pct_override is not None else self.max_loss_pct
+        if effective_max_loss_pct > 0:
+            self.max_loss_level = round(self.entry_price * (1 - effective_max_loss_pct / 100),2)
         else:
             self.max_loss_level = None
         
-        # 🔴 判断开仓类型：如果reason中包含"支撑位"或"阻力位"，说明是限价单；否则是立即挂单
-        entry_type = 'limit' if ('标准VIDYA' in reason) else 'immediate'
-
-        # 打印reason
-        print(f"  🔴 【开仓理由】{reason}")
-        # 挂单类型
-        print(f"  🔴 【挂单类型】{entry_type}")
-        # 止损
-        print(f"  🔴 【止损】${self.stop_loss_level:.2f}")
-        # 止盈
-        print(f"  🔴 【止盈】${self.take_profit_level:.2f}")
-        # 最大亏损
-        print(f"  🔴 【最大亏损】${self.max_loss_level:.2f}")
-   
         signal_info['signals'].append({
             'type': 'OPEN_LONG',
             'price': self.entry_price,
-            'entry_type': entry_type,  # 🔴 'limit': 支撑位/阻力位限价单, 'immediate': 立即挂单(买3/卖3)
             'stop_loss': self.stop_loss_level,
             'take_profit': self.take_profit_level,
             'max_loss': self.max_loss_level,
@@ -2825,7 +2339,7 @@ class TrendVolumaticDynamicAverageStrategy:
             'cash_balance': self.cash_balance,
             'transaction_fee': transactionFee,
             'entry_timestamp': signal_info.get('timestamp'),  # 🔴 添加开仓时间戳
-            'reason': f"{reason} | 投入${self.current_invested_amount:,.2f} | 止损${self.stop_loss_level:.2f}(VIDYA) | 止盈{f'${self.take_profit_level:.2f}' if self.take_profit_level is not None else '无'}(VIDYA) | 最大亏损{f'${self.max_loss_level:.2f}' if self.max_loss_level is not None else '无'}({self.max_loss_pct}%)"
+            'reason': f"{reason} | 投入${self.current_invested_amount:,.2f} | 止损${self.stop_loss_level:.2f}(VIDYA) | 止盈{f'${self.take_profit_level:.2f}' if self.take_profit_level is not None else '无'}(VIDYA) | 最大亏损{f'${self.max_loss_level:.2f}' if self.max_loss_level is not None else '无'}({effective_max_loss_pct}%)"
         })
         
         # 🔴 记录开仓信息（满仓模式）
@@ -2836,20 +2350,11 @@ class TrendVolumaticDynamicAverageStrategy:
             'timestamp': signal_info.get('timestamp')
         }]
         
-        print(f"  🟢 【开多】{reason} | 价格: ${entry_price:.2f} | 投入: ${actual_invested_amount:,.2f} | 份额: {self.position_shares:.4f}")
-        print(f"       止损: ${self.stop_loss_level:.2f} (VIDYA) | 止盈: {f'${self.take_profit_level:.2f}' if self.take_profit_level else '无'} | 最大亏损: {f'${self.max_loss_level:.2f}' if self.max_loss_level else '无'}")
-        print(f"        现金更新: 余额=${self.cash_balance:,.2f}")
-        
-        # # 🔴 挂止盈单（固定止盈价）
-        # if self.take_profit_level is not None:
-        #     signal_info['signals'].append({
-        #         'type': 'PLACE_TAKE_PROFIT',
-        #         'position': 'long',
-        #         'price': self.take_profit_level,
-        #         'reason': f'开仓后挂固定止盈单: ${self.take_profit_level:.2f}'
-        #     })
+        # print(f"  🟢 【开多】{reason} | 价格: ${entry_price:.2f} | 投入: ${actual_invested_amount:,.2f} | 份额: {self.position_shares:.4f}")
+        # print(f"       止损: ${self.stop_loss_level:.2f} (VIDYA) | 止盈: {f'${self.take_profit_level:.2f}' if self.take_profit_level else '无'} | 最大亏损: {f'${self.max_loss_level:.2f}' if self.max_loss_level else '无'}")
+        # print(f"        现金更新: 余额=${self.cash_balance:,.2f}")
     
-    def _open_short_position(self, entry_price, signal_info, reason, invested_amount, stop_loss_price=None, take_profit_price=None):
+    def _open_short_position(self, entry_price, signal_info, reason, invested_amount, stop_loss_price=None, take_profit_price=None, max_loss_pct_override=None):
         """开空单"""
         # 计算手续费
         transactionFee = invested_amount * 0.02 / 100
@@ -2870,23 +2375,16 @@ class TrendVolumaticDynamicAverageStrategy:
         self.stop_loss_level = stop_loss_price if stop_loss_price is not None else entry_price * 1.02
         self.take_profit_level = take_profit_price if take_profit_price is not None else entry_price * 0.985
         
-        # 🔴 计算最大亏损位：根据开仓类型使用不同的最大亏损百分比
-        # 如果是布林带角度开仓，使用bb_max_loss_pct；否则使用max_loss_pct
-        is_bb_angle_entry = '布林带角度' in reason
-        max_loss_pct_to_use = self.bb_max_loss_pct if is_bb_angle_entry else self.max_loss_pct
-        
-        if max_loss_pct_to_use > 0:
-            self.max_loss_level = self.entry_price * (1 + max_loss_pct_to_use / 100)
+        # 计算最大亏损位
+        effective_max_loss_pct = max_loss_pct_override if max_loss_pct_override is not None else self.max_loss_pct
+        if effective_max_loss_pct > 0:
+            self.max_loss_level = round(self.entry_price * (1 + effective_max_loss_pct / 100),2)
         else:
             self.max_loss_level = None
-        
-        # 🔴 判断开仓类型：如果reason中包含"支撑位"或"阻力位"，说明是限价单；否则是立即挂单
-        entry_type = 'limit' if ('标准VIDYA' in reason) else 'immediate'
         
         signal_info['signals'].append({
             'type': 'OPEN_SHORT',
             'price': self.entry_price,
-            'entry_type': entry_type,  # 🔴 'limit': 支撑位/阻力位限价单, 'immediate': 立即挂单(买3/卖3)
             'stop_loss': self.stop_loss_level,
             'take_profit': self.take_profit_level,
             'max_loss': self.max_loss_level,
@@ -2894,8 +2392,7 @@ class TrendVolumaticDynamicAverageStrategy:
             'position_shares': self.position_shares,
             'cash_balance': self.cash_balance,
             'transaction_fee': transactionFee,
-            'entry_timestamp': signal_info.get('timestamp'),  # 🔴 添加开仓时间戳
-            'reason': f"{reason} | 投入${self.current_invested_amount:,.2f} | 止损${self.stop_loss_level:.2f}(VIDYA) | 止盈{f'${self.take_profit_level:.2f}' if self.take_profit_level is not None else '无'}(VIDYA) | 最大亏损{f'${self.max_loss_level:.2f}' if self.max_loss_level is not None else '无'}({self.max_loss_pct}%)"
+            'reason': f"{reason} | 投入${self.current_invested_amount:,.2f} | 止损${self.stop_loss_level:.2f}(VIDYA) | 止盈{f'${self.take_profit_level:.2f}' if self.take_profit_level is not None else '无'}(VIDYA) | 最大亏损{f'${self.max_loss_level:.2f}' if self.max_loss_level is not None else '无'}({effective_max_loss_pct}%)"
         })
         
         # 🔴 记录开仓信息（满仓模式）
@@ -2905,19 +2402,6 @@ class TrendVolumaticDynamicAverageStrategy:
             'shares': self.position_shares,
             'timestamp': signal_info.get('timestamp')
         }]
-        
-        print(f"  🔴 【开空】{reason} | 价格: ${entry_price:.2f} | 投入: ${actual_invested_amount:,.2f} | 份额: {self.position_shares:.4f}")
-        print(f"       止损: ${self.stop_loss_level:.2f} (VIDYA) | 止盈: {f'${self.take_profit_level:.2f}' if self.take_profit_level else '无'}")
-        print(f"        现金更新: 余额=${self.cash_balance:,.2f}")
-        
-        # 🔴 挂止盈单（固定止盈价）
-        # if self.take_profit_level is not None:
-        #     signal_info['signals'].append({
-        #         'type': 'PLACE_TAKE_PROFIT',
-        #         'position': 'short',
-        #         'price': self.take_profit_level,
-        #         'reason': f'开仓后挂固定止盈单: ${self.take_profit_level:.2f}'
-        #     })
     
     def _update_vidya_trailing_stop(self, vidya_result, signal_info):
         """🔴 VIDYA追踪止损（随带宽动态调整）"""
@@ -2942,18 +2426,18 @@ class TrendVolumaticDynamicAverageStrategy:
                 new_stop_loss = support_level * 0.995
                 # 🔴 使用后立即禁用，后续不再使用支撑/阻力线
                 self.can_use_support_resistance_stop = False
-                print(f"    ⚠️  【首次使用支撑线止损】后续将只使用VIDYA带宽")
+                # print(f"    ⚠️  【首次使用支撑线止损】后续将只使用VIDYA带宽")
             
             # 止损只能向上移动（锁定利润）
             if new_stop_loss > old_stop_loss:
                 self.stop_loss_level = new_stop_loss
                 move_pct = ((new_stop_loss - old_stop_loss) / old_stop_loss) * 100
-                print(f"    🔄 【VIDYA追踪止损】多单止损: ${old_stop_loss:.2f} → ${new_stop_loss:.2f} (+{move_pct:.2f}%)")
+                # print(f"    🔄 【VIDYA追踪止损】多单止损: ${old_stop_loss:.2f} → ${new_stop_loss:.2f} (+{move_pct:.2f}%)")
                 
-                if lower_band is not None:
-                    print(f"        📏 基于下轨{lower_band:.2f}")
-                elif support_level is not None:
-                    print(f"        📈 基于支撑线{support_level:.2f}下方0.5%")
+                # if lower_band is not None:
+                    # print(f"        📏 基于下轨{lower_band:.2f}")
+                # elif support_level is not None:
+                    # print(f"        📈 基于支撑线{support_level:.2f}下方0.5%")
         
         elif self.position == 'short':
             # 🔴 空单追踪止损：优先使用上轨，其次使用阻力线（仅趋势转变后第一次）
@@ -2965,19 +2449,13 @@ class TrendVolumaticDynamicAverageStrategy:
                 new_stop_loss = resistance_level * 1.005
                 # 🔴 使用后立即禁用，后续不再使用支撑/阻力线
                 self.can_use_support_resistance_stop = False
-                print(f"    ⚠️  【首次使用阻力线止损】后续将只使用VIDYA带宽")
+                # print(f"    ⚠️  【首次使用阻力线止损】后续将只使用VIDYA带宽")
             
             # 止损只能向下移动（锁定利润）
             if new_stop_loss < old_stop_loss:
                 self.stop_loss_level = new_stop_loss
                 move_pct = ((old_stop_loss - new_stop_loss) / old_stop_loss) * 100
-                print(f"    🔄 【VIDYA追踪止损】空单止损: ${old_stop_loss:.2f} → ${new_stop_loss:.2f} (-{move_pct:.2f}%)")
-                
-                if upper_band is not None:
-                    print(f"        📏 基于上轨{upper_band:.2f}")
-                elif resistance_level is not None:
-                    print(f"        📉 基于阻力线{resistance_level:.2f}上方0.5%")
-    
+                # print(f"    🔄 【VIDYA追踪止损】空单止损: ${old_stop_loss:.2f} → ${new_stop_loss:.2f} (-{move_pct:.2f}%)")
     
     def _check_stop_position_trigger_1min(self, timestamp, open_price, high_price, low_price, close_price, signal_info):
         """基于1分钟K线检查平仓触发和开仓触发（新增：布林带角度每1分钟检查 + 目标价格开仓）"""
@@ -3000,12 +2478,12 @@ class TrendVolumaticDynamicAverageStrategy:
             if bb_angle_signal.get('can_check_now', False):
                 if bb_angle_signal['can_open_long']:
                     reason = f"布林带角度开多（止盈后快速开仓） | {bb_angle_signal['reason']}"
-                    print(f"  🟢 【布林带角度开多】{bb_angle_signal['reason']}")
+                    # print(f"  🟢 【布林带角度开多】{bb_angle_signal['reason']}")
                     self._execute_bb_angle_entry('long', close_price, signal_info, reason)
                     return  # 开仓后直接返回
                 elif bb_angle_signal['can_open_short']:
                     reason = f"布林带角度开空（止盈后快速开仓） | {bb_angle_signal['reason']}"
-                    print(f"  🔴 【布林带角度开空】{bb_angle_signal['reason']}")
+                    # print(f"  🔴 【布林带角度开空】{bb_angle_signal['reason']}")
                     self._execute_bb_angle_entry('short', close_price, signal_info, reason)
                     return  # 开仓后直接返回
         
@@ -3027,8 +2505,8 @@ class TrendVolumaticDynamicAverageStrategy:
             
             if price_hit_target:
                 if self.target_entry_direction == 'long':
-                    print(f"  ✅ 【触发开仓】最低价格${low_price:.2f} ≤ 目标支撑位${self.target_entry_price:.2f}")
-                    print(f"  🟢 【开多】价格回调至支撑位${self.target_entry_price:.2f}")
+                    # print(f"  ✅ 【触发开仓】最低价格${low_price:.2f} ≤ 目标支撑位${self.target_entry_price:.2f}")
+                    # print(f"  🟢 【开多】价格回调至支撑位${self.target_entry_price:.2f}")
                     self._execute_vidya_entry('long', self.target_entry_price, signal_info, self.target_entry_vidya_result)
                     # 清除目标
                     self.target_entry_price = None
@@ -3037,8 +2515,8 @@ class TrendVolumaticDynamicAverageStrategy:
                     return
                 
                 elif self.target_entry_direction == 'short':
-                    print(f"  ✅ 【触发开仓】最高价格${high_price:.2f} ≥ 目标阻力位${self.target_entry_price:.2f}")
-                    print(f"  🔴 【开空】价格反弹至阻力位${self.target_entry_price:.2f}")
+                    # print(f"  ✅ 【触发开仓】最高价格${high_price:.2f} ≥ 目标阻力位${self.target_entry_price:.2f}")
+                    # print(f"  🔴 【开空】价格反弹至阻力位${self.target_entry_price:.2f}")
                     self._execute_vidya_entry('short', self.target_entry_price, signal_info, self.target_entry_vidya_result)
                     # 清除目标
                     self.target_entry_price = None
@@ -3057,17 +2535,17 @@ class TrendVolumaticDynamicAverageStrategy:
             reason: 开仓原因
         """
         if entry_price is None or entry_price <= 0:
-            print(f"  ⚠️  【开仓价格无效】无法开仓：entry_price={entry_price}")
+            # print(f"  ⚠️  【开仓价格无效】无法开仓：entry_price={entry_price}")
             return
         
         potential_invested_amount = self._get_invested_capital()
-        # if potential_invested_amount <= 0:
-        #     print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
-        #     return
+        if potential_invested_amount <= 0:
+            # print(f"  ⚠️  【资金不足】无法开仓：现金余额=${self.cash_balance:,.2f} <= 0")
+            return
         
-        # 🔴 计算止盈止损（使用布林带专用的最大亏损百分比）
+        # 计算止盈止损（使用布林带角度专用止损比例）
         if direction == 'long':
-            # 做多止损：使用bb_max_loss_pct
+            # 做多止损：使用布林带角度专用止损比例
             stop_loss_price = entry_price * (1 - self.bb_max_loss_pct / 100)
             
             # 做多止盈：固定百分比
@@ -3076,7 +2554,7 @@ class TrendVolumaticDynamicAverageStrategy:
             else:
                 take_profit_price = None
         else:
-            # 做空止损：使用bb_max_loss_pct
+            # 做空止损：使用布林带角度专用止损比例
             stop_loss_price = entry_price * (1 + self.bb_max_loss_pct / 100)
             
             # 做空止盈：固定百分比
@@ -3085,21 +2563,19 @@ class TrendVolumaticDynamicAverageStrategy:
             else:
                 take_profit_price = None
         
-        print(f"  🎯 【布林带角度开仓】{direction.upper()} | 价格: ${entry_price:.2f}")
-        print(f"  🛡️ 止损: ${stop_loss_price:.2f} (固定{self.bb_max_loss_pct}%)")
-        print(f"  🎯 止盈: ${take_profit_price:.2f} (固定{self.fixed_take_profit_pct}%)")
-
+        # print(f"  🎯 【布林带角度开仓】{direction.upper()} | 价格: ${entry_price:.2f}")
+        # print(f"  🛡️ 止损: ${stop_loss_price:.2f} (布林带专用{self.bb_max_loss_pct}%)")
+        # print(f"  🎯 止盈: ${take_profit_price:.2f} (固定{self.fixed_take_profit_pct}%)")
+        
         # 开单类型是布林带角度
         self.is_bb_angle_entry = True
 
         if direction == 'long':
             self._open_long_position(entry_price, signal_info, reason, potential_invested_amount, 
-                                    stop_loss_price, take_profit_price)
+                                    stop_loss_price, take_profit_price, self.bb_max_loss_pct)
         elif direction == 'short':
             self._open_short_position(entry_price, signal_info, reason, potential_invested_amount,
-                                     stop_loss_price, take_profit_price)
-        
-        # 注意：止盈单挂单逻辑在 _open_long_position 和 _open_short_position 中已经处理
+                                     stop_loss_price, take_profit_price, self.bb_max_loss_pct)
     
     def _check_close_position_trigger(self, timestamp, open_price, high_price, low_price, close_price, signal_info):
         """检查平仓触发条件（从 _check_stop_position_trigger_1min 中提取）"""
@@ -3108,14 +2584,15 @@ class TrendVolumaticDynamicAverageStrategy:
         
         stop_loss_triggered = False
         
-        # 🔴 检查平仓触发（最大亏损保护优先、固定止盈、VIDYA上下轨、EMA120平滑值）
+        # 🔴 检查平仓触发（固定止盈、最大亏损、VIDYA上下轨、EMA120平滑值）
         if self.position == 'long':
-            # 1. 检查最大亏损保护（优先级最高）
-            if self.max_loss_level is not None and low_price <= self.max_loss_level:
+            # 1. 检查最大亏损保护
+            # 🔴 使用容差值（0.001）来处理浮点数精度问题：如果两个值显示为相同（保留2位小数），实际差值应该小于0.01
+            if self.max_loss_level is not None and low_price <= (self.max_loss_level + 0.001):
                 stop_loss_triggered = True
                 exit_price = self.max_loss_level
                 reason = f"多单最大亏损保护 | 条件：价格${low_price:.2f}≤最大亏损位${self.max_loss_level:.2f} | 价格来源：1分钟最低价触及最大亏损位"
-                self._close_position(exit_price, signal_info, timestamp, False, reason)
+                self._close_position(exit_price, signal_info, timestamp, True, reason)
             # 2. 检查固定止盈（增强：Delta Volume优化）
             elif self.take_profit_level is not None and high_price >= self.take_profit_level:
                 # 获取当前固定周期Delta Volume百分比
@@ -3128,40 +2605,27 @@ class TrendVolumaticDynamicAverageStrategy:
                         stop_loss_triggered = True
                         exit_price = close_price
                         reason = f"多单DV优化止盈 | 价格${close_price:.2f}≥止盈位${self.take_profit_level:.2f} | DV={current_dv_percent*100:.2f}%≥目标{self.target_dv_percent*100:.2f}%"
-                        print(f"  ✅ 【DV目标达成】多单止盈：DV={current_dv_percent*100:.2f}% ≥ {self.target_dv_percent*100:.2f}%")
+                        # print(f"  ✅ 【DV目标达成】多单止盈：DV={current_dv_percent*100:.2f}% ≥ {self.target_dv_percent*100:.2f}%")
                         self.waiting_for_dv_target = False
                         self.target_dv_percent = None
-                        # 🔴 使用buy5价格挂单平仓
-                        signal_info['signals'].append({
-                            'type': 'PLACE_DV_TAKE_PROFIT',
-                            'position': 'long',
-                            'price_type': 'sell5',  # 多单平仓使用卖5价
-                            'reason': reason
-                        })
                         self._close_position(exit_price, signal_info, timestamp, False, reason)
-                    else:
-                        print(f"  ⏳ 【等待DV目标】多单：当前DV={current_dv_percent*100:.2f}%，目标={self.target_dv_percent*100:.2f}%，价格=${high_price:.2f}")
+                    # else:
+                        # print(f"  ⏳ 【等待DV目标】多单：当前DV={current_dv_percent*100:.2f}%，目标={self.target_dv_percent*100:.2f}%，价格=${high_price:.2f}")
                 # 🔴 首次触及止盈位，检查DV是否满足条件
                 elif current_dv_percent > self.dv_trigger_threshold:
                     # DV > 30%，设置目标DV = 120%，等待
                     self.waiting_for_dv_target = True
                     self.target_dv_percent = self.dv_target_threshold
-                    print(f"  🎯 【设置DV目标】多单触及止盈位，DV={current_dv_percent*100:.2f}% > {self.dv_trigger_threshold*100:.0f}%，等待DV≥{self.dv_target_threshold*100:.0f}%")
-                    # 🔴 取消固定止盈单
-                    signal_info['signals'].append({
-                        'type': 'CANCEL_TAKE_PROFIT',
-                        'position': 'long',
-                        'reason': f'Delta Volume触发等待条件，取消固定止盈单'
-                    })
+                    # print(f"  🎯 【设置DV目标】多单触及止盈位，DV={current_dv_percent*100:.2f}% > {self.dv_trigger_threshold*100:.0f}%，等待DV≥{self.dv_target_threshold*100:.0f}%")
                 else:
                     # DV ≤ 30%，直接止盈
                     stop_loss_triggered = True
                     exit_price = self.take_profit_level
                     reason = f"多单固定止盈 | 价格${high_price:.2f}≥止盈位${self.take_profit_level:.2f} | DV={current_dv_percent*100:.2f}%≤{self.dv_trigger_threshold*100:.0f}%"
-                    print(f"  ✅ 【直接止盈】多单：DV={current_dv_percent*100:.2f}% ≤ {self.dv_trigger_threshold*100:.0f}%")
+                    # print(f"  ✅ 【直接止盈】多单：DV={current_dv_percent*100:.2f}% ≤ {self.dv_trigger_threshold*100:.0f}%")
                     self._close_position(exit_price, signal_info, timestamp, False, reason)
             # 3. 检查下轨平仓（多单使用下轨）
-            elif self.current_lower_band is not None and low_price <= self.current_lower_band and self.entry_price > self.current_lower_band:
+            elif self.is_bb_angle_entry == False and self.current_lower_band is not None and low_price <= self.current_lower_band and self.entry_price > self.current_lower_band:
                 stop_loss_triggered = True
                 exit_price = self.current_lower_band
                 profit_loss = self.position_shares * (exit_price - self.entry_price) if self.position_shares else 0
@@ -3169,7 +2633,7 @@ class TrendVolumaticDynamicAverageStrategy:
                 reason = f"多单VIDYA下轨{result_type} | 条件：价格${low_price:.2f}≤下轨${self.current_lower_band:.2f} | 价格来源：1分钟最低价触及下轨"
                 self._close_position(exit_price, signal_info, timestamp, False, reason)
             # 4. 🆕 检查EMA120平滑值止损（仅亏损且超过fixed_take_profit_pct时平仓）
-            elif self.current_ema_120_smoothed is not None and low_price <= self.current_ema_120_smoothed:
+            elif self.is_bb_angle_entry == False and self.current_ema_120_smoothed is not None and low_price <= self.current_ema_120_smoothed:
                 exit_price = self.current_ema_120_smoothed
                 profit_loss = self.position_shares * (exit_price - self.entry_price) if self.position_shares else 0
                 loss_pct = (profit_loss / self.current_invested_amount * 100) if self.current_invested_amount else 0
@@ -3177,15 +2641,15 @@ class TrendVolumaticDynamicAverageStrategy:
                 if profit_loss < 0:
                     stop_loss_triggered = True
                     reason = f"多单EMA120平滑值止损 | 条件：价格${low_price:.2f}≤EMA120=${self.current_ema_120_smoothed:.2f} | 亏损${profit_loss:.2f}({loss_pct:.2f}%) > {self.fixed_take_profit_pct}%"
-                    print(f"  ❌ 【EMA120止损】多单亏损{loss_pct:.2f}% > {self.fixed_take_profit_pct}%，触发止损")
+                    # print(f"  ❌ 【EMA120止损】多单亏损{loss_pct:.2f}% > {self.fixed_take_profit_pct}%，触发止损")
                     self._close_position(exit_price, signal_info, timestamp, False, reason)
-                elif profit_loss < 0:
-                    print(f"  ⏳ 【EMA120触及】多单亏损{loss_pct:.2f}% ≤ {self.fixed_take_profit_pct}%，未达到止损阈值，继续持仓")
-                else:
-                    print(f"  ⏭️  【EMA120触及】多单盈利${profit_loss:.2f}，不触发止损，继续持仓")
+                # elif profit_loss < 0:
+                    # print(f"  ⏳ 【EMA120触及】多单亏损{loss_pct:.2f}% ≤ {self.fixed_take_profit_pct}%，未达到止损阈值，继续持仓")
+                # else:
+                    # print(f"  ⏭️  【EMA120触及】多单盈利${profit_loss:.2f}，不触发止损，继续持仓")
         
         elif self.position == 'short':
-            # 1. 检查最大亏损保护（优先级最高）
+            # 1. 检查最大亏损保护
             if self.max_loss_level is not None and high_price >= self.max_loss_level:
                 stop_loss_triggered = True
                 exit_price = self.max_loss_level
@@ -3203,37 +2667,24 @@ class TrendVolumaticDynamicAverageStrategy:
                         stop_loss_triggered = True
                         exit_price = close_price
                         reason = f"空单DV优化止盈 | 价格${close_price:.2f}≤止盈位${self.take_profit_level:.2f} | DV={current_dv_percent*100:.2f}%≤目标{self.target_dv_percent*100:.2f}%"
-                        print(f"  ✅ 【DV目标达成】空单止盈：DV={current_dv_percent*100:.2f}% ≤ {self.target_dv_percent*100:.2f}%")
+                        # print(f"  ✅ 【DV目标达成】空单止盈：DV={current_dv_percent*100:.2f}% ≤ {self.target_dv_percent*100:.2f}%")
                         self.waiting_for_dv_target = False
                         self.target_dv_percent = None
-                        # 🔴 使用buy5价格挂单平仓
-                        signal_info['signals'].append({
-                            'type': 'PLACE_DV_TAKE_PROFIT',
-                            'position': 'short',
-                            'price_type': 'buy5',  # 空单平仓使用买5价
-                            'reason': reason
-                        })
                         self._close_position(exit_price, signal_info, timestamp, False, reason)
-                    else:
-                        print(f"  ⏳ 【等待DV目标】空单：当前DV={current_dv_percent*100:.2f}%，目标={self.target_dv_percent*100:.2f}%，价格=${low_price:.2f}")
+                    # else:
+                        # print(f"  ⏳ 【等待DV目标】空单：当前DV={current_dv_percent*100:.2f}%，目标={self.target_dv_percent*100:.2f}%，价格=${low_price:.2f}")
                 # 🔴 首次触及止盈位，检查DV是否满足条件
                 elif current_dv_percent < -self.dv_trigger_threshold:
                     # DV < -30%，设置目标DV = -120%，等待
                     self.waiting_for_dv_target = True
                     self.target_dv_percent = -self.dv_target_threshold
-                    print(f"  🎯 【设置DV目标】空单触及止盈位，DV={current_dv_percent*100:.2f}% < -{self.dv_trigger_threshold*100:.0f}%，等待DV≤-{self.dv_target_threshold*100:.0f}%")
-                    # 🔴 取消固定止盈单
-                    signal_info['signals'].append({
-                        'type': 'CANCEL_TAKE_PROFIT',
-                        'position': 'short',
-                        'reason': f'Delta Volume触发等待条件，取消固定止盈单'
-                    })
+                    # print(f"  🎯 【设置DV目标】空单触及止盈位，DV={current_dv_percent*100:.2f}% < -{self.dv_trigger_threshold*100:.0f}%，等待DV≤-{self.dv_target_threshold*100:.0f}%")
                 else:
                     # DV ≥ -30%，直接止盈
                     stop_loss_triggered = True
                     exit_price = self.take_profit_level
                     reason = f"空单固定止盈 | 价格${low_price:.2f}≤止盈位${self.take_profit_level:.2f} | DV={current_dv_percent*100:.2f}%≥-{self.dv_trigger_threshold*100:.0f}%"
-                    print(f"  ✅ 【直接止盈】空单：DV={current_dv_percent*100:.2f}% ≥ -{self.dv_trigger_threshold*100:.0f}%")
+                    # print(f"  ✅ 【直接止盈】空单：DV={current_dv_percent*100:.2f}% ≥ -{self.dv_trigger_threshold*100:.0f}%")
                     self._close_position(exit_price, signal_info, timestamp, False, reason)
             # 3. 检查上轨平仓（空单使用上轨）
             elif self.current_upper_band is not None and high_price >= self.current_upper_band and self.entry_price < self.current_upper_band:
@@ -3252,12 +2703,12 @@ class TrendVolumaticDynamicAverageStrategy:
                 if profit_loss < 0:
                     stop_loss_triggered = True
                     reason = f"空单EMA120平滑值止损 | 条件：价格${high_price:.2f}≥EMA120=${self.current_ema_120_smoothed:.2f} | 亏损${profit_loss:.2f}({loss_pct:.2f}%) > {self.fixed_take_profit_pct}%"
-                    print(f"  ❌ 【EMA120止损】空单亏损{loss_pct:.2f}% > {self.fixed_take_profit_pct}%，触发止损")
+                    # print(f"  ❌ 【EMA120止损】空单亏损{loss_pct:.2f}% > {self.fixed_take_profit_pct}%，触发止损")
                     self._close_position(exit_price, signal_info, timestamp, False, reason)
-                elif profit_loss < 0:
-                    print(f"  ⏳ 【EMA120触及】空单亏损{loss_pct:.2f}% ≤ {self.fixed_take_profit_pct}%，未达到止损阈值，继续持仓")
-                else:
-                    print(f"  ⏭️  【EMA120触及】空单盈利${profit_loss:.2f}，不触发止损，继续持仓")
+                # elif profit_loss < 0:
+                    # print(f"  ⏳ 【EMA120触及】空单亏损{loss_pct:.2f}% ≤ {self.fixed_take_profit_pct}%，未达到止损阈值，继续持仓")
+                # else:
+                    # print(f"  ⏭️  【EMA120触及】空单盈利${profit_loss:.2f}，不触发止损，继续持仓")
     
     def _close_position(self, exit_price, signal_info, exit_timestamp,isEatOrder, reason):
         """平仓处理"""
@@ -3313,7 +2764,7 @@ class TrendVolumaticDynamicAverageStrategy:
         
         return_rate = (profit_loss / self.current_invested_amount * 100) if self.current_invested_amount > 0 else 0
         result_type = "盈利" if profit_loss > 0 else "亏损"
-        print(f"  {'✅' if profit_loss > 0 else '❌'} 【{reason}】平仓价: ${exit_price:.2f} | {result_type}: ${profit_loss:.2f} | 收益率: {return_rate:+.2f}%")
+        # print(f"  {'✅' if profit_loss > 0 else '❌'} 【{reason}】平仓价: ${exit_price:.2f} | {result_type}: ${profit_loss:.2f} | 收益率: {return_rate:+.2f}%")
         
         # 🆕 判断平仓类型，设置布林带角度锁定状态
         is_profit = profit_loss > 0
@@ -3355,11 +2806,11 @@ class TrendVolumaticDynamicAverageStrategy:
         
         # 如果是全仓，返回所有可用资金
         if position_size >= 1.0:
-            print(f"        💰 全仓计算: 现金余额=${self.cash_balance:,.2f} → 投入金额=${available_capital:,.2f}")
+            # print(f"        💰 全仓计算: 现金余额=${self.cash_balance:,.2f} → 投入金额=${available_capital:,.2f}")
             return available_capital
         
         invested = available_capital * position_size
-        print(f"        💰 部分仓位计算: 现金余额=${self.cash_balance:,.2f} × {position_size*100}% → 投入金额=${invested:,.2f}")
+        # print(f"        💰 部分仓位计算: 现金余额=${self.cash_balance:,.2f} × {position_size*100}% → 投入金额=${invested:,.2f}")
         return invested
     
     def get_current_status(self):
@@ -3396,228 +2847,3 @@ class TrendVolumaticDynamicAverageStrategy:
         if total == 0:
             return 0.0
         return abs(100 * (sum_pos - sum_neg) / total)
-    
-    def sync_real_trade_data(self, trade_data):
-        """同步真实交易数据到策略内部状态
-        
-        Args:
-            trade_data: dict 包含以下字段：
-                - position: 'long' 或 'short' 或 None
-                - entry_price: float 开仓价格
-                - position_shares: float 持仓数量
-                - stop_loss_price: float 止损价格
-                - take_profit_price: float 止盈价格
-                - invested_amount: float 投入金额
-                - timestamp: str 交易时间
-        """
-        print(f"\n🔄 同步真实交易数据到策略...")
-        print(f"   持仓方向: {trade_data.get('position', 'None')}")
-        print(f"   开仓价格: ${trade_data.get('entry_price', 0):.2f}")
-        print(f"   持仓数量: {trade_data.get('position_shares', 0):.4f}")
-        print(f"   止损价格: ${trade_data.get('stop_loss_price', 0):.2f}")
-        print(f"   止盈价格: ${trade_data.get('take_profit_price', 0):.2f}")
-        print(f"   投入金额: ${trade_data.get('invested_amount', 0):.2f}")
-        
-        # 同步持仓状态
-        self.position = trade_data.get('position')
-        self.entry_price = trade_data.get('entry_price', 0)
-        self.position_shares = trade_data.get('position_shares', 0)
-        self.current_invested_amount = trade_data.get('invested_amount', 0)
-        
-        # 同步止损止盈价格
-        if trade_data.get('stop_loss_price'):
-            self.stop_loss_level = trade_data['stop_loss_price']
-            self.max_loss_level = trade_data['stop_loss_price']  # 同步到最大亏损位
-        
-        if trade_data.get('take_profit_price'):
-            self.take_profit_level = trade_data['take_profit_price']
-        
-        # 更新现金余额（扣除投入金额）
-        if self.position and trade_data.get('invested_amount'):
-            self.cash_balance -= trade_data['invested_amount']
-        
-        print(f"✅ 策略状态同步完成")
-        print(f"   策略持仓: {self.position}")
-        print(f"   策略开仓价: ${self.entry_price:.2f}")
-        print(f"   策略止损位: ${self.stop_loss_level:.2f}")
-        print(f"   策略止盈位: ${self.take_profit_level:.2f}")
-    
-    def sync_stop_loss_update(self, new_stop_loss_price):
-        """同步止损价格更新
-        
-        Args:
-            new_stop_loss_price: float 新的止损价格
-        """
-        print(f"\n🔄 同步止损价格更新: ${self.stop_loss_level:.2f} → ${new_stop_loss_price:.2f}")
-        
-        old_stop_loss = self.stop_loss_level
-        self.stop_loss_level = new_stop_loss_price
-        self.max_loss_level = new_stop_loss_price  # 同步到最大亏损位
-        
-        print(f"✅ 止损价格已更新: ${old_stop_loss:.2f} → ${new_stop_loss_price:.2f}")
-    
-    def sync_position_close(self, close_reason="手动平仓"):
-        """同步持仓平仓
-        
-        Args:
-            close_reason: str 平仓原因
-        """
-        print(f"\n🔄 同步持仓平仓: {close_reason}")
-        
-        # 清空持仓状态
-        self.position = None
-        self.entry_price = 0
-        self.position_shares = 0
-        self.stop_loss_level = None
-        self.take_profit_level = None
-        self.max_loss_level = None
-        self.current_invested_amount = 0
-        
-        print(f"✅ 持仓平仓完成")
-    
-    def _update_stop_loss_order(self, current_price, signal_info):
-        """
-        更新止损单：比较三个止损价，选择距离当前价格最近的一个
-        
-        Args:
-            current_price: 当前价格（周期结束时的收盘价）
-            signal_info: 信号信息字典
-        """
-        # 🔴 严格检查：必须有持仓且开仓价格有效（确保是真的有持仓，而不是状态不一致）
-        if self.position is None:
-            print(f"  ⚠️  【更新止损单】跳过：无持仓")
-            return
-        
-        if self.entry_price is None or self.entry_price <= 0:
-            print(f"  ⚠️  【更新止损单】跳过：无有效开仓价格(entry_price={self.entry_price})")
-            print(f"  💡 可能策略状态与实际持仓不一致，等待状态同步")
-            return
-        
-        # 收集三个止损价格
-        stop_loss_prices = []
-        stop_loss_reasons = []
-        
-        # 1. 最大止损
-        if self.max_loss_level is not None:
-            stop_loss_prices.append(self.max_loss_level)
-            stop_loss_reasons.append(f'最大止损: ${self.max_loss_level:.2f}')
-        
-        # 2. 上下轨价格
-        if self.position == 'long':
-            if self.current_lower_band is not None:
-                stop_loss_prices.append(self.current_lower_band)
-                stop_loss_reasons.append(f'下轨: ${self.current_lower_band:.2f}')
-        else:  # short
-            if self.current_upper_band is not None:
-                stop_loss_prices.append(self.current_upper_band)
-                stop_loss_reasons.append(f'上轨: ${self.current_upper_band:.2f}')
-        
-        # 3. EMA120平滑值
-        if self.current_ema_120_smoothed is not None:
-            # 只考虑在亏损方向的价格（多单：EMA120在下方；空单：EMA120在上方）
-            if self.position == 'long':
-                if self.current_ema_120_smoothed < current_price:
-                    stop_loss_prices.append(self.current_ema_120_smoothed)
-                    stop_loss_reasons.append(f'EMA120: ${self.current_ema_120_smoothed:.2f}')
-            else:  # short
-                if self.current_ema_120_smoothed > current_price:
-                    stop_loss_prices.append(self.current_ema_120_smoothed)
-                    stop_loss_reasons.append(f'EMA120: ${self.current_ema_120_smoothed:.2f}')
-        
-        if not stop_loss_prices:
-            print(f"  ⚠️  【更新止损单】无可用止损价格")
-            return
-        
-        # 🔴 过滤止损价：确保在正确的方向（多单止损在价格下方，空单止损在价格上方）
-        valid_stop_loss_prices = []
-        valid_stop_loss_reasons = []
-        
-        for i, price in enumerate(stop_loss_prices):
-            if self.position == 'long':
-                # 多单：止损价应该在当前价格下方
-                if price < current_price:
-                    valid_stop_loss_prices.append(price)
-                    valid_stop_loss_reasons.append(stop_loss_reasons[i])
-            else:  # short
-                # 空单：止损价应该在当前价格上方
-                if price > current_price:
-                    valid_stop_loss_prices.append(price)
-                    valid_stop_loss_reasons.append(stop_loss_reasons[i])
-        
-        if not valid_stop_loss_prices:
-            print(f"  ⚠️  【更新止损单】无有效止损价格（方向检查失败）")
-            return
-        
-        # 🔴 选择最优止损价：
-        # - 多单：选择最高的止损价（最接近当前价格，锁定更多利润）
-        # - 空单：选择最低的止损价（最接近当前价格，锁定更多利润）
-        best_stop_loss = None
-        best_index = None
-        
-        if self.position == 'long':
-            # 多单：选择最高的止损价
-            best_stop_loss = max(valid_stop_loss_prices)
-            best_index = valid_stop_loss_prices.index(best_stop_loss)
-        else:  # short
-            # 空单：选择最低的止损价
-            best_stop_loss = min(valid_stop_loss_prices)
-            best_index = valid_stop_loss_prices.index(best_stop_loss)
-        
-        # 计算距离
-        distance = abs(best_stop_loss - current_price)
-        distance_pct = (distance / current_price) * 100
-        
-        print(f"  🔍 【更新止损单】比较止损价格:")
-        for i, (price, reason) in enumerate(zip(valid_stop_loss_prices, valid_stop_loss_reasons)):
-            marker = "✅" if i == best_index else "  "
-            price_distance = abs(price - current_price)
-            price_distance_pct = (price_distance / current_price) * 100
-            direction_marker = "↓" if self.position == 'long' else "↑"
-            print(f"     {marker} {reason} | 价格: ${price:.2f} | 距离: ${price_distance:.2f} ({price_distance_pct:.2f}%) {direction_marker}")
-        
-        print(f"  🎯 【选择止损价】{valid_stop_loss_reasons[best_index]} | 价格: ${best_stop_loss:.2f} | 距离: ${distance:.2f} ({distance_pct:.2f}%)")
-        
-        # 🔴 获取当前止损价（用于比较）
-        old_stop_loss = self.stop_loss_level
-        
-        # 🔴 确保新止损价比旧止损价更有利（止损只能向有利方向移动）
-        if old_stop_loss is not None:
-            if self.position == 'long':
-                # 多单：新止损价应该 >= 旧止损价（向上移动，锁定更多利润）
-                if best_stop_loss < old_stop_loss:
-                    print(f"  ⚠️  【止损价检查】新止损价${best_stop_loss:.2f} < 旧止损价${old_stop_loss:.2f}，不更新（多单止损只能向上移动）")
-                    return
-            else:  # short
-                # 空单：新止损价应该 <= 旧止损价（向下移动，锁定更多利润）
-                if best_stop_loss > old_stop_loss:
-                    print(f"  ⚠️  【止损价检查】新止损价${best_stop_loss:.2f} > 旧止损价${old_stop_loss:.2f}，不更新（空单止损只能向下移动）")
-                    return
-        
-        # 生成更新止损单信号
-        signal_info['signals'].append({
-            'type': 'UPDATE_STOP_LOSS',
-            'position': self.position,
-            'new_stop_loss': best_stop_loss,  # 🔴 使用 new_stop_loss 字段
-            'old_stop_loss': old_stop_loss,  # 🔴 添加旧止损价
-            'reason': f'周期结束更新止损单: {valid_stop_loss_reasons[best_index]}',
-            'current_price': current_price,
-            'all_stop_loss_prices': valid_stop_loss_prices,  # 🔴 使用过滤后的有效止损价列表
-            'all_stop_loss_reasons': valid_stop_loss_reasons  # 🔴 使用过滤后的有效原因列表
-        })
-    
-    def get_current_status(self):
-        """获取当前VIDYA策略状态"""
-        return {
-            'position': self.position,
-            'entry_price': self.entry_price,
-            'stop_loss_level': self.stop_loss_level,
-            'take_profit_level': self.take_profit_level,
-            'max_loss_level': self.max_loss_level,
-            'sar_value': None,  # VIDYA策略没有SAR，返回None
-            'timeframe': self.timeframe,
-            'current_trend_direction': self.current_trend_direction,
-            'previous_trend_direction': self.previous_trend_direction,
-            'position_shares': self.position_shares,
-            'current_invested_amount': self.current_invested_amount,
-            'volatility_info': self.volatility_calculator.get_volatility_info() if hasattr(self, 'volatility_calculator') else {}
-        }
