@@ -388,7 +388,7 @@ def scrape_etf_data_for_coin(coin_symbol):
                 daily_rows.append(row_data)
         
         # 打印数据
-        logging.info(f"{coin_name} ETF: 共提取 {len(daily_rows)} 行每日数据")
+        # logging.info(f"{coin_name} ETF: 共提取 {len(daily_rows)} 行每日数据")
         if total_row:
             logging.info(f"{coin_name} ETF: 找到总计数据行")
         

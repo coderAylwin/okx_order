@@ -152,7 +152,7 @@ def scrape_odaily_rss():
         
         # 查找所有 item 元素
         items = root.findall('.//item')
-        logging.info(f"从 RSS feed 中提取到 {len(items)} 条快讯")
+        # logging.info(f"从 RSS feed 中提取到 {len(items)} 条快讯")
         
         # 连接数据库
         if not db_service.connect():
@@ -221,7 +221,7 @@ def scrape_odaily_rss():
                     'author': author
                 })
                 
-                logging.info(f"发现新快讯: {title[:50]}... (发布时间: {pub_date})")
+                # logging.info(f"发现新快讯: {title[:50]}... (发布时间: {pub_date})")
                     
             except Exception as e:
                 logging.error(f"处理快讯时出错: {e}", exc_info=True)
@@ -245,11 +245,11 @@ def scrape_odaily_rss():
                 author=news['author']
             ):
                 saved_count += 1
-                logging.info(f"保存快讯: {news['title'][:50]}... (发布时间: {news['pub_date']})")
+                # logging.info(f"保存快讯: {news['title'][:50]}... (发布时间: {news['pub_date']})")
             else:
                 skipped_count += 1
         
-        logging.info(f"快讯抓取完成: 新增 {saved_count} 条，跳过 {skipped_count} 条（按时间从远到近排序保存）")
+        # logging.info(f"快讯抓取完成: 新增 {saved_count} 条，跳过 {skipped_count} 条（按时间从远到近排序保存）")
         db_service.disconnect()
         
     except requests.RequestException as e:

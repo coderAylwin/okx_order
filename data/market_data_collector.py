@@ -280,7 +280,7 @@ def collect_taker_volume(coin, coin_symbol):
             return False
 
         # 打印数据
-        logging.info(f"{coin} Taker主动量数据：{json_data}")
+        # logging.info(f"{coin} Taker主动量数据：{json_data}")
 
         # 处理数组格式的数据：[ts, sellVol, buyVol]
         data_to_save = []
@@ -340,7 +340,7 @@ def collect_funding_rate(coin, coin_symbol):
             return False
 
         # 打印数据
-        logging.info(f"{coin} 资金费率数据：{json_data}")
+        # logging.info(f"{coin} 资金费率数据：{json_data}")
         
         data_item = json_data['data'][0]
         if isinstance(data_item, dict):
@@ -374,7 +374,7 @@ def collect_open_interest(coin, coin_symbol):
         ts_datetime_utc8 = datetime.now(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
 
         # 打印数据
-        logging.info(f"{coin} 持仓量数据：{json_data}")
+        # logging.info(f"{coin} 持仓量数据：{json_data}")
         
         if json_data.get('code') == '0' and json_data.get('data'):
             data = json_data['data']
@@ -443,7 +443,7 @@ def collect_long_short_ratio(coin, coin_symbol):
 
         
         # 打印数据
-        logging.info(f"{coin} 多空比数据：{json_data}")
+        # logging.info(f"{coin} 多空比数据：{json_data}")
         
         data = json_data['data']
         if isinstance(data[0], list) and len(data[0]) >= 2:
@@ -642,15 +642,15 @@ if __name__ == "__main__":
     
     # 高频数据：每分钟的第30秒执行（Taker主动量、持仓量）
     scheduler.add_job(collect_frequent_data, 'cron', minute='*', second='30')
-    logging.info("高频数据收集调度：每分钟的第30秒（Taker主动量、持仓量）")
+    # logging.info("高频数据收集调度：每分钟的第30秒（Taker主动量、持仓量）")
     
     # 周期性数据：每5分钟的第30秒执行（资金费率、多空比）
     scheduler.add_job(collect_periodic_data, 'cron', minute='*/5', second='30')
-    logging.info("周期性数据收集调度：每5分钟的第30秒（资金费率、多空比）")
+    # logging.info("周期性数据收集调度：每5分钟的第30秒（资金费率、多空比）")
     
     # 宏观经济数据：每小时的第0分第30秒执行
     scheduler.add_job(collect_macro_economic_data, 'cron', minute='0', second='0')
-    logging.info("宏观经济数据收集调度：每小时的第0分第30秒")
+    # logging.info("宏观经济数据收集调度：每小时的第0分第30秒")
     
     logging.info("市场数据收集调度器启动")
     
