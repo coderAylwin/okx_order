@@ -65,6 +65,8 @@ class OdailyDatabaseService:
         cursor = self.connection.cursor()
         try:
             # 创建快讯数据表
+            # 注意：link 字段不使用唯一索引，因为长度可能超过 MySQL 索引限制
+            # 唯一性通过应用层逻辑（get_existing_links）来保证
             create_table = """
             CREATE TABLE IF NOT EXISTS odaily_newsflash (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -77,7 +79,6 @@ class OdailyDatabaseService:
                 author VARCHAR(100) DEFAULT NULL COMMENT '作者',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-                UNIQUE KEY uk_link (link),
                 INDEX idx_pub_date (pub_date),
                 INDEX idx_created_at (created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Odaily快讯数据表';
@@ -142,20 +143,34 @@ class OdailyDatabaseService:
         
         cursor = self.connection.cursor()
         try:
-            sql = """
-            INSERT INTO odaily_newsflash 
-            (title, link, description, description_text, pub_date, category, author)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                title = VALUES(title),
-                description = VALUES(description),
-                description_text = VALUES(description_text),
-                pub_date = VALUES(pub_date),
-                category = VALUES(category),
-                author = VALUES(author),
-                updated_at = CURRENT_TIMESTAMP
-            """
-            cursor.execute(sql, (title, link, description, description_text, pub_date, category, author))
+            # 先检查是否已存在（通过 link）
+            check_sql = "SELECT id FROM odaily_newsflash WHERE link = %s"
+            cursor.execute(check_sql, (link,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # 如果已存在，更新记录
+                update_sql = """
+                UPDATE odaily_newsflash 
+                SET title = %s,
+                    description = %s,
+                    description_text = %s,
+                    pub_date = %s,
+                    category = %s,
+                    author = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE link = %s
+                """
+                cursor.execute(update_sql, (title, description, description_text, pub_date, category, author, link))
+            else:
+                # 如果不存在，插入新记录
+                insert_sql = """
+                INSERT INTO odaily_newsflash 
+                (title, link, description, description_text, pub_date, category, author)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """
+                cursor.execute(insert_sql, (title, link, description, description_text, pub_date, category, author))
+            
             self.connection.commit()
             logging.debug(f"快讯保存成功: {title[:50]}...")
             return True
