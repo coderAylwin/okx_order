@@ -14,7 +14,23 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from tenacity import retry, stop_after_attempt, wait_fixed
 import json
-import websocket
+# 使用 websocket-client 库（需要安装: pip install websocket-client）
+# 注意：不要安装 websocket 包，要安装 websocket-client 包
+try:
+    import websocket
+    if not hasattr(websocket, 'WebSocketApp'):
+        raise ImportError(
+            "错误：检测到错误的 websocket 模块。\n"
+            "请卸载 websocket 并安装 websocket-client：\n"
+            "  pip uninstall websocket\n"
+            "  pip install websocket-client"
+        )
+except ImportError as e:
+    raise ImportError(
+        "请安装 websocket-client 库：\n"
+        "  pip install websocket-client\n"
+        f"原始错误: {e}"
+    )
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from market_data_database import MarketDataDatabaseService
