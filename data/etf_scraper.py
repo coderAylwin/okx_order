@@ -11,15 +11,25 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from bs4 import BeautifulSoup
 import time
 import os
 import logging
 import re
+import subprocess
+import shutil
 from apscheduler.schedulers.blocking import BlockingScheduler
 import configparser
 from datetime import datetime
 from etf_database import ETFDatabaseService
+
+# 尝试导入 webdriver-manager（可选）
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+    WEBDRIVER_MANAGER_AVAILABLE = True
+except ImportError:
+    WEBDRIVER_MANAGER_AVAILABLE = False
 
 # ETF配置：币种名称、URL、coin_type
 ETF_CONFIGS = {
@@ -84,16 +94,134 @@ logging.info("ETF抓取日志系统初始化完成")
 logging.info(f"日志文件路径: {os.path.join(log_dir, 'etf_scraper.log')}")
 logging.info(f"调度间隔: 每小时执行一次 ({cron_timezone})")
 
-# 设置 Chrome 选项
-chrome_options = Options()
-chrome_options.add_argument(
-    "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-chrome_options.add_experimental_option('useAutomationExtension', False)
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--headless=new")
+# 设置 Chrome 选项（服务器环境优化）
+def find_chrome_binary():
+    """查找 Chrome 浏览器二进制文件路径"""
+    possible_paths = [
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/local/bin/google-chrome',
+        '/usr/local/bin/chromium',
+        '/snap/bin/chromium',
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path) and os.access(path, os.X_OK):
+            return path
+    
+    # 尝试使用 which 命令查找
+    try:
+        result = subprocess.run(['which', 'google-chrome'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except:
+        pass
+    
+    try:
+        result = subprocess.run(['which', 'chromium'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except:
+        pass
+    
+    return None
+
+
+def get_chrome_version(chrome_binary):
+    """获取 Chrome 版本号"""
+    if not chrome_binary:
+        return None
+    
+    try:
+        result = subprocess.run([chrome_binary, '--version'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            version_str = result.stdout.strip()
+            # 提取版本号，例如 "Google Chrome 120.0.6099.109" -> "120"
+            match = re.search(r'(\d+)\.', version_str)
+            if match:
+                return int(match.group(1))
+    except:
+        pass
+    return None
+
+
+def get_chromedriver_version(chromedriver_path):
+    """获取 ChromeDriver 版本号"""
+    if not chromedriver_path:
+        return None
+    
+    try:
+        result = subprocess.run([chromedriver_path, '--version'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            version_str = result.stdout.strip()
+            # 提取版本号，例如 "ChromeDriver 120.0.6099.109" -> "120"
+            match = re.search(r'(\d+)\.', version_str)
+            if match:
+                return int(match.group(1))
+    except:
+        pass
+    return None
+
+
+def check_version_compatibility(chrome_version, chromedriver_version):
+    """检查 Chrome 和 ChromeDriver 版本是否兼容"""
+    if chrome_version is None or chromedriver_version is None:
+        return False, "无法获取版本信息"
+    
+    # Chrome 和 ChromeDriver 的主版本号应该匹配
+    if chrome_version == chromedriver_version:
+        return True, f"版本匹配 ✓ (Chrome {chrome_version} = ChromeDriver {chromedriver_version})"
+    elif abs(chrome_version - chromedriver_version) <= 2:
+        # 允许小版本差异（±2）
+        return True, f"版本基本兼容 (Chrome {chrome_version} ≈ ChromeDriver {chromedriver_version})"
+    else:
+        return False, f"版本不匹配 ✗ (Chrome {chrome_version} ≠ ChromeDriver {chromedriver_version})"
+
+
+def get_chrome_options():
+    """获取配置好的 Chrome 选项"""
+    chrome_options = Options()
+    
+    # 查找并设置 Chrome 二进制路径
+    chrome_binary = find_chrome_binary()
+    if chrome_binary:
+        chrome_options.binary_location = chrome_binary
+        logging.info(f"找到 Chrome 二进制文件: {chrome_binary}")
+    else:
+        logging.warning("未找到 Chrome 二进制文件，将使用系统默认路径")
+    
+    chrome_options.add_argument(
+        "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    # 服务器环境必需的选项
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+    chrome_options.add_argument("--disable-renderer-backgrounding")
+    chrome_options.add_argument("--disable-features=TranslateUI")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--remote-debugging-port=9222")
+    
+    # 设置日志级别，减少输出
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    
+    return chrome_options
 
 
 def is_valid_numeric_value(value):
@@ -277,7 +405,165 @@ def scrape_etf_data_for_coin(coin_symbol):
     simple_header = config['simple_header']
     
     logging.info(f"开始执行 {coin_name} ETF数据抓取 ({coin_symbol})")
-    driver = webdriver.Chrome(options=chrome_options)
+    
+    # 创建 Chrome WebDriver，带错误处理和版本检查
+    driver = None
+    max_retries = 3
+    retry_count = 0
+    
+    # 诊断信息和版本检查
+    logging.info("=" * 60)
+    logging.info("检查 Chrome 环境...")
+    
+    # 检测运行平台
+    import platform
+    system_platform = platform.system()
+    machine = platform.machine()
+    logging.info(f"运行平台: {system_platform} {machine}")
+    
+    chrome_binary = find_chrome_binary()
+    chrome_version = None
+    chromedriver_version = None
+    
+    if chrome_binary:
+        logging.info(f"✓ 找到 Chrome: {chrome_binary}")
+        chrome_version = get_chrome_version(chrome_binary)
+        if chrome_version:
+            logging.info(f"  Chrome 主版本: {chrome_version}")
+        else:
+            try:
+                result = subprocess.run([chrome_binary, '--version'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    logging.info(f"  Chrome 版本: {result.stdout.strip()}")
+            except:
+                pass
+    else:
+        logging.warning("✗ 未找到 Chrome 二进制文件")
+    
+    # 检查 ChromeDriver
+    chromedriver_path = shutil.which('chromedriver')
+    if chromedriver_path:
+        logging.info(f"✓ 找到 ChromeDriver: {chromedriver_path}")
+        chromedriver_version = get_chromedriver_version(chromedriver_path)
+        if chromedriver_version:
+            logging.info(f"  ChromeDriver 主版本: {chromedriver_version}")
+        else:
+            try:
+                result = subprocess.run([chromedriver_path, '--version'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    logging.info(f"  ChromeDriver 版本: {result.stdout.strip()}")
+            except:
+                pass
+    else:
+        logging.warning("✗ 未找到 ChromeDriver")
+        if WEBDRIVER_MANAGER_AVAILABLE:
+            logging.info("  将使用 webdriver-manager 自动下载匹配的 ChromeDriver")
+        else:
+            logging.warning("  建议安装: pip install webdriver-manager")
+    
+    # 版本兼容性检查
+    if chrome_version is not None and chromedriver_version is not None:
+        is_compatible, compat_msg = check_version_compatibility(chrome_version, chromedriver_version)
+        if is_compatible:
+            logging.info(f"✓ {compat_msg}")
+        else:
+            logging.error(f"✗ {compat_msg}")
+            logging.error("=" * 60)
+            logging.error("版本不匹配！这是导致 WebDriver 创建失败的主要原因。")
+            logging.error("")
+            logging.error("解决方案：")
+            logging.error("1. 推荐：使用 webdriver-manager 自动管理版本")
+            logging.error("   pip install webdriver-manager")
+            logging.error("")
+            logging.error("2. 手动修复版本匹配：")
+            logging.error(f"   当前 Chrome 版本: {chrome_version}")
+            logging.error(f"   当前 ChromeDriver 版本: {chromedriver_version}")
+            logging.error("   需要下载匹配的 ChromeDriver:")
+            logging.error(f"   https://googlechromelabs.github.io/chrome-for-testing/")
+            logging.error("   或使用: pip install webdriver-manager")
+            logging.error("=" * 60)
+    elif chrome_version is not None:
+        logging.warning(f"⚠ 无法检查版本兼容性（Chrome {chrome_version}，但未找到 ChromeDriver）")
+    elif chromedriver_version is not None:
+        logging.warning(f"⚠ 无法检查版本兼容性（ChromeDriver {chromedriver_version}，但未找到 Chrome）")
+    
+    logging.info("=" * 60)
+    
+    while retry_count < max_retries:
+        try:
+            chrome_options = get_chrome_options()
+            
+            # 尝试使用 webdriver-manager（如果可用）
+            if WEBDRIVER_MANAGER_AVAILABLE and not chromedriver_path:
+                try:
+                    service = Service(ChromeDriverManager().install())
+                    driver = webdriver.Chrome(service=service, options=chrome_options)
+                    logging.info("✓ 使用 webdriver-manager 成功创建 WebDriver")
+                    break
+                except Exception as wdm_error:
+                    logging.warning(f"webdriver-manager 失败，尝试系统 ChromeDriver: {str(wdm_error)}")
+                    # 继续尝试使用系统 ChromeDriver
+            
+            # 使用系统 ChromeDriver
+            if chromedriver_path:
+                service = Service(chromedriver_path)
+                driver = webdriver.Chrome(service=service, options=chrome_options)
+            else:
+                driver = webdriver.Chrome(options=chrome_options)
+            
+            logging.info("✓ Chrome WebDriver 创建成功")
+            break  # 成功创建，退出循环
+            
+        except Exception as e:
+            retry_count += 1
+            error_msg = str(e)
+            if retry_count >= max_retries:
+                logging.error(f"{coin_name} ETF: 创建 Chrome WebDriver 失败（已重试 {max_retries} 次）")
+                logging.error(f"错误详情: {error_msg}")
+                logging.error("=" * 60)
+                
+                # 显示当前版本信息
+                if chrome_version is not None:
+                    logging.error(f"当前 Chrome 版本: {chrome_version}")
+                if chromedriver_version is not None:
+                    logging.error(f"当前 ChromeDriver 版本: {chromedriver_version}")
+                if chrome_version is not None and chromedriver_version is not None:
+                    is_compat, compat_msg = check_version_compatibility(chrome_version, chromedriver_version)
+                    if not is_compat:
+                        logging.error(f"⚠ 版本不匹配: {compat_msg}")
+                        logging.error("")
+                        logging.error("这是导致失败的主要原因！")
+                        logging.error("")
+                
+                logging.error("故障排除建议：")
+                logging.error("1. 【推荐】使用 webdriver-manager 自动管理版本（最简单）:")
+                logging.error("   pip install webdriver-manager")
+                logging.error("   这会自动下载匹配的 ChromeDriver")
+                logging.error("")
+                logging.error("2. 手动修复版本匹配:")
+                if chrome_version is not None:
+                    logging.error(f"   您的 Chrome 版本是: {chrome_version}")
+                    logging.error(f"   需要下载匹配的 ChromeDriver: https://googlechromelabs.github.io/chrome-for-testing/")
+                logging.error("")
+                logging.error("3. 安装 Chrome 浏览器（如果未安装）:")
+                logging.error("   Ubuntu/Debian: sudo apt-get install -y google-chrome-stable")
+                logging.error("   或: sudo apt-get install -y chromium-browser")
+                logging.error("")
+                logging.error("4. 检查版本匹配:")
+                logging.error("   google-chrome --version")
+                logging.error("   chromedriver --version")
+                logging.error("   主版本号必须匹配（例如 Chrome 120 需要 ChromeDriver 120）")
+                logging.error("=" * 60)
+                raise
+            else:
+                logging.warning(f"{coin_name} ETF: 创建 Chrome WebDriver 失败，{retry_count}/{max_retries} 次重试")
+                logging.warning(f"错误: {error_msg}")
+                time.sleep(3)  # 等待后重试
+    
+    if driver is None:
+        raise Exception("无法创建 Chrome WebDriver")
     
     try:
         driver.get(url)
@@ -470,7 +756,12 @@ def scrape_etf_data_for_coin(coin_symbol):
         logging.error(f"{coin_name} ETF: 发生错误: {str(e)}", exc_info=True)
     
     finally:
-        driver.quit()
+        # 安全关闭 driver
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception as e:
+                logging.warning(f"{coin_name} ETF: 关闭 WebDriver 时出错: {str(e)}")
 
 
 def scrape_all_etf_data():

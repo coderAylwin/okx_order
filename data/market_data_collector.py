@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from tenacity import retry, stop_after_attempt, wait_fixed
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 # 使用 websocket-client 库（需要安装: pip install websocket-client）
 # 注意：不要安装 websocket 包，要安装 websocket-client 包
 try:
@@ -260,11 +261,10 @@ class OKXLiquidationListener:
 
 
 # ==================== 数据收集函数 ====================
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
-def collect_taker_volume(coin, coin_symbol):
-    """收集Taker主动量数据"""
+def collect_taker_volume_with_db(coin, coin_symbol, db_service):
+    """收集Taker主动量数据（使用指定的数据库连接）"""
     try:
-        url = f"https://www.okx.com/api/v5/rubik/stat/taker-volume-contract?instId={coin_symbol}&unit=0&period=5m&limit=6"
+        url = f"https://www.okx.com/api/v5/rubik/stat/taker-volume-contract?instId={coin_symbol}&unit=0&period=5m&limit=10"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, timeout=10, headers=headers)
         resp.raise_for_status()
@@ -278,9 +278,6 @@ def collect_taker_volume(coin, coin_symbol):
         if not isinstance(data, list) or len(data) == 0:
             logging.warning(f"{coin} Taker主动量：数据为空")
             return False
-
-        # 打印数据
-        # logging.info(f"{coin} Taker主动量数据：{json_data}")
 
         # 处理数组格式的数据：[ts, sellVol, buyVol]
         data_to_save = []
@@ -304,11 +301,9 @@ def collect_taker_volume(coin, coin_symbol):
         
         # 批量保存
         if data_to_save:
-            result = market_db.save_taker_volume_batch(coin, coin_symbol, data_to_save)
+            result = db_service.save_taker_volume_batch(coin, coin_symbol, data_to_save)
             if not result:
-                error_msg = f"{coin} Taker主动量数据保存失败，将重试"
-                logging.error(error_msg)
-                raise Exception(error_msg)  # 抛出异常以触发重试
+                logging.error(f"{coin} Taker主动量数据保存失败")
             return result
         
         return False
@@ -316,14 +311,20 @@ def collect_taker_volume(coin, coin_symbol):
     except Exception as e:
         error_msg = f"{coin} Taker主动量收集失败：{type(e).__name__}: {str(e)}"
         logging.error(error_msg)
-        import traceback
-        logging.error(f"异常详情: {traceback.format_exc()}")
-        raise  # 重新抛出异常以触发重试机制
+        return False
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
-def collect_funding_rate(coin, coin_symbol):
-    """收集资金费率数据"""
+def collect_taker_volume(coin, coin_symbol):
+    """收集Taker主动量数据"""
+    result = collect_taker_volume_with_db(coin, coin_symbol, market_db)
+    if not result:
+        raise Exception(f"{coin} Taker主动量数据保存失败，将重试")
+    return result
+
+
+def collect_funding_rate_with_db(coin, coin_symbol, db_service):
+    """收集资金费率数据（使用指定的数据库连接）"""
     try:
         url = f"https://www.okx.com/api/v5/public/funding-rate?instId={coin_symbol}"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -338,9 +339,6 @@ def collect_funding_rate(coin, coin_symbol):
         if not json_data.get('data') or len(json_data['data']) == 0:
             logging.warning(f"{coin} 资金费率：数据为空")
             return False
-
-        # 打印数据
-        # logging.info(f"{coin} 资金费率数据：{json_data}")
         
         data_item = json_data['data'][0]
         if isinstance(data_item, dict):
@@ -353,7 +351,7 @@ def collect_funding_rate(coin, coin_symbol):
         # 使用当前时间（资金费率是实时值）
         ts_datetime_utc8 = datetime.now(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
         
-        return market_db.save_funding_rate(coin, coin_symbol, ts_datetime_utc8, funding_rate, funding_rate_pct)
+        return db_service.save_funding_rate(coin, coin_symbol, ts_datetime_utc8, funding_rate, funding_rate_pct)
         
     except Exception as e:
         logging.error(f"{coin} 资金费率收集失败：{e}")
@@ -361,20 +359,22 @@ def collect_funding_rate(coin, coin_symbol):
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
-def collect_open_interest(coin, coin_symbol):
-    """收集持仓量数据"""
+def collect_funding_rate(coin, coin_symbol):
+    """收集资金费率数据"""
+    return collect_funding_rate_with_db(coin, coin_symbol, market_db)
+
+
+def collect_open_interest_with_db(coin, coin_symbol, db_service):
+    """收集持仓量数据（使用指定的数据库连接）"""
     try:
         # 先尝试使用 rubik 端点
-        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history?instId={coin_symbol}&period=5m&limit=3"
+        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history?instId={coin_symbol}&period=5m&limit=10"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, timeout=10, headers=headers)
         resp.raise_for_status()
         json_data = resp.json()
         
         ts_datetime_utc8 = datetime.now(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
-
-        # 打印数据
-        # logging.info(f"{coin} 持仓量数据：{json_data}")
         
         if json_data.get('code') == '0' and json_data.get('data'):
             data = json_data['data']
@@ -402,7 +402,7 @@ def collect_open_interest(coin, coin_symbol):
                 
                 # 批量保存
                 if data_to_save:
-                    return market_db.save_open_interest_batch(coin, coin_symbol, data_to_save)
+                    return db_service.save_open_interest_batch(coin, coin_symbol, data_to_save)
         
         # 如果 rubik 端点失败，使用公开端点
         url_public = f"https://www.okx.com/api/v5/public/open-interest?instId={coin_symbol}"
@@ -413,7 +413,7 @@ def collect_open_interest(coin, coin_symbol):
         if json_data_public.get('code') == '0' and json_data_public.get('data') and len(json_data_public['data']) > 0:
             latest_oi = float(json_data_public['data'][0].get('oi', 0))
             if latest_oi > 0:
-                return market_db.save_open_interest(coin, coin_symbol, ts_datetime_utc8, latest_oi)
+                return db_service.save_open_interest(coin, coin_symbol, ts_datetime_utc8, latest_oi)
         
         logging.warning(f"{coin} 持仓量：数据获取失败")
         return False
@@ -424,8 +424,13 @@ def collect_open_interest(coin, coin_symbol):
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
-def collect_long_short_ratio(coin, coin_symbol):
-    """收集多空比数据"""
+def collect_open_interest(coin, coin_symbol):
+    """收集持仓量数据"""
+    return collect_open_interest_with_db(coin, coin_symbol, market_db)
+
+
+def collect_long_short_ratio_with_db(coin, coin_symbol, db_service):
+    """收集多空比数据（使用指定的数据库连接）"""
     try:
         url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId={coin_symbol}&limit=10"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -440,10 +445,6 @@ def collect_long_short_ratio(coin, coin_symbol):
         if not json_data.get('data') or len(json_data['data']) < 1:
             logging.warning(f"{coin} 多空比：数据不足")
             return False
-
-        
-        # 打印数据
-        # logging.info(f"{coin} 多空比数据：{json_data}")
         
         data = json_data['data']
         if isinstance(data[0], list) and len(data[0]) >= 2:
@@ -461,11 +462,17 @@ def collect_long_short_ratio(coin, coin_symbol):
         # 使用当前时间
         ts_datetime_utc8 = datetime.now(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
         
-        return market_db.save_long_short_ratio(coin, coin_symbol, ts_datetime_utc8, latest_ratio, delta_ratio)
+        return db_service.save_long_short_ratio(coin, coin_symbol, ts_datetime_utc8, latest_ratio, delta_ratio)
         
     except Exception as e:
         logging.error(f"{coin} 多空比收集失败：{e}")
         return False
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
+def collect_long_short_ratio(coin, coin_symbol):
+    """收集多空比数据"""
+    return collect_long_short_ratio_with_db(coin, coin_symbol, market_db)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
@@ -553,42 +560,112 @@ def collect_macro_data():
 
 def collect_frequent_data():
     """收集高频数据（每分钟）：Taker主动量、持仓量"""
-    logging.info("=" * 80)
-    logging.info("开始收集高频市场数据（每分钟）")
-    logging.info("=" * 80)
+    start_time = time.time()
+    # logging.info("=" * 80)
+    # logging.info("开始收集高频市场数据（每分钟）")
+    # logging.info("=" * 80)
     
-    # 收集每个币种的高频数据
-    for coin, config in SUPPORTED_COINS.items():
-        coin_symbol = config['symbol']
-        logging.info(f"收集 {coin} 高频数据...")
-        
-        collect_taker_volume(coin, coin_symbol)
-        collect_open_interest(coin, coin_symbol)
-        
-        time.sleep(1)  # 避免请求过快
+    def collect_coin_data(coin, coin_symbol):
+        """收集单个币种的数据（每个线程使用独立的数据库连接）"""
+        # 为每个线程创建独立的数据库连接
+        thread_db = MarketDataDatabaseService(**DB_CONFIG)
+        try:
+            if not thread_db.connect():
+                logging.error(f"{coin} 数据库连接失败")
+                return False
+            
+            # 使用线程本地数据库连接收集数据
+            collect_taker_volume_with_db(coin, coin_symbol, thread_db)
+            collect_open_interest_with_db(coin, coin_symbol, thread_db)
+            return True
+        except Exception as e:
+            logging.error(f"{coin} 高频数据收集失败: {e}")
+            return False
+        finally:
+            # 确保关闭线程本地连接
+            try:
+                thread_db.disconnect()
+            except:
+                pass
     
-    logging.info("高频市场数据收集完成")
-    logging.info("=" * 80)
+    # 使用线程池并行收集多个币种的数据，提高效率
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {}
+        for coin, config in SUPPORTED_COINS.items():
+            coin_symbol = config['symbol']
+            future = executor.submit(collect_coin_data, coin, coin_symbol)
+            futures[future] = coin
+        
+        # 等待所有任务完成，设置超时（最多30秒）
+        for future in futures:
+            coin = futures[future]
+            try:
+                future.result(timeout=30)
+            except FutureTimeoutError:
+                logging.warning(f"{coin} 高频数据收集超时（30秒）")
+            except Exception as e:
+                logging.error(f"{coin} 高频数据收集异常: {e}")
+    
+    elapsed_time = time.time() - start_time
+    if elapsed_time > 30:
+        logging.warning(f"高频市场数据收集耗时 {elapsed_time:.2f} 秒，可能影响下次执行")
+    # logging.info("高频市场数据收集完成")
+    # logging.info("=" * 80)
 
 
 def collect_periodic_data():
     """收集周期性数据（每5分钟）：资金费率、多空比"""
-    logging.info("=" * 80)
-    logging.info("开始收集周期性市场数据（每5分钟）")
-    logging.info("=" * 80)
+    start_time = time.time()
+    # logging.info("=" * 80)
+    # logging.info("开始收集周期性市场数据（每5分钟）")
+    # logging.info("=" * 80)
     
-    # 收集每个币种的周期性数据
-    for coin, config in SUPPORTED_COINS.items():
-        coin_symbol = config['symbol']
-        logging.info(f"收集 {coin} 周期性数据...")
-        
-        collect_funding_rate(coin, coin_symbol)
-        collect_long_short_ratio(coin, coin_symbol)
-        
-        time.sleep(1)  # 避免请求过快
+    def collect_coin_data(coin, coin_symbol):
+        """收集单个币种的数据（每个线程使用独立的数据库连接）"""
+        # 为每个线程创建独立的数据库连接
+        thread_db = MarketDataDatabaseService(**DB_CONFIG)
+        try:
+            if not thread_db.connect():
+                logging.error(f"{coin} 数据库连接失败")
+                return False
+            
+            # 使用线程本地数据库连接收集数据
+            collect_funding_rate_with_db(coin, coin_symbol, thread_db)
+            collect_long_short_ratio_with_db(coin, coin_symbol, thread_db)
+            return True
+        except Exception as e:
+            logging.error(f"{coin} 周期性数据收集失败: {e}")
+            return False
+        finally:
+            # 确保关闭线程本地连接
+            try:
+                thread_db.disconnect()
+            except:
+                pass
     
-    logging.info("周期性市场数据收集完成")
-    logging.info("=" * 80)
+    # 使用线程池并行收集多个币种的数据，提高效率
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {}
+        for coin, config in SUPPORTED_COINS.items():
+            coin_symbol = config['symbol']
+            future = executor.submit(collect_coin_data, coin, coin_symbol)
+            futures[future] = coin
+        
+        # 等待所有任务完成，设置超时（最多60秒）
+        for future in futures:
+            coin = futures[future]
+            try:
+                future.result(timeout=60)
+            except FutureTimeoutError:
+                logging.warning(f"{coin} 周期性数据收集超时（60秒）")
+            except Exception as e:
+                logging.error(f"{coin} 周期性数据收集异常: {e}")
+    
+    elapsed_time = time.time() - start_time
+    if elapsed_time > 60:
+        logging.warning(f"周期性市场数据收集耗时 {elapsed_time:.2f} 秒，可能影响下次执行")
+    # logging.info("周期性市场数据收集完成")
+    # logging.info("=" * 80)
 
 
 def collect_macro_economic_data():
@@ -641,17 +718,17 @@ if __name__ == "__main__":
     scheduler = BlockingScheduler(timezone=TIMEZONE)
     
     # 高频数据：每分钟的第30秒执行（Taker主动量、持仓量）
-    # max_instances=2: 允许最多2个实例并发运行，避免任务堆积
+    # max_instances=5: 允许最多5个实例并发运行，避免任务堆积
     # coalesce=True: 如果任务堆积，合并为一次执行
-    # misfire_grace_time=60: 任务错过执行后60秒内仍可执行
+    # misfire_grace_time=30: 任务错过执行后30秒内仍可执行（减少堆积）
     scheduler.add_job(
         collect_frequent_data, 
         'cron', 
         minute='*', 
         second='30',
-        max_instances=2,
+        max_instances=5,
         coalesce=True,
-        misfire_grace_time=60
+        misfire_grace_time=30
     )
     # logging.info("高频数据收集调度：每分钟的第30秒（Taker主动量、持仓量）")
     
@@ -661,9 +738,9 @@ if __name__ == "__main__":
         'cron', 
         minute='*/5', 
         second='30',
-        max_instances=2,
+        max_instances=3,
         coalesce=True,
-        misfire_grace_time=300
+        misfire_grace_time=120
     )
     # logging.info("周期性数据收集调度：每5分钟的第30秒（资金费率、多空比）")
     
