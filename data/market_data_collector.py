@@ -641,15 +641,42 @@ if __name__ == "__main__":
     scheduler = BlockingScheduler(timezone=TIMEZONE)
     
     # 高频数据：每分钟的第30秒执行（Taker主动量、持仓量）
-    scheduler.add_job(collect_frequent_data, 'cron', minute='*', second='30')
+    # max_instances=2: 允许最多2个实例并发运行，避免任务堆积
+    # coalesce=True: 如果任务堆积，合并为一次执行
+    # misfire_grace_time=60: 任务错过执行后60秒内仍可执行
+    scheduler.add_job(
+        collect_frequent_data, 
+        'cron', 
+        minute='*', 
+        second='30',
+        max_instances=2,
+        coalesce=True,
+        misfire_grace_time=60
+    )
     # logging.info("高频数据收集调度：每分钟的第30秒（Taker主动量、持仓量）")
     
     # 周期性数据：每5分钟的第30秒执行（资金费率、多空比）
-    scheduler.add_job(collect_periodic_data, 'cron', minute='*/5', second='30')
+    scheduler.add_job(
+        collect_periodic_data, 
+        'cron', 
+        minute='*/5', 
+        second='30',
+        max_instances=2,
+        coalesce=True,
+        misfire_grace_time=300
+    )
     # logging.info("周期性数据收集调度：每5分钟的第30秒（资金费率、多空比）")
     
     # 宏观经济数据：每小时的第0分第30秒执行
-    scheduler.add_job(collect_macro_economic_data, 'cron', minute='0', second='0')
+    scheduler.add_job(
+        collect_macro_economic_data, 
+        'cron', 
+        minute='0', 
+        second='0',
+        max_instances=2,
+        coalesce=True,
+        misfire_grace_time=3600
+    )
     # logging.info("宏观经济数据收集调度：每小时的第0分第30秒")
     
     logging.info("市场数据收集调度器启动")
