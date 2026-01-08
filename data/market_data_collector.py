@@ -283,7 +283,7 @@ class OKXLiquidationListener:
 def collect_taker_volume_with_db(coin, coin_symbol, db_service):
     """收集Taker主动量数据（使用指定的数据库连接）"""
     try:
-        url = f"https://www.okx.com/api/v5/rubik/stat/taker-volume-contract?instId={coin_symbol}&unit=0&period=5m&limit=100"
+        url = f"https://www.okx.com/api/v5/rubik/stat/taker-volume-contract?instId={coin_symbol}&unit=0&period=5m&limit=5"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, timeout=10, headers=headers)
         resp.raise_for_status()
@@ -387,7 +387,7 @@ def collect_open_interest_with_db(coin, coin_symbol, db_service):
     """收集持仓量数据（使用指定的数据库连接）"""
     try:
         # 先尝试使用 rubik 端点
-        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history?instId={coin_symbol}&period=5m&limit=100"
+        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history?instId={coin_symbol}&period=5m&limit=5"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, timeout=10, headers=headers)
         resp.raise_for_status()
@@ -451,7 +451,7 @@ def collect_open_interest(coin, coin_symbol):
 def collect_long_short_ratio_with_db(coin, coin_symbol, db_service):
     """收集多空比数据（使用指定的数据库连接）"""
     try:
-        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId={coin_symbol}&limit=100"
+        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId={coin_symbol}&limit=5"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, timeout=10, headers=headers)
         resp.raise_for_status()
@@ -581,7 +581,7 @@ def collect_macro_data():
 def collect_binance_open_interest(coin, coin_symbol):
     """收集币安持仓量数据"""
     try:
-        url = f"https://fapi.binance.com/futures/data/openInterestHist?symbol={coin_symbol}&period=5m&limit=100"
+        url = f"https://fapi.binance.com/futures/data/openInterestHist?symbol={coin_symbol}&period=5m&limit=5"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, timeout=10, headers=headers)
         resp.raise_for_status()
@@ -647,7 +647,7 @@ def collect_binance_open_interest(coin, coin_symbol):
 def collect_binance_taker_volume(coin, coin_symbol):
     """收集币安主动买卖量数据"""
     try:
-        url = f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={coin_symbol}&period=5m&limit=100"
+        url = f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={coin_symbol}&period=5m&limit=5"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, timeout=10, headers=headers)
         resp.raise_for_status()
