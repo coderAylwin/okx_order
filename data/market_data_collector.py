@@ -449,42 +449,225 @@ def collect_open_interest(coin, coin_symbol):
 
 
 def collect_long_short_ratio_with_db(coin, coin_symbol, db_service):
-    """收集多空比数据（使用指定的数据库连接）"""
+    """收集多空比数据（使用指定的数据库连接）- 每个接口独立保存"""
     try:
-        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId={coin_symbol}&limit=5"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(url, timeout=10, headers=headers)
-        resp.raise_for_status()
-        json_data = resp.json()
+        total_saved = 0
+        total_updated = 0
+        total_skipped = 0
         
-        if json_data.get('code') != '0':
-            logging.warning(f"{coin} 多空比：API错误（{json_data.get('code')}: {json_data.get('msg', '未知错误')}）")
-            return False
+        # 接口1：按合约获取多空比
+        try:
+            url1 = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract?instId={coin_symbol}&limit=5"
+            resp1 = requests.get(url1, timeout=10, headers=headers)
+            resp1.raise_for_status()
+            json_data1 = resp1.json()
+            
+            if json_data1.get('code') == '0' and json_data1.get('data') and len(json_data1['data']) >= 1:
+                data1 = json_data1['data']
+                logging.info(f"{coin} 多空比（合约）：{data1}")
+                
+                # 计算delta_ratio需要前一个时间点的数据
+                prev_ratio = None
+                sorted_data = []
+                
+                for item in data1:
+                    if isinstance(item, list) and len(item) >= 2:
+                        timestamp_ms = int(item[0])
+                        ratio = float(item[1])
+                        sorted_data.append((timestamp_ms, ratio))
+                    elif isinstance(item, dict):
+                        timestamp_ms = int(item.get('timestamp', 0))
+                        ratio = float(item.get('longShortRatio', 0))
+                        if timestamp_ms > 0:
+                            sorted_data.append((timestamp_ms, ratio))
+                
+                # 按时间戳排序
+                sorted_data.sort(key=lambda x: x[0])
+                
+                for timestamp_ms, ratio in sorted_data:
+                    delta_ratio = (ratio - prev_ratio) if prev_ratio is not None else None
+                    
+                    # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                    ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                    
+                    # 检查并保存接口1的数据（每条数据都进行一致性检查）
+                    result = db_service.save_long_short_ratio_partial(
+                        coin, coin_symbol, ts_datetime_utc8, 
+                        long_short_ratio=ratio, 
+                        delta_ratio=delta_ratio
+                    )
+                    if result == 'saved':
+                        total_saved += 1
+                        logging.debug(f"{coin} 多空比（合约）数据新增: {ts_datetime_utc8} ratio={ratio}")
+                    elif result == 'updated':
+                        total_updated += 1
+                        logging.debug(f"{coin} 多空比（合约）数据更新: {ts_datetime_utc8} ratio={ratio}")
+                    elif result == 'skipped':
+                        total_skipped += 1
+                        logging.debug(f"{coin} 多空比（合约）数据一致，跳过: {ts_datetime_utc8} ratio={ratio}")
+                    
+                    prev_ratio = ratio
+            else:
+                logging.warning(f"{coin} 多空比（合约）：API错误或数据为空")
+        except Exception as e1:
+            logging.warning(f"{coin} 多空比（合约）获取失败：{e1}")
         
-        if not json_data.get('data') or len(json_data['data']) < 1:
-            logging.warning(f"{coin} 多空比：数据不足")
-            return False
+        # 接口2：按币种获取多空比（过去半小时数据）
+        try:
+            # 计算过去半小时的时间范围（UTC+8时间）
+            now_utc8 = datetime.now(ZoneInfo('Asia/Shanghai'))
+            end_time = now_utc8
+            begin_time = now_utc8 - timedelta(minutes=30)
+            
+            # 转换为UTC时间戳（毫秒）
+            end_timestamp_ms = int(end_time.replace(tzinfo=ZoneInfo('Asia/Shanghai')).astimezone(ZoneInfo('UTC')).timestamp() * 1000)
+            begin_timestamp_ms = int(begin_time.replace(tzinfo=ZoneInfo('Asia/Shanghai')).astimezone(ZoneInfo('UTC')).timestamp() * 1000)
+            
+            url2 = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={coin}&period=5m&begin={begin_timestamp_ms}&end={end_timestamp_ms}"
+            resp2 = requests.get(url2, timeout=10, headers=headers)
+            resp2.raise_for_status()
+            json_data2 = resp2.json()
+            
+            logging.info(f"{coin} 多空比（币种）：{json_data2}")
+            
+            if json_data2.get('code') == '0' and json_data2.get('data') and len(json_data2['data']) >= 1:
+                data2 = json_data2['data']
+                
+                for item in data2:
+                    if isinstance(item, list) and len(item) >= 2:
+                        timestamp_ms = int(item[0])
+                        ratio = float(item[1])
+                    elif isinstance(item, dict):
+                        timestamp_ms = int(item.get('timestamp', 0))
+                        ratio = float(item.get('ratio', 0))
+                    else:
+                        continue
+                    
+                    if timestamp_ms <= 0:
+                        continue
+                    
+                    # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                    ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                    
+                    # 检查并保存接口2的数据（每条数据都进行一致性检查）
+                    result = db_service.save_long_short_ratio_partial(
+                        coin, coin_symbol, ts_datetime_utc8, 
+                        long_short_ratio_by_ccy=ratio
+                    )
+                    if result == 'saved':
+                        total_saved += 1
+                        logging.debug(f"{coin} 多空比（币种）数据新增: {ts_datetime_utc8} ratio={ratio}")
+                    elif result == 'updated':
+                        total_updated += 1
+                        logging.debug(f"{coin} 多空比（币种）数据更新: {ts_datetime_utc8} ratio={ratio}")
+                    elif result == 'skipped':
+                        total_skipped += 1
+                        logging.debug(f"{coin} 多空比（币种）数据一致，跳过: {ts_datetime_utc8} ratio={ratio}")
+        except Exception as e2:
+            logging.warning(f"{coin} 多空比（币种）获取失败：{e2}")
         
-        data = json_data['data']
-        if isinstance(data[0], list) and len(data[0]) >= 2:
-            latest_ratio = float(data[0][1])
-            prev_ratio = float(data[1][1]) if len(data) >= 2 else latest_ratio
-        elif isinstance(data[0], dict):
-            latest_ratio = float(data[0].get('longShortRatio', 1))
-            prev_ratio = float(data[1].get('longShortRatio', 1)) if len(data) >= 2 else latest_ratio
+        # 接口3：精英交易员合约多空持仓人数比
+        try:
+            url3 = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio-contract-top-trader?instId={coin_symbol}&limit=5"
+            resp3 = requests.get(url3, timeout=10, headers=headers)
+            resp3.raise_for_status()
+            json_data3 = resp3.json()
+            
+            logging.info(f"{coin} 多空比（精英交易员人数）：{json_data3}")
+            
+            if json_data3.get('code') == '0' and json_data3.get('data') and len(json_data3['data']) >= 1:
+                data3 = json_data3['data']
+                
+                for item in data3:
+                    if isinstance(item, list) and len(item) >= 2:
+                        timestamp_ms = int(item[0])
+                        ratio = float(item[1])
+                    elif isinstance(item, dict):
+                        timestamp_ms = int(item.get('timestamp', 0))
+                        ratio = float(item.get('longShortAcctRatio', 0))
+                    else:
+                        continue
+                    
+                    if timestamp_ms <= 0:
+                        continue
+                    
+                    # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                    ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                    
+                    # 检查并保存接口3的数据（每条数据都进行一致性检查）
+                    result = db_service.save_long_short_ratio_partial(
+                        coin, coin_symbol, ts_datetime_utc8, 
+                        top_trader_account_ratio=ratio
+                    )
+                    if result == 'saved':
+                        total_saved += 1
+                        logging.debug(f"{coin} 多空比（精英人数）数据新增: {ts_datetime_utc8} ratio={ratio}")
+                    elif result == 'updated':
+                        total_updated += 1
+                        logging.debug(f"{coin} 多空比（精英人数）数据更新: {ts_datetime_utc8} ratio={ratio}")
+                    elif result == 'skipped':
+                        total_skipped += 1
+                        logging.debug(f"{coin} 多空比（精英人数）数据一致，跳过: {ts_datetime_utc8} ratio={ratio}")
+        except Exception as e3:
+            logging.warning(f"{coin} 多空比（精英交易员人数）获取失败：{e3}")
+        
+        # 接口4：精英交易员合约多空持仓仓位比
+        try:
+            url4 = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-position-ratio-contract-top-trader?instId={coin_symbol}&limit=5"
+            resp4 = requests.get(url4, timeout=10, headers=headers)
+            resp4.raise_for_status()
+            json_data4 = resp4.json()
+            
+            logging.info(f"{coin} 多空比（精英交易员仓位）：{json_data4}")
+            
+            if json_data4.get('code') == '0' and json_data4.get('data') and len(json_data4['data']) >= 1:
+                data4 = json_data4['data']
+                
+                for item in data4:
+                    if isinstance(item, list) and len(item) >= 2:
+                        timestamp_ms = int(item[0])
+                        ratio = float(item[1])
+                    elif isinstance(item, dict):
+                        timestamp_ms = int(item.get('timestamp', 0))
+                        ratio = float(item.get('longShortPosRatio', 0))
+                    else:
+                        continue
+                    
+                    if timestamp_ms <= 0:
+                        continue
+                    
+                    # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                    ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                    
+                    # 检查并保存接口4的数据（每条数据都进行一致性检查）
+                    result = db_service.save_long_short_ratio_partial(
+                        coin, coin_symbol, ts_datetime_utc8, 
+                        top_trader_position_ratio=ratio
+                    )
+                    if result == 'saved':
+                        total_saved += 1
+                        logging.debug(f"{coin} 多空比（精英仓位）数据新增: {ts_datetime_utc8} ratio={ratio}")
+                    elif result == 'updated':
+                        total_updated += 1
+                        logging.debug(f"{coin} 多空比（精英仓位）数据更新: {ts_datetime_utc8} ratio={ratio}")
+                    elif result == 'skipped':
+                        total_skipped += 1
+                        logging.debug(f"{coin} 多空比（精英仓位）数据一致，跳过: {ts_datetime_utc8} ratio={ratio}")
+        except Exception as e4:
+            logging.warning(f"{coin} 多空比（精英交易员仓位）获取失败：{e4}")
+        
+        if total_saved > 0 or total_updated > 0:
+            logging.info(f"{coin} 多空比数据保存完成: 新增={total_saved}, 更新={total_updated}, 跳过={total_skipped}")
+            return True
         else:
-            logging.warning(f"{coin} 多空比：数据格式不支持")
-            return False
-        
-        delta_ratio = latest_ratio - prev_ratio if prev_ratio else None
-        
-        # 使用当前时间
-        ts_datetime_utc8 = datetime.now(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
-        
-        return db_service.save_long_short_ratio(coin, coin_symbol, ts_datetime_utc8, latest_ratio, delta_ratio)
+            logging.debug(f"{coin} 多空比数据全部已存在，无需保存")
+            return True
         
     except Exception as e:
         logging.error(f"{coin} 多空比收集失败：{e}")
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
         return False
 
 

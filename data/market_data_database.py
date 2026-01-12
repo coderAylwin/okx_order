@@ -265,6 +265,86 @@ class MarketDataDatabaseService:
             except Exception as alter_error:
                 logging.debug(f"检查/修改表结构（可能已经正确）: {alter_error}")
             
+            # 更新okx_long_short_ratio表结构（如果字段不存在）
+            try:
+                # 检查long_short_ratio_by_ccy字段是否存在
+                check_ccy_ratio_sql = """
+                SELECT COUNT(*) as cnt 
+                FROM information_schema.COLUMNS 
+                WHERE TABLE_SCHEMA = %s 
+                AND TABLE_NAME = 'okx_long_short_ratio' 
+                AND COLUMN_NAME = 'long_short_ratio_by_ccy'
+                """
+                cursor.execute(check_ccy_ratio_sql, (self.database,))
+                result = cursor.fetchone()
+                if result and result[0] == 0:
+                    # 字段不存在，添加字段
+                    alter_table_sql = """
+                    ALTER TABLE okx_long_short_ratio 
+                    ADD COLUMN long_short_ratio_by_ccy DECIMAL(10, 4) DEFAULT NULL COMMENT '多空比（按币种汇总）' AFTER delta_ratio
+                    """
+                    cursor.execute(alter_table_sql)
+                    logging.info("已为 okx_long_short_ratio 表添加 long_short_ratio_by_ccy 字段")
+                
+                # 检查top_trader_account_ratio字段是否存在
+                check_top_account_sql = """
+                SELECT COUNT(*) as cnt 
+                FROM information_schema.COLUMNS 
+                WHERE TABLE_SCHEMA = %s 
+                AND TABLE_NAME = 'okx_long_short_ratio' 
+                AND COLUMN_NAME = 'top_trader_account_ratio'
+                """
+                cursor.execute(check_top_account_sql, (self.database,))
+                result = cursor.fetchone()
+                if result and result[0] == 0:
+                    # 字段不存在，添加字段
+                    alter_table_sql = """
+                    ALTER TABLE okx_long_short_ratio 
+                    ADD COLUMN top_trader_account_ratio DECIMAL(10, 4) DEFAULT NULL COMMENT '精英交易员多空持仓人数比' AFTER long_short_ratio_by_ccy
+                    """
+                    cursor.execute(alter_table_sql)
+                    logging.info("已为 okx_long_short_ratio 表添加 top_trader_account_ratio 字段")
+                
+                # 检查top_trader_position_ratio字段是否存在
+                check_top_position_sql = """
+                SELECT COUNT(*) as cnt 
+                FROM information_schema.COLUMNS 
+                WHERE TABLE_SCHEMA = %s 
+                AND TABLE_NAME = 'okx_long_short_ratio' 
+                AND COLUMN_NAME = 'top_trader_position_ratio'
+                """
+                cursor.execute(check_top_position_sql, (self.database,))
+                result = cursor.fetchone()
+                if result and result[0] == 0:
+                    # 字段不存在，添加字段
+                    alter_table_sql = """
+                    ALTER TABLE okx_long_short_ratio 
+                    ADD COLUMN top_trader_position_ratio DECIMAL(10, 4) DEFAULT NULL COMMENT '精英交易员多空持仓仓位比' AFTER top_trader_account_ratio
+                    """
+                    cursor.execute(alter_table_sql)
+                    logging.info("已为 okx_long_short_ratio 表添加 top_trader_position_ratio 字段")
+                
+                # 检查唯一索引是否存在
+                check_index_sql = """
+                SELECT COUNT(*) as cnt 
+                FROM information_schema.STATISTICS 
+                WHERE TABLE_SCHEMA = %s 
+                AND TABLE_NAME = 'okx_long_short_ratio' 
+                AND INDEX_NAME = 'uk_coin_symbol_ts'
+                """
+                cursor.execute(check_index_sql, (self.database,))
+                result = cursor.fetchone()
+                if result and result[0] == 0:
+                    # 唯一索引不存在，添加唯一索引
+                    alter_index_sql = """
+                    ALTER TABLE okx_long_short_ratio 
+                    ADD UNIQUE KEY uk_coin_symbol_ts (coin, symbol, ts)
+                    """
+                    cursor.execute(alter_index_sql)
+                    logging.info("已为 okx_long_short_ratio 表添加唯一索引 uk_coin_symbol_ts")
+            except Exception as alter_error:
+                logging.debug(f"检查/修改okx_long_short_ratio表结构（可能已经正确）: {alter_error}")
+            
             self.connection.commit()
             logging.info("市场数据表创建/更新成功")
             return True
@@ -646,8 +726,48 @@ class MarketDataDatabaseService:
         finally:
             cursor.close()
     
-    def save_long_short_ratio(self, coin, symbol, ts_datetime, long_short_ratio, delta_ratio=None):
-        """保存多空比数据"""
+    def get_long_short_ratio_by_ts(self, coin, symbol, ts_datetime):
+        """根据coin, symbol, ts查询多空比数据"""
+        if not self.connection:
+            if not self.connect():
+                return None
+        
+        # 检查连接是否有效
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception as ping_error:
+            logging.warning(f"数据库连接检查失败，尝试重新连接: {ping_error}")
+            if not self.connect():
+                return None
+        
+        cursor = self.connection.cursor()
+        try:
+            sql = """
+            SELECT long_short_ratio, delta_ratio, long_short_ratio_by_ccy, 
+                   top_trader_account_ratio, top_trader_position_ratio
+            FROM okx_long_short_ratio 
+            WHERE coin = %s AND symbol = %s AND ts = %s
+            """
+            cursor.execute(sql, (coin, symbol, ts_datetime))
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'long_short_ratio': float(result[0]) if result[0] else None,
+                    'delta_ratio': float(result[1]) if result[1] else None,
+                    'long_short_ratio_by_ccy': float(result[2]) if result[2] else None,
+                    'top_trader_account_ratio': float(result[3]) if result[3] else None,
+                    'top_trader_position_ratio': float(result[4]) if result[4] else None
+                }
+            return None
+        except Exception as e:
+            logging.warning(f"查询多空比数据失败: {e}")
+            return None
+        finally:
+            cursor.close()
+    
+    def save_long_short_ratio(self, coin, symbol, ts_datetime, long_short_ratio, delta_ratio=None, 
+                             long_short_ratio_by_ccy=None, top_trader_account_ratio=None, top_trader_position_ratio=None):
+        """保存多空比数据（完整保存）"""
         if not self.connection:
             if not self.connect():
                 return False
@@ -656,16 +776,152 @@ class MarketDataDatabaseService:
         try:
             sql = """
             INSERT INTO okx_long_short_ratio 
-            (coin, symbol, ts, long_short_ratio, delta_ratio)
-            VALUES (%s, %s, %s, %s, %s)
+            (coin, symbol, ts, long_short_ratio, delta_ratio, long_short_ratio_by_ccy, 
+             top_trader_account_ratio, top_trader_position_ratio)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                long_short_ratio = VALUES(long_short_ratio),
+                delta_ratio = VALUES(delta_ratio),
+                long_short_ratio_by_ccy = VALUES(long_short_ratio_by_ccy),
+                top_trader_account_ratio = VALUES(top_trader_account_ratio),
+                top_trader_position_ratio = VALUES(top_trader_position_ratio)
             """
-            cursor.execute(sql, (coin, symbol, ts_datetime, long_short_ratio, delta_ratio))
+            cursor.execute(sql, (coin, symbol, ts_datetime, long_short_ratio, delta_ratio, 
+                               long_short_ratio_by_ccy, top_trader_account_ratio, top_trader_position_ratio))
             self.connection.commit()
-            logging.debug(f"多空比数据保存成功: {coin} {ts_datetime}")
+            logging.debug(f"多空比数据保存成功: {coin} {ts_datetime} (合约比={long_short_ratio}, 币种比={long_short_ratio_by_ccy}, 精英人数比={top_trader_account_ratio}, 精英仓位比={top_trader_position_ratio})")
             return True
         except Exception as e:
             self.connection.rollback()
             logging.error(f"保存多空比数据失败: {e}")
+            return False
+        finally:
+            cursor.close()
+    
+    def save_long_short_ratio_partial(self, coin, symbol, ts_datetime, 
+                                     long_short_ratio=None, delta_ratio=None,
+                                     long_short_ratio_by_ccy=None, 
+                                     top_trader_account_ratio=None, 
+                                     top_trader_position_ratio=None):
+        """
+        部分保存多空比数据（只更新传入的字段，其他字段保持不变）
+        返回: 'saved'（新增）、'updated'（更新）、'skipped'（跳过，数据相同）
+        """
+        if not self.connection:
+            if not self.connect():
+                return False
+        
+        # 检查连接是否有效
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception as ping_error:
+            logging.warning(f"数据库连接检查失败，尝试重新连接: {ping_error}")
+            if not self.connect():
+                return False
+        
+        cursor = self.connection.cursor()
+        try:
+            # 查询现有数据
+            existing = self.get_long_short_ratio_by_ts(coin, symbol, ts_datetime)
+            
+            if existing:
+                # 数据已存在，检查是否需要更新
+                need_update = False
+                update_fields = []
+                update_values = []
+                
+                if long_short_ratio is not None:
+                    if existing['long_short_ratio'] is None or abs(existing['long_short_ratio'] - long_short_ratio) >= 0.0001:
+                        update_fields.append("long_short_ratio = %s")
+                        update_values.append(long_short_ratio)
+                        need_update = True
+                
+                if delta_ratio is not None:
+                    if existing['delta_ratio'] is None or abs(existing['delta_ratio'] - delta_ratio) >= 0.0001:
+                        update_fields.append("delta_ratio = %s")
+                        update_values.append(delta_ratio)
+                        need_update = True
+                
+                if long_short_ratio_by_ccy is not None:
+                    if existing['long_short_ratio_by_ccy'] is None or abs(existing['long_short_ratio_by_ccy'] - long_short_ratio_by_ccy) >= 0.0001:
+                        update_fields.append("long_short_ratio_by_ccy = %s")
+                        update_values.append(long_short_ratio_by_ccy)
+                        need_update = True
+                
+                if top_trader_account_ratio is not None:
+                    if existing['top_trader_account_ratio'] is None or abs(existing['top_trader_account_ratio'] - top_trader_account_ratio) >= 0.0001:
+                        update_fields.append("top_trader_account_ratio = %s")
+                        update_values.append(top_trader_account_ratio)
+                        need_update = True
+                
+                if top_trader_position_ratio is not None:
+                    if existing['top_trader_position_ratio'] is None or abs(existing['top_trader_position_ratio'] - top_trader_position_ratio) >= 0.0001:
+                        update_fields.append("top_trader_position_ratio = %s")
+                        update_values.append(top_trader_position_ratio)
+                        need_update = True
+                
+                if need_update:
+                    # 需要更新
+                    sql = f"""
+                    UPDATE okx_long_short_ratio 
+                    SET {', '.join(update_fields)}
+                    WHERE coin = %s AND symbol = %s AND ts = %s
+                    """
+                    update_values.extend([coin, symbol, ts_datetime])
+                    cursor.execute(sql, update_values)
+                    self.connection.commit()
+                    logging.info(f"多空比数据已更新: {coin} {symbol} {ts_datetime} - 更新字段: {', '.join(update_fields)}")
+                    return 'updated'
+                else:
+                    # 数据相同，跳过
+                    logging.debug(f"多空比数据已存在且一致，跳过: {coin} {symbol} {ts_datetime}")
+                    return 'skipped'
+            else:
+                # 数据不存在，插入新记录
+                # 构建INSERT语句，只包含传入的非None字段
+                insert_fields = ['coin', 'symbol', 'ts']
+                insert_values = [coin, symbol, ts_datetime]
+                placeholders = ['%s', '%s', '%s']
+                
+                if long_short_ratio is not None:
+                    insert_fields.append('long_short_ratio')
+                    insert_values.append(long_short_ratio)
+                    placeholders.append('%s')
+                
+                if delta_ratio is not None:
+                    insert_fields.append('delta_ratio')
+                    insert_values.append(delta_ratio)
+                    placeholders.append('%s')
+                
+                if long_short_ratio_by_ccy is not None:
+                    insert_fields.append('long_short_ratio_by_ccy')
+                    insert_values.append(long_short_ratio_by_ccy)
+                    placeholders.append('%s')
+                
+                if top_trader_account_ratio is not None:
+                    insert_fields.append('top_trader_account_ratio')
+                    insert_values.append(top_trader_account_ratio)
+                    placeholders.append('%s')
+                
+                if top_trader_position_ratio is not None:
+                    insert_fields.append('top_trader_position_ratio')
+                    insert_values.append(top_trader_position_ratio)
+                    placeholders.append('%s')
+                
+                sql = f"""
+                INSERT INTO okx_long_short_ratio ({', '.join(insert_fields)})
+                VALUES ({', '.join(placeholders)})
+                """
+                cursor.execute(sql, insert_values)
+                self.connection.commit()
+                logging.info(f"多空比数据新增: {coin} {symbol} {ts_datetime} - 字段: {', '.join([f for f in insert_fields if f not in ['coin', 'symbol', 'ts']])}")
+                return 'saved'
+                
+        except Exception as e:
+            self.connection.rollback()
+            logging.error(f"保存多空比数据失败: {e}")
+            import traceback
+            logging.error(f"异常详情: {traceback.format_exc()}")
             return False
         finally:
             cursor.close()
