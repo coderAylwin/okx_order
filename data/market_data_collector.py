@@ -784,11 +784,8 @@ def collect_binance_open_interest(coin, coin_symbol):
                 sum_open_interest_value = float(item.get('sumOpenInterestValue', 0))
                 cmc_circulating_supply = float(item.get('CMCCirculatingSupply', 0)) if item.get('CMCCirculatingSupply') else None
                 
-                # 转换为UTC+8时间
-                ts_seconds = timestamp_ms / 1000.0
-                ts_datetime_utc = datetime.utcfromtimestamp(ts_seconds)
-                utc8_timezone = ZoneInfo('Asia/Shanghai')
-                ts_datetime_utc8 = ts_datetime_utc.replace(tzinfo=ZoneInfo('UTC')).astimezone(utc8_timezone).replace(tzinfo=None)
+                # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
                 
                 data_to_save.append((ts_datetime_utc8, sum_open_interest, sum_open_interest_value, cmc_circulating_supply))
         
@@ -850,11 +847,8 @@ def collect_binance_taker_volume(coin, coin_symbol):
                 sell_vol = float(item.get('sellVol', 0))
                 buy_sell_ratio = float(item.get('buySellRatio', 0))
                 
-                # 转换为UTC+8时间
-                ts_seconds = timestamp_ms / 1000.0
-                ts_datetime_utc = datetime.utcfromtimestamp(ts_seconds)
-                utc8_timezone = ZoneInfo('Asia/Shanghai')
-                ts_datetime_utc8 = ts_datetime_utc.replace(tzinfo=ZoneInfo('UTC')).astimezone(utc8_timezone).replace(tzinfo=None)
+                # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
                 
                 data_to_save.append((ts_datetime_utc8, buy_vol, sell_vol, buy_sell_ratio))
         
@@ -892,6 +886,292 @@ def collect_binance_taker_volume(coin, coin_symbol):
         raise  # 重新抛出异常以触发重试机制
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
+def collect_binance_basis(coin, coin_symbol):
+    """收集币安基差数据"""
+    try:
+        url = f"https://fapi.binance.com/futures/data/basis?pair={coin_symbol}&contractType=PERPETUAL&period=5m&limit=5"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(url, timeout=10, headers=headers)
+        resp.raise_for_status()
+        json_data = resp.json()
+        
+        if not isinstance(json_data, list) or len(json_data) == 0:
+            logging.warning(f"{coin} 币安基差：数据为空")
+            return False
+
+        # 处理数据
+        data_to_save = []
+        
+        for item in json_data:
+            if isinstance(item, dict):
+                timestamp_ms = int(item.get('timestamp', 0))
+                index_price = float(item.get('indexPrice', 0))
+                futures_price = float(item.get('futuresPrice', 0))
+                basis = float(item.get('basis', 0))
+                basis_rate = float(item.get('basisRate', 0)) if item.get('basisRate') else None
+                annualized_basis_rate = float(item.get('annualizedBasisRate', 0)) if item.get('annualizedBasisRate') else None
+                contract_type = item.get('contractType', 'PERPETUAL')
+                pair = item.get('pair', coin_symbol)
+                
+                if timestamp_ms <= 0:
+                    continue
+                
+                # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                
+                data_to_save.append((ts_datetime_utc8, index_price, futures_price, basis, basis_rate, annualized_basis_rate))
+        
+        # 按ts从小到大排序
+        data_to_save.sort(key=lambda x: x[0])
+        
+        # 批量保存
+        if data_to_save:
+            # 为每个线程创建独立的数据库连接
+            thread_db = BinanceDatabaseService(**DB_CONFIG)
+            try:
+                if not thread_db.connect():
+                    logging.error(f"{coin} 币安数据库连接失败")
+                    return False
+                
+                result = thread_db.save_basis_batch(coin, coin_symbol, 'PERPETUAL', data_to_save)
+                if not result:
+                    error_msg = f"{coin} 币安基差数据保存失败，将重试"
+                    logging.error(error_msg)
+                    raise Exception(error_msg)  # 抛出异常以触发重试
+                return result
+            finally:
+                try:
+                    thread_db.disconnect()
+                except:
+                    pass
+        
+        return False
+        
+    except Exception as e:
+        error_msg = f"{coin} 币安基差收集失败：{type(e).__name__}: {str(e)}"
+        logging.error(error_msg)
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
+        raise  # 重新抛出异常以触发重试机制
+
+
+def collect_binance_long_short_ratio_with_db(coin, coin_symbol, db_service):
+    """收集币安多空比数据（使用指定的数据库连接）- 每个接口独立保存"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        total_saved = 0
+        total_updated = 0
+        total_skipped = 0
+        
+        # 接口1：大户持仓量多空比
+        try:
+            url1 = f"https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol={coin_symbol}&period=5m&limit=5"
+            resp1 = requests.get(url1, timeout=10, headers=headers)
+            resp1.raise_for_status()
+            json_data1 = resp1.json()
+            
+            if isinstance(json_data1, list) and len(json_data1) >= 1:
+                data1 = json_data1
+                
+                for item in data1:
+                    if isinstance(item, dict):
+                        timestamp_ms = int(item.get('timestamp', 0))
+                        long_short_ratio = float(item.get('longShortRatio', 0))
+                        
+                        if timestamp_ms <= 0:
+                            continue
+                        
+                        # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                        ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                        
+                        # 检查并保存接口1的数据（每条数据都进行一致性检查）
+                        result = db_service.save_binance_long_short_ratio_partial(
+                            coin, coin_symbol, ts_datetime_utc8, 
+                            top_position_ratio=long_short_ratio
+                        )
+                        if result == 'saved':
+                            total_saved += 1
+                            logging.debug(f"{coin} 币安多空比（大户持仓量）数据新增: {ts_datetime_utc8} ratio={long_short_ratio}")
+                        elif result == 'updated':
+                            total_updated += 1
+                            logging.debug(f"{coin} 币安多空比（大户持仓量）数据更新: {ts_datetime_utc8} ratio={long_short_ratio}")
+                        elif result == 'skipped':
+                            total_skipped += 1
+                            logging.debug(f"{coin} 币安多空比（大户持仓量）数据一致，跳过: {ts_datetime_utc8} ratio={long_short_ratio}")
+            else:
+                logging.warning(f"{coin} 币安多空比（大户持仓量）：API错误或数据为空")
+        except Exception as e1:
+            logging.warning(f"{coin} 币安多空比（大户持仓量）获取失败：{e1}")
+        
+        # 接口2：大户账户数多空比
+        try:
+            url2 = f"https://fapi.binance.com/futures/data/topLongShortAccountRatio?symbol={coin_symbol}&period=5m&limit=5"
+            resp2 = requests.get(url2, timeout=10, headers=headers)
+            resp2.raise_for_status()
+            json_data2 = resp2.json()
+            
+            if isinstance(json_data2, list) and len(json_data2) >= 1:
+                data2 = json_data2
+                
+                for item in data2:
+                    if isinstance(item, dict):
+                        timestamp_ms = int(item.get('timestamp', 0))
+                        long_short_ratio = float(item.get('longShortRatio', 0))
+                        
+                        if timestamp_ms <= 0:
+                            continue
+                        
+                        # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                        ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                        
+                        # 检查并保存接口2的数据（每条数据都进行一致性检查）
+                        result = db_service.save_binance_long_short_ratio_partial(
+                            coin, coin_symbol, ts_datetime_utc8, 
+                            top_account_ratio=long_short_ratio
+                        )
+                        if result == 'saved':
+                            total_saved += 1
+                            logging.debug(f"{coin} 币安多空比（大户账户数）数据新增: {ts_datetime_utc8} ratio={long_short_ratio}")
+                        elif result == 'updated':
+                            total_updated += 1
+                            logging.debug(f"{coin} 币安多空比（大户账户数）数据更新: {ts_datetime_utc8} ratio={long_short_ratio}")
+                        elif result == 'skipped':
+                            total_skipped += 1
+                            logging.debug(f"{coin} 币安多空比（大户账户数）数据一致，跳过: {ts_datetime_utc8} ratio={long_short_ratio}")
+        except Exception as e2:
+            logging.warning(f"{coin} 币安多空比（大户账户数）获取失败：{e2}")
+        
+        # 接口3：多空持仓人数比
+        try:
+            url3 = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={coin_symbol}&period=5m&limit=5"
+            resp3 = requests.get(url3, timeout=10, headers=headers)
+            resp3.raise_for_status()
+            json_data3 = resp3.json()
+            
+            if isinstance(json_data3, list) and len(json_data3) >= 1:
+                data3 = json_data3
+                
+                for item in data3:
+                    if isinstance(item, dict):
+                        timestamp_ms = int(item.get('timestamp', 0))
+                        long_short_ratio = float(item.get('longShortRatio', 0))
+                        
+                        if timestamp_ms <= 0:
+                            continue
+                        
+                        # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+                        ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                        
+                        # 检查并保存接口3的数据（每条数据都进行一致性检查）
+                        result = db_service.save_binance_long_short_ratio_partial(
+                            coin, coin_symbol, ts_datetime_utc8, 
+                            global_account_ratio=long_short_ratio
+                        )
+                        if result == 'saved':
+                            total_saved += 1
+                            logging.debug(f"{coin} 币安多空比（多空持仓人数）数据新增: {ts_datetime_utc8} ratio={long_short_ratio}")
+                        elif result == 'updated':
+                            total_updated += 1
+                            logging.debug(f"{coin} 币安多空比（多空持仓人数）数据更新: {ts_datetime_utc8} ratio={long_short_ratio}")
+                        elif result == 'skipped':
+                            total_skipped += 1
+                            logging.debug(f"{coin} 币安多空比（多空持仓人数）数据一致，跳过: {ts_datetime_utc8} ratio={long_short_ratio}")
+        except Exception as e3:
+            logging.warning(f"{coin} 币安多空比（多空持仓人数）获取失败：{e3}")
+        
+        if total_saved > 0 or total_updated > 0:
+            logging.info(f"{coin} 币安多空比数据保存完成: 新增={total_saved}, 更新={total_updated}, 跳过={total_skipped}")
+            return True
+        else:
+            logging.debug(f"{coin} 币安多空比数据全部已存在，无需保存")
+            return True
+        
+    except Exception as e:
+        logging.error(f"{coin} 币安多空比收集失败：{e}")
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
+        return False
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
+def collect_binance_long_short_ratio(coin, coin_symbol):
+    """收集币安多空比数据"""
+    # 为每个线程创建独立的数据库连接
+    thread_db = BinanceDatabaseService(**DB_CONFIG)
+    try:
+        if not thread_db.connect():
+            logging.error(f"{coin} 币安数据库连接失败")
+            return False
+        
+        return collect_binance_long_short_ratio_with_db(coin, coin_symbol, thread_db)
+    finally:
+        try:
+            thread_db.disconnect()
+        except:
+            pass
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
+def collect_binance_funding_rate(coin, coin_symbol):
+    """收集币安资金费率数据（实时资金费率）"""
+    try:
+        # 使用 /fapi/v1/fundingRate 接口获取最新的资金费率
+        url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={coin_symbol}&limit=1"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(url, timeout=10, headers=headers)
+        resp.raise_for_status()
+        json_data = resp.json()
+        
+        if not isinstance(json_data, list) or len(json_data) == 0:
+            logging.warning(f"{coin} 币安资金费率：数据为空")
+            return False
+        
+        # 获取最新的资金费率数据
+        item = json_data[0]
+        if isinstance(item, dict):
+            funding_rate = float(item.get('fundingRate', 0))
+            funding_time_ms = int(item.get('fundingTime', 0))
+            
+            if funding_time_ms <= 0:
+                logging.warning(f"{coin} 币安资金费率：时间戳无效")
+                return False
+            
+            # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
+            ts_datetime_utc8 = datetime.fromtimestamp(funding_time_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+            funding_rate_pct = funding_rate * 100
+            
+            # 为每个线程创建独立的数据库连接
+            thread_db = BinanceDatabaseService(**DB_CONFIG)
+            try:
+                if not thread_db.connect():
+                    logging.error(f"{coin} 币安数据库连接失败")
+                    return False
+                
+                result = thread_db.save_funding_rate(
+                    coin, coin_symbol, ts_datetime_utc8,
+                    funding_rate, funding_rate_pct
+                )
+                if result:
+                    logging.info(f"{coin} 币安资金费率数据保存成功: rate={funding_rate} ({funding_rate_pct}%), time={ts_datetime_utc8}")
+                return result
+            finally:
+                try:
+                    thread_db.disconnect()
+                except:
+                    pass
+        else:
+            logging.warning(f"{coin} 币安资金费率：数据格式错误")
+            return False
+        
+    except Exception as e:
+        error_msg = f"{coin} 币安资金费率收集失败：{type(e).__name__}: {str(e)}"
+        logging.error(error_msg)
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
+        raise  # 重新抛出异常以触发重试机制
+
+
 def collect_binance_data():
     """收集币安数据（每分钟）：持仓量、主动买卖量"""
     try:
@@ -902,6 +1182,9 @@ def collect_binance_data():
             try:
                 collect_binance_open_interest(coin, coin_symbol)
                 collect_binance_taker_volume(coin, coin_symbol)
+                collect_binance_basis(coin, coin_symbol)
+                collect_binance_long_short_ratio(coin, coin_symbol)
+                collect_binance_funding_rate(coin, coin_symbol)
                 return True
             except Exception as e:
                 logging.error(f"{coin} 币安数据收集失败: {e}")

@@ -101,8 +101,67 @@ class BinanceDatabaseService:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='币安主动买卖量表';
             """
             
+            # 币安基差表
+            create_basis_table = """
+            CREATE TABLE IF NOT EXISTS binance_basis (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                coin VARCHAR(10) NOT NULL COMMENT '币种（BTC/ETH/SOL）',
+                pair VARCHAR(50) NOT NULL COMMENT '交易对（如BTCUSDT）',
+                contract_type VARCHAR(20) NOT NULL COMMENT '合约类型（PERPETUAL等）',
+                ts DATETIME NOT NULL COMMENT '时间戳（UTC+8）',
+                index_price DECIMAL(30, 8) NOT NULL COMMENT '指数价格',
+                futures_price DECIMAL(30, 8) NOT NULL COMMENT '期货价格',
+                basis DECIMAL(30, 8) NOT NULL COMMENT '基差（futuresPrice - indexPrice）',
+                basis_rate DECIMAL(10, 8) DEFAULT NULL COMMENT '基差率',
+                annualized_basis_rate DECIMAL(10, 8) DEFAULT NULL COMMENT '年化基差率',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                UNIQUE KEY uk_coin_pair_contract_ts (coin, pair, contract_type, ts),
+                INDEX idx_coin_ts (coin, ts),
+                INDEX idx_ts (ts)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='币安基差表';
+            """
+            
+            # 币安多空比表
+            create_ls_table = """
+            CREATE TABLE IF NOT EXISTS binance_long_short_ratio (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                coin VARCHAR(10) NOT NULL COMMENT '币种（BTC/ETH/SOL）',
+                symbol VARCHAR(50) NOT NULL COMMENT '合约符号（如BTCUSDT）',
+                ts DATETIME NOT NULL COMMENT '时间戳（UTC+8）',
+                top_position_ratio DECIMAL(10, 4) DEFAULT NULL COMMENT '大户持仓量多空比（topLongShortPositionRatio）',
+                top_account_ratio DECIMAL(10, 4) DEFAULT NULL COMMENT '大户账户数多空比（topLongShortAccountRatio）',
+                global_account_ratio DECIMAL(10, 4) DEFAULT NULL COMMENT '多空持仓人数比（globalLongShortAccountRatio）',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                UNIQUE KEY uk_coin_symbol_ts (coin, symbol, ts),
+                INDEX idx_coin_ts (coin, ts),
+                INDEX idx_ts (ts)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='币安多空比表';
+            """
+            
+            # 币安资金费率表
+            create_funding_table = """
+            CREATE TABLE IF NOT EXISTS binance_funding_rate (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                coin VARCHAR(10) NOT NULL COMMENT '币种（BTC/ETH/SOL）',
+                symbol VARCHAR(50) NOT NULL COMMENT '合约符号（如BTCUSDT）',
+                ts DATETIME NOT NULL COMMENT '时间戳（UTC+8）',
+                funding_rate DECIMAL(10, 8) NOT NULL COMMENT '资金费率',
+                funding_rate_pct DECIMAL(10, 6) DEFAULT NULL COMMENT '资金费率（百分比）',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                UNIQUE KEY uk_coin_symbol_ts (coin, symbol, ts),
+                INDEX idx_coin_ts (coin, ts),
+                INDEX idx_ts (ts)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='币安资金费率表';
+            """
+            
             cursor.execute(create_oi_table)
             cursor.execute(create_taker_table)
+            cursor.execute(create_basis_table)
+            cursor.execute(create_ls_table)
+            cursor.execute(create_funding_table)
             self.connection.commit()
             logging.info("币安市场数据表创建/更新成功")
             return True
@@ -233,6 +292,262 @@ class BinanceDatabaseService:
         except Exception as e:
             self.connection.rollback()
             logging.error(f"批量保存币安主动买卖量数据失败: {e}")
+            logging.error(f"异常详情: {traceback.format_exc()}")
+            return False
+        finally:
+            cursor.close()
+    
+    def save_basis_batch(self, coin, pair, contract_type, data_to_save):
+        """
+        批量保存币安基差数据
+        
+        Args:
+            coin: 币种（BTC/ETH/SOL）
+            pair: 交易对（如BTCUSDT）
+            contract_type: 合约类型（PERPETUAL等）
+            data_to_save: 数据列表，每个元素为 (ts_datetime, index_price, futures_price, basis, basis_rate, annualized_basis_rate)
+        
+        Returns:
+            bool: 保存是否成功
+        """
+        if not self.connection:
+            if not self.connect():
+                return False
+        
+        # 检查连接是否有效
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception as ping_error:
+            logging.warning(f"数据库连接检查失败，尝试重新连接: {ping_error}")
+            if not self.connect():
+                return False
+        
+        cursor = self.connection.cursor()
+        try:
+            sql = """
+            INSERT INTO binance_basis 
+            (coin, pair, contract_type, ts, index_price, futures_price, basis, basis_rate, annualized_basis_rate)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                index_price = VALUES(index_price),
+                futures_price = VALUES(futures_price),
+                basis = VALUES(basis),
+                basis_rate = VALUES(basis_rate),
+                annualized_basis_rate = VALUES(annualized_basis_rate),
+                updated_at = CURRENT_TIMESTAMP
+            """
+            
+            # 确保数据按时间顺序保存
+            sorted_data = sorted(data_to_save, key=lambda x: x[0])
+            
+            saved_count = 0
+            for ts_datetime, index_price, futures_price, basis, basis_rate, annualized_basis_rate in sorted_data:
+                try:
+                    cursor.execute(sql, (coin, pair, contract_type, ts_datetime, index_price, futures_price, basis, basis_rate, annualized_basis_rate))
+                    saved_count += 1
+                except Exception as e:
+                    logging.warning(f"保存币安基差数据失败 (coin={coin}, pair={pair}, contract_type={contract_type}, ts={ts_datetime}): {e}")
+                    continue
+            
+            self.connection.commit()
+            if saved_count > 0:
+                logging.info(f"币安基差数据保存成功: {coin} {pair} {contract_type} 共 {saved_count} 条（按时间顺序）")
+            return saved_count > 0
+            
+        except Exception as e:
+            self.connection.rollback()
+            logging.error(f"批量保存币安基差数据失败: {e}")
+            logging.error(f"异常详情: {traceback.format_exc()}")
+            return False
+        finally:
+            cursor.close()
+    
+    def get_binance_long_short_ratio_by_ts(self, coin, symbol, ts_datetime):
+        """根据coin, symbol, ts查询币安多空比数据"""
+        if not self.connection:
+            if not self.connect():
+                return None
+        
+        # 检查连接是否有效
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception as ping_error:
+            logging.warning(f"数据库连接检查失败，尝试重新连接: {ping_error}")
+            if not self.connect():
+                return None
+        
+        cursor = self.connection.cursor()
+        try:
+            sql = """
+            SELECT top_position_ratio, top_account_ratio, global_account_ratio
+            FROM binance_long_short_ratio 
+            WHERE coin = %s AND symbol = %s AND ts = %s
+            """
+            cursor.execute(sql, (coin, symbol, ts_datetime))
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'top_position_ratio': float(result[0]) if result[0] else None,
+                    'top_account_ratio': float(result[1]) if result[1] else None,
+                    'global_account_ratio': float(result[2]) if result[2] else None
+                }
+            return None
+        except Exception as e:
+            logging.warning(f"查询币安多空比数据失败: {e}")
+            return None
+        finally:
+            cursor.close()
+    
+    def save_binance_long_short_ratio_partial(self, coin, symbol, ts_datetime, 
+                                             top_position_ratio=None, 
+                                             top_account_ratio=None, 
+                                             global_account_ratio=None):
+        """
+        部分保存币安多空比数据（只更新传入的字段，其他字段保持不变）
+        返回: 'saved'（新增）、'updated'（更新）、'skipped'（跳过，数据相同）
+        """
+        if not self.connection:
+            if not self.connect():
+                return False
+        
+        # 检查连接是否有效
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception as ping_error:
+            logging.warning(f"数据库连接检查失败，尝试重新连接: {ping_error}")
+            if not self.connect():
+                return False
+        
+        cursor = self.connection.cursor()
+        try:
+            # 查询现有数据
+            existing = self.get_binance_long_short_ratio_by_ts(coin, symbol, ts_datetime)
+            
+            if existing:
+                # 数据已存在，检查是否需要更新
+                need_update = False
+                update_fields = []
+                update_values = []
+                
+                if top_position_ratio is not None:
+                    if existing['top_position_ratio'] is None or abs(existing['top_position_ratio'] - top_position_ratio) >= 0.0001:
+                        update_fields.append("top_position_ratio = %s")
+                        update_values.append(top_position_ratio)
+                        need_update = True
+                
+                if top_account_ratio is not None:
+                    if existing['top_account_ratio'] is None or abs(existing['top_account_ratio'] - top_account_ratio) >= 0.0001:
+                        update_fields.append("top_account_ratio = %s")
+                        update_values.append(top_account_ratio)
+                        need_update = True
+                
+                if global_account_ratio is not None:
+                    if existing['global_account_ratio'] is None or abs(existing['global_account_ratio'] - global_account_ratio) >= 0.0001:
+                        update_fields.append("global_account_ratio = %s")
+                        update_values.append(global_account_ratio)
+                        need_update = True
+                
+                if need_update:
+                    # 需要更新
+                    sql = f"""
+                    UPDATE binance_long_short_ratio 
+                    SET {', '.join(update_fields)}
+                    WHERE coin = %s AND symbol = %s AND ts = %s
+                    """
+                    update_values.extend([coin, symbol, ts_datetime])
+                    cursor.execute(sql, update_values)
+                    self.connection.commit()
+                    logging.info(f"币安多空比数据已更新: {coin} {symbol} {ts_datetime} - 更新字段: {', '.join(update_fields)}")
+                    return 'updated'
+                else:
+                    # 数据相同，跳过
+                    logging.debug(f"币安多空比数据已存在且一致，跳过: {coin} {symbol} {ts_datetime}")
+                    return 'skipped'
+            else:
+                # 数据不存在，插入新记录
+                # 构建INSERT语句，只包含传入的非None字段
+                insert_fields = ['coin', 'symbol', 'ts']
+                insert_values = [coin, symbol, ts_datetime]
+                placeholders = ['%s', '%s', '%s']
+                
+                if top_position_ratio is not None:
+                    insert_fields.append('top_position_ratio')
+                    insert_values.append(top_position_ratio)
+                    placeholders.append('%s')
+                
+                if top_account_ratio is not None:
+                    insert_fields.append('top_account_ratio')
+                    insert_values.append(top_account_ratio)
+                    placeholders.append('%s')
+                
+                if global_account_ratio is not None:
+                    insert_fields.append('global_account_ratio')
+                    insert_values.append(global_account_ratio)
+                    placeholders.append('%s')
+                
+                sql = f"""
+                INSERT INTO binance_long_short_ratio ({', '.join(insert_fields)})
+                VALUES ({', '.join(placeholders)})
+                """
+                cursor.execute(sql, insert_values)
+                self.connection.commit()
+                logging.info(f"币安多空比数据新增: {coin} {symbol} {ts_datetime} - 字段: {', '.join([f for f in insert_fields if f not in ['coin', 'symbol', 'ts']])}")
+                return 'saved'
+                
+        except Exception as e:
+            self.connection.rollback()
+            logging.error(f"保存币安多空比数据失败: {e}")
+            import traceback
+            logging.error(f"异常详情: {traceback.format_exc()}")
+            return False
+        finally:
+            cursor.close()
+    
+    def save_funding_rate(self, coin, symbol, ts_datetime, funding_rate, funding_rate_pct=None):
+        """
+        保存币安资金费率数据
+        
+        Args:
+            coin: 币种（BTC/ETH/SOL）
+            symbol: 合约符号（如BTCUSDT）
+            ts_datetime: 时间戳（UTC+8）
+            funding_rate: 资金费率
+            funding_rate_pct: 资金费率（百分比）
+        
+        Returns:
+            bool: 保存是否成功
+        """
+        if not self.connection:
+            if not self.connect():
+                return False
+        
+        # 检查连接是否有效
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception as ping_error:
+            logging.warning(f"数据库连接检查失败，尝试重新连接: {ping_error}")
+            if not self.connect():
+                return False
+        
+        cursor = self.connection.cursor()
+        try:
+            sql = """
+            INSERT INTO binance_funding_rate 
+            (coin, symbol, ts, funding_rate, funding_rate_pct)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                funding_rate = VALUES(funding_rate),
+                funding_rate_pct = VALUES(funding_rate_pct),
+                updated_at = CURRENT_TIMESTAMP
+            """
+            cursor.execute(sql, (coin, symbol, ts_datetime, funding_rate, funding_rate_pct))
+            self.connection.commit()
+            logging.debug(f"币安资金费率数据保存成功: {coin} {symbol} {ts_datetime} rate={funding_rate}")
+            return True
+        except Exception as e:
+            self.connection.rollback()
+            logging.error(f"保存币安资金费率数据失败: {e}")
+            import traceback
             logging.error(f"异常详情: {traceback.format_exc()}")
             return False
         finally:
