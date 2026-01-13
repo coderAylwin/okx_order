@@ -157,11 +157,38 @@ class BinanceDatabaseService:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='币安资金费率表';
             """
             
+            # 币安爆仓数据表
+            create_liquidation_table = """
+            CREATE TABLE IF NOT EXISTS binance_liquidation_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                coin VARCHAR(10) NOT NULL COMMENT '币种（BTC/ETH/SOL）',
+                symbol VARCHAR(50) NOT NULL COMMENT '交易对（如BTCUSDT）',
+                side VARCHAR(10) DEFAULT NULL COMMENT '订单方向（BUY/SELL）',
+                liquidation_type VARCHAR(10) DEFAULT NULL COMMENT '爆仓类型：LONG=多单爆仓（SELL），SHORT=空单爆仓（BUY）',
+                order_type VARCHAR(20) DEFAULT NULL COMMENT '订单类型：LIMIT=限价单，MARKET=市价单，STOP=止损单，STOP_MARKET=止损市价单，TAKE_PROFIT=止盈单，TAKE_PROFIT_MARKET=止盈市价单，TRAILING_STOP_MARKET=跟踪止损市价单',
+                time_in_force VARCHAR(10) DEFAULT NULL COMMENT '有效方式：GTC=一直有效直到取消，IOC=立即成交或取消，FOK=全部成交或取消，GTX=一直有效直到成交',
+                quantity DECIMAL(30, 8) DEFAULT NULL COMMENT '订单数量',
+                price DECIMAL(30, 8) DEFAULT NULL COMMENT '订单价格',
+                avg_price DECIMAL(30, 8) DEFAULT NULL COMMENT '平均价格',
+                order_status VARCHAR(20) DEFAULT NULL COMMENT '订单状态（FILLED等）',
+                last_filled_qty DECIMAL(30, 8) DEFAULT NULL COMMENT '订单最近成交量',
+                cumulative_filled_qty DECIMAL(30, 8) DEFAULT NULL COMMENT '订单累计成交量',
+                usd_value DECIMAL(20, 2) DEFAULT NULL COMMENT 'USD价值（quantity * price）',
+                ts DATETIME NOT NULL COMMENT '时间戳（UTC+8）',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                INDEX idx_coin (coin),
+                INDEX idx_ts (ts),
+                INDEX idx_coin_ts (coin, ts),
+                INDEX idx_liquidation_type (liquidation_type)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='币安爆仓数据表';
+            """
+            
             cursor.execute(create_oi_table)
             cursor.execute(create_taker_table)
             cursor.execute(create_basis_table)
             cursor.execute(create_ls_table)
             cursor.execute(create_funding_table)
+            cursor.execute(create_liquidation_table)
             self.connection.commit()
             logging.info("币安市场数据表创建/更新成功")
             return True
@@ -547,6 +574,80 @@ class BinanceDatabaseService:
         except Exception as e:
             self.connection.rollback()
             logging.error(f"保存币安资金费率数据失败: {e}")
+            import traceback
+            logging.error(f"异常详情: {traceback.format_exc()}")
+            return False
+        finally:
+            cursor.close()
+    
+    def save_liquidation(self, coin, symbol, ts_datetime, side=None, liquidation_type=None,
+                         order_type=None, time_in_force=None, quantity=None, price=None, avg_price=None,
+                         order_status=None, last_filled_qty=None, cumulative_filled_qty=None,
+                         usd_value=None):
+        """
+        保存币安爆仓数据
+        
+        Args:
+            coin: 币种（BTC/ETH/SOL）
+            symbol: 交易对（如BTCUSDT）
+            ts_datetime: 时间戳（UTC+8）
+            side: 订单方向（BUY/SELL）
+            liquidation_type: 爆仓类型（LONG=多单爆仓，SHORT=空单爆仓）
+            order_type: 订单类型（LIMIT=限价单，MARKET=市价单，STOP=止损单等）
+            time_in_force: 有效方式（GTC=一直有效，IOC=立即成交或取消，FOK=全部成交或取消等）
+            quantity: 订单数量
+            price: 订单价格
+            avg_price: 平均价格
+            order_status: 订单状态（FILLED等）
+            last_filled_qty: 订单最近成交量
+            cumulative_filled_qty: 订单累计成交量
+            usd_value: USD价值（quantity * price）
+        
+        Returns:
+            bool: 保存是否成功
+        """
+        if not self.connection:
+            if not self.connect():
+                return False
+        
+        # 检查连接是否有效
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception as ping_error:
+            logging.warning(f"数据库连接检查失败，尝试重新连接: {ping_error}")
+            if not self.connect():
+                return False
+        
+        cursor = self.connection.cursor()
+        try:
+            # 如果表结构需要更新，先尝试添加liquidation_type字段
+            try:
+                cursor.execute("ALTER TABLE binance_liquidation_data ADD COLUMN liquidation_type VARCHAR(10) DEFAULT NULL COMMENT '爆仓类型：LONG=多单爆仓（SELL），SHORT=空单爆仓（BUY）' AFTER side")
+                self.connection.commit()
+                logging.info("币安爆仓数据表已添加liquidation_type字段")
+            except Exception as alter_error:
+                # 字段可能已存在，忽略错误
+                if "Duplicate column name" not in str(alter_error):
+                    logging.debug(f"检查liquidation_type字段时: {alter_error}")
+                self.connection.rollback()
+            
+            sql = """
+            INSERT INTO binance_liquidation_data 
+            (coin, symbol, ts, side, liquidation_type, order_type, time_in_force, quantity, price, 
+             avg_price, order_status, last_filled_qty, cumulative_filled_qty, usd_value)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(sql, (
+                coin, symbol, ts_datetime, side, liquidation_type, order_type, time_in_force,
+                quantity, price, avg_price, order_status, last_filled_qty,
+                cumulative_filled_qty, usd_value
+            ))
+            self.connection.commit()
+            logging.debug(f"币安爆仓数据保存成功: {coin} {symbol} {ts_datetime} side={side} liquidation_type={liquidation_type} quantity={quantity} price={price} usd_value={usd_value}")
+            return True
+        except Exception as e:
+            self.connection.rollback()
+            logging.error(f"保存币安爆仓数据失败: {e}")
             import traceback
             logging.error(f"异常详情: {traceback.format_exc()}")
             return False

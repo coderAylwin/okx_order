@@ -100,6 +100,8 @@ logging.basicConfig(
 market_db = MarketDataDatabaseService(**DB_CONFIG)
 liquidation_db = LiquidationDatabaseService(**DB_CONFIG)
 binance_db = BinanceDatabaseService(**DB_CONFIG)
+# 币安爆仓数据库服务（使用BinanceDatabaseService，但单独初始化用于爆仓数据）
+binance_liquidation_db = BinanceDatabaseService(**DB_CONFIG)
 
 
 # ==================== 爆仓数据WebSocket监听器 ====================
@@ -277,6 +279,253 @@ class OKXLiquidationListener:
         self.ping_thread.daemon = True
         self.ping_thread.start()
         logging.info("爆仓数据WebSocket监听启动")
+
+
+# ==================== 币安爆仓数据WebSocket监听器 ====================
+class BinanceLiquidationListener:
+    """币安爆仓数据WebSocket监听器"""
+    
+    def __init__(self):
+        self.ws = None
+        self.thread = None
+        self.ping_thread = None
+        self.lock = threading.Lock()
+        self.is_running = False
+        self.last_pong_time = time.time()
+        self.ping_interval = 20  # 每20秒发送一次ping
+        self.db_service = binance_liquidation_db
+        
+        # 连接数据库并创建表
+        if self.db_service.connect():
+            self.db_service.create_tables()
+        
+        # 币种映射（symbol -> coin）
+        self.symbol_to_coin = {
+            'BTCUSDT': 'BTC',
+            'ETHUSDT': 'ETH',
+            'SOLUSDT': 'SOL'
+        }
+    
+    def on_message(self, ws, message):
+        try:
+            # 记录原始消息（限制长度避免日志过大）
+            message_preview = message[:500] if len(message) > 500 else message
+            logging.debug(f"币安WebSocket收到原始消息（长度={len(message)}）: {message_preview}")
+            
+            # 处理pong响应
+            if message == "pong" or message == b"pong":
+                logging.debug("币安WebSocket收到pong响应")
+                self.last_pong_time = time.time()
+                return
+            
+            # 尝试解析JSON
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError as e:
+                logging.warning(f"币安WebSocket消息JSON解析失败: {e}, 消息内容: {message_preview}")
+                return
+            
+            logging.debug(f"币安WebSocket解析后的数据: {json.dumps(data, ensure_ascii=False)[:500]}")
+            
+            # 处理错误消息
+            if isinstance(data, dict) and 'error' in data:
+                error_info = data.get('error', {})
+                error_code = error_info.get('code', 'N/A')
+                error_msg = error_info.get('msg', 'N/A')
+                logging.error(f"币安WebSocket错误响应: code={error_code}, msg={error_msg}")
+                logging.error(f"币安WebSocket完整错误消息: {json.dumps(data, ensure_ascii=False)}")
+                return
+            
+            # 处理组合streams格式：{"stream":"<streamName>","data":<rawPayload>}
+            if isinstance(data, dict) and 'stream' in data and 'data' in data:
+                stream_name = data.get('stream', '')
+                logging.debug(f"币安WebSocket收到组合stream消息: stream={stream_name}")
+                data = data['data']
+                # 验证stream名称是否是我们订阅的
+                if '@forceOrder' not in stream_name:
+                    logging.debug(f"币安WebSocket忽略非forceOrder stream: {stream_name}")
+                    return
+            elif isinstance(data, dict) and 'e' in data:
+                # 直接是事件数据（单一stream格式）
+                logging.debug(f"币安WebSocket收到单一stream事件: e={data.get('e')}")
+                pass
+            else:
+                # 其他格式的消息，记录但不处理
+                logging.debug(f"币安WebSocket收到未知格式消息: keys={list(data.keys()) if isinstance(data, dict) else type(data)}")
+                return
+            
+            # 检查事件类型
+            if data.get('e') == 'forceOrder':
+                logging.debug(f"币安WebSocket处理forceOrder事件")
+                order_data = data.get('o', {})
+                if not isinstance(order_data, dict):
+                    logging.warning(f"币安WebSocket forceOrder事件数据格式错误: order_data={order_data}")
+                    return
+                
+                symbol = order_data.get('s', '').upper()  # 交易对（如BTCUSDT）
+                coin = self.symbol_to_coin.get(symbol)
+                
+                logging.debug(f"币安WebSocket处理爆仓数据: symbol={symbol}, coin={coin}")
+                
+                if not coin:
+                    # 不是我们监控的币种，跳过
+                    logging.debug(f"币安WebSocket跳过未监控的币种: {symbol}")
+                    return
+                
+                try:
+                    # 提取订单信息
+                    side = order_data.get('S', '')  # 订单方向（SELL/BUY）
+                    
+                    # 判断爆仓类型：
+                    # - SELL = 多单爆仓（持有多单被强制平仓，需要卖出）
+                    # - BUY = 空单爆仓（持有空单被强制平仓，需要买入）
+                    liquidation_type = None
+                    if side == 'SELL':
+                        liquidation_type = 'LONG'  # 多单爆仓
+                    elif side == 'BUY':
+                        liquidation_type = 'SHORT'  # 空单爆仓
+                    
+                    order_type = order_data.get('o', '')  # 订单类型（LIMIT/MARKET/STOP等）
+                    time_in_force = order_data.get('f', '')  # 有效方式（GTC/IOC/FOK等）
+                    quantity = float(order_data.get('q', 0)) if order_data.get('q') else None  # 订单数量
+                    price = float(order_data.get('p', 0)) if order_data.get('p') else None  # 订单价格
+                    avg_price = float(order_data.get('ap', 0)) if order_data.get('ap') else None  # 平均价格
+                    order_status = order_data.get('X', '')  # 订单状态（FILLED等）
+                    last_filled_qty = float(order_data.get('l', 0)) if order_data.get('l') else None  # 订单最近成交量
+                    cumulative_filled_qty = float(order_data.get('z', 0)) if order_data.get('z') else None  # 订单累计成交量
+                    
+                    # 事件时间戳
+                    event_time_ms = int(data.get('E', 0))  # 事件时间
+                    trade_time_ms = int(order_data.get('T', 0))  # 交易时间
+                    
+                    # 使用交易时间，如果没有则使用事件时间
+                    timestamp_ms = trade_time_ms if trade_time_ms > 0 else event_time_ms
+                    
+                    if timestamp_ms <= 0:
+                        logging.warning(f"币安爆仓数据时间戳无效: {coin} {symbol}")
+                        return
+                    
+                    # 转换为UTC+8时间
+                    ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                    
+                    # 计算USD价值
+                    usd_value = None
+                    if quantity and price:
+                        usd_value = quantity * price
+                    
+                    # 保存到数据库
+                    if self.db_service:
+                        try:
+                            logging.debug(f"币安WebSocket保存爆仓数据: {coin} {symbol}, side={side}, liquidation_type={liquidation_type}, order_type={order_type}, time_in_force={time_in_force}, quantity={quantity}, price={price}, usd_value={usd_value}")
+                            self.db_service.save_liquidation(
+                                coin=coin,
+                                symbol=symbol,
+                                side=side if side else None,
+                                liquidation_type=liquidation_type,
+                                order_type=order_type if order_type else None,
+                                time_in_force=time_in_force if time_in_force else None,
+                                quantity=quantity,
+                                price=price,
+                                avg_price=avg_price,
+                                order_status=order_status if order_status else None,
+                                last_filled_qty=last_filled_qty,
+                                cumulative_filled_qty=cumulative_filled_qty,
+                                usd_value=usd_value,
+                                ts_datetime=ts_datetime_utc8
+                            )
+                            logging.info(f"币安WebSocket成功保存爆仓数据: {coin} {symbol}, 类型={liquidation_type}, USD价值={usd_value}")
+                        except Exception as db_error:
+                            logging.error(f"保存币安爆仓数据到数据库失败: {db_error}")
+                            import traceback
+                            logging.error(f"异常详情: {traceback.format_exc()}")
+                    else:
+                        logging.warning("币安WebSocket db_service未初始化，无法保存数据")
+                except (ValueError, TypeError) as e:
+                    logging.warning(f"币安爆仓数据处理失败：{e}")
+                    import traceback
+                    logging.warning(f"异常详情: {traceback.format_exc()}")
+        except json.JSONDecodeError:
+            pass
+        except Exception as e:
+            logging.error(f"币安WebSocket消息处理错误：{e}")
+            import traceback
+            logging.error(f"异常详情: {traceback.format_exc()}")
+    
+    def on_error(self, ws, error):
+        error_str = str(error)
+        if "No data received" not in error_str and "Connection refused" not in error_str:
+            logging.error(f"币安WebSocket 错误：{error}")
+            logging.error(f"币安WebSocket 错误详情：type={type(error)}, args={error.args if hasattr(error, 'args') else 'N/A'}")
+            import traceback
+            logging.error(f"币安WebSocket 错误堆栈：{traceback.format_exc()}")
+    
+    def on_close(self, ws, close_status_code, close_msg):
+        logging.info(f"币安WebSocket on_close回调触发，状态码：{close_status_code}，消息：{close_msg}")
+        self.is_running = False
+        logging.info(f"币安WebSocket 关闭（状态码：{close_status_code}），5秒后重连...")
+        time.sleep(5)
+        if not self.is_running:
+            logging.info("币安WebSocket 开始重连...")
+            self.start()
+    
+    def on_open(self, ws):
+        try:
+            logging.info(f"币安WebSocket on_open回调触发，连接URL: {ws.url if hasattr(ws, 'url') else 'N/A'}")
+            # 币安WebSocket连接成功后，不需要发送订阅消息（组合streams方式）
+            logging.info("币安WebSocket 连接成功，已订阅BTCUSDT、ETHUSDT、SOLUSDT爆仓数据")
+            self.last_pong_time = time.time()
+        except Exception as e:
+            logging.error(f"币安WebSocket 初始化失败：{e}")
+            import traceback
+            logging.error(f"币安WebSocket 初始化异常详情：{traceback.format_exc()}")
+    
+    def _ping_loop(self):
+        """发送ping保持连接"""
+        while self.is_running:
+            time.sleep(self.ping_interval)
+            if not self.is_running:
+                logging.debug("币安WebSocket ping循环退出：is_running=False")
+                break
+            try:
+                if self.ws and hasattr(self.ws, 'sock') and self.ws.sock:
+                    # 检查是否需要重连（如果超过10分钟没有收到pong）
+                    time_since_last_pong = time.time() - self.last_pong_time
+                    if time_since_last_pong > 600:  # 10分钟
+                        logging.warning(f"币安WebSocket 心跳超时（{time_since_last_pong:.1f}秒未收到pong），准备重连...")
+                        self.ws.close()
+                        break
+                    # 币安WebSocket：服务端每3分钟发送ping，客户端需要在10分钟内回复pong
+                    # 我们不需要主动发送pong，只需要响应服务端的ping
+                    # 但为了保持连接，可以定期检查连接状态
+                    logging.debug(f"币安WebSocket心跳检查：距离上次pong {time_since_last_pong:.1f}秒")
+                else:
+                    logging.debug("币安WebSocket ping循环退出：连接不存在")
+                    break
+            except Exception as e:
+                logging.warning(f"币安WebSocket ping循环异常：{e}")
+                break
+    
+    def start(self):
+        if self.is_running:
+            logging.warning("币安WebSocket已经在运行，跳过重复启动")
+            return
+        self.is_running = True
+        # 使用组合streams方式订阅三个币种的爆仓数据
+        streams = "btcusdt@forceOrder/ethusdt@forceOrder/solusdt@forceOrder"
+        ws_url = f"wss://fstream.binance.com/stream?streams={streams}"
+        logging.info(f"币安WebSocket准备连接，URL: {ws_url}")
+        self.ws = websocket.WebSocketApp(ws_url,
+                                         on_message=self.on_message,
+                                         on_error=self.on_error,
+                                         on_close=self.on_close,
+                                         on_open=self.on_open)
+        self.thread = threading.Thread(target=self.ws.run_forever)
+        self.thread.daemon = True
+        self.thread.start()
+        self.ping_thread = threading.Thread(target=self._ping_loop)
+        self.ping_thread.daemon = True
+        self.ping_thread.start()
+        logging.info("币安爆仓数据WebSocket监听启动")
 
 
 # ==================== 数据收集函数 ====================
@@ -1397,16 +1646,27 @@ if __name__ == "__main__":
     except Exception as e:
         logging.error(f"数据库初始化失败: {e}")
     
-    # 启动爆仓数据WebSocket监听器（后台运行）
+    # 启动OKX爆仓数据WebSocket监听器（后台运行）
     try:
         liquidation_listener = OKXLiquidationListener()
         liquidation_listener.start()
-        logging.info("爆仓数据WebSocket监听器启动成功")
+        logging.info("OKX爆仓数据WebSocket监听器启动成功")
     except Exception as e:
-        logging.error(f"爆仓数据WebSocket监听器启动失败: {e}")
+        logging.error(f"OKX爆仓数据WebSocket监听器启动失败: {e}")
         import traceback
         logging.error(f"异常详情: {traceback.format_exc()}")
-        logging.warning("将继续运行其他数据收集任务，但爆仓数据将无法收集")
+        logging.warning("将继续运行其他数据收集任务，但OKX爆仓数据将无法收集")
+    
+    # 启动币安爆仓数据WebSocket监听器（后台运行）
+    try:
+        binance_liquidation_listener = BinanceLiquidationListener()
+        binance_liquidation_listener.start()
+        logging.info("币安爆仓数据WebSocket监听器启动成功")
+    except Exception as e:
+        logging.error(f"币安爆仓数据WebSocket监听器启动失败: {e}")
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
+        logging.warning("将继续运行其他数据收集任务，但币安爆仓数据将无法收集")
     
     # 立即执行一次所有数据收集（即使失败也不影响后续定时任务）
     try:
