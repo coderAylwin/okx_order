@@ -149,7 +149,7 @@ class OnchainDatabaseService:
     
     def get_latest_exchange_balance(self, coin):
         """
-        获取指定币种最新的交易所余额数据
+        获取指定币种每个交易所最新的余额数据（按交易所分组，获取每个交易所的最新记录）
         
         Args:
             coin: 币种（BTC/ETH/XRP）
@@ -184,25 +184,18 @@ class OnchainDatabaseService:
         cursor = self.connection.cursor(pymysql.cursors.DictCursor)
         
         try:
-            # 获取最新的时间戳
-            sql_latest_ts = f"SELECT MAX(ts) as latest_ts FROM {table_name}"
-            cursor.execute(sql_latest_ts)
-            result = cursor.fetchone()
-            
-            if not result or not result.get('latest_ts'):
-                # 没有数据
-                return {}
-            
-            latest_ts = result['latest_ts']
-            
-            # 获取该时间戳的所有交易所数据
+            # 获取每个交易所的最新记录（按exchange_name分组，取每个交易所最新的ts）
             sql = f"""
-            SELECT exchange_name, total_balance, balance_change_1d, balance_change_percent_1d,
-                   balance_change_7d, balance_change_percent_7d, balance_change_30d, balance_change_percent_30d
-            FROM {table_name}
-            WHERE ts = %s
+            SELECT e1.exchange_name, e1.total_balance, e1.balance_change_1d, e1.balance_change_percent_1d,
+                   e1.balance_change_7d, e1.balance_change_percent_7d, e1.balance_change_30d, e1.balance_change_percent_30d
+            FROM {table_name} e1
+            INNER JOIN (
+                SELECT exchange_name, MAX(ts) as max_ts
+                FROM {table_name}
+                GROUP BY exchange_name
+            ) e2 ON e1.exchange_name = e2.exchange_name AND e1.ts = e2.max_ts
             """
-            cursor.execute(sql, (latest_ts,))
+            cursor.execute(sql)
             rows = cursor.fetchall()
             
             # 转换为以exchange_name为key的字典
@@ -313,23 +306,17 @@ class OnchainDatabaseService:
                     balance_change_30d = float(exchange_data.get('balance_change_30d', 0)) if exchange_data.get('balance_change_30d') is not None else None
                     balance_change_percent_30d = float(exchange_data.get('balance_change_percent_30d', 0)) if exchange_data.get('balance_change_percent_30d') is not None else None
                     
-                    # 对比最新数据，如果数据相同则跳过
+                    # 对比该交易所的最新数据，如果total_balance相同则跳过
                     if has_latest_data and exchange_name in latest_data:
                         latest = latest_data[exchange_name]
-                        # 对比所有字段（允许浮点数误差）
-                        is_same = (
-                            abs((total_balance or 0) - (latest.get('total_balance') or 0)) < 0.0001 and
-                            abs((balance_change_1d or 0) - (latest.get('balance_change_1d') or 0)) < 0.0001 and
-                            abs((balance_change_percent_1d or 0) - (latest.get('balance_change_percent_1d') or 0)) < 0.0001 and
-                            abs((balance_change_7d or 0) - (latest.get('balance_change_7d') or 0)) < 0.0001 and
-                            abs((balance_change_percent_7d or 0) - (latest.get('balance_change_percent_7d') or 0)) < 0.0001 and
-                            abs((balance_change_30d or 0) - (latest.get('balance_change_30d') or 0)) < 0.0001 and
-                            abs((balance_change_percent_30d or 0) - (latest.get('balance_change_percent_30d') or 0)) < 0.0001
-                        )
-                        if is_same:
-                            unchanged_count += 1
-                            logging.debug(f"{coin} {exchange_name} 数据未变化，跳过保存")
-                            continue
+                        latest_total_balance = latest.get('total_balance')
+                        
+                        # 只对比total_balance，如果相同则跳过保存
+                        if latest_total_balance is not None:
+                            if abs(total_balance - latest_total_balance) < 0.0001:
+                                unchanged_count += 1
+                                logging.debug(f"{coin} {exchange_name} total_balance未变化 ({total_balance})，跳过保存")
+                                continue
                     
                     cursor.execute(sql, (
                         exchange_name,
