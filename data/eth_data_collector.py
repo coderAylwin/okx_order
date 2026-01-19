@@ -166,6 +166,7 @@ def collect_eth_staking_data():
         exit_queue = queue_data.get('exit_queue', {})
         exit_balance_wei = exit_queue.get('balance', '0')
         exit_churn_wei = exit_queue.get('churn', '0')
+        exit_estimated_processed_at_timestamp = exit_queue.get('estimated_processed_at')
         
         # 兼容exit_count字段（可能是exit_count或count）
         exit_count = exit_queue.get('exit_count') or exit_queue.get('count', 0)
@@ -173,6 +174,9 @@ def collect_eth_staking_data():
         # 转换为ETH
         exit_balance_eth = wei_to_eth(exit_balance_wei)
         exit_churn_eth = wei_to_eth(exit_churn_wei)
+        
+        # 转换退出预计完成时间
+        exit_estimated_processed_at = timestamp_to_datetime(exit_estimated_processed_at_timestamp)
         
         # 解析withdrawal_sweep数据
         withdrawal_sweep = queue_data.get('withdrawal_sweep', {})
@@ -191,6 +195,7 @@ def collect_eth_staking_data():
         logging.info(f"  质押每个epoch最多激活: {deposit_churn_eth:.8f} ETH")
         logging.info(f"  退出队列总数量: {exit_balance_eth:.8f} ETH")
         logging.info(f"  退出队列请求数: {exit_count}")
+        logging.info(f"  退出预计完成时间: {exit_estimated_processed_at}")
         logging.info(f"  退出每个epoch最多退出: {exit_churn_eth:.8f} ETH")
         logging.info(f"  提币队列延迟: {withdrawal_sweep_delay} slots")
         logging.info(f"  上次扫完验证者索引: {withdrawal_sweep_last_validator_index}")
@@ -210,6 +215,7 @@ def collect_eth_staking_data():
             deposit_churn_eth=deposit_churn_eth,
             exit_balance_eth=exit_balance_eth,
             exit_count=exit_count,
+            exit_estimated_processed_at=exit_estimated_processed_at,
             exit_churn_eth=exit_churn_eth,
             withdrawal_sweep_delay=withdrawal_sweep_delay,
             withdrawal_sweep_last_validator_index=withdrawal_sweep_last_validator_index,
