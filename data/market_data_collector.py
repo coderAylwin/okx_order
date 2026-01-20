@@ -711,11 +711,11 @@ def collect_long_short_ratio_with_db(coin, coin_symbol, db_service):
             resp1 = requests.get(url1, timeout=10, headers=headers)
             resp1.raise_for_status()
             json_data1 = resp1.json()
-            
+        
             if json_data1.get('code') == '0' and json_data1.get('data') and len(json_data1['data']) >= 1:
                 data1 = json_data1['data']
                 logging.info(f"{coin} 多空比（合约）：{data1}")
-                
+        
                 # 计算delta_ratio需要前一个时间点的数据
                 prev_ratio = None
                 sorted_data = []
@@ -843,7 +843,7 @@ def collect_long_short_ratio_with_db(coin, coin_symbol, db_service):
                     
                     # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
                     ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
-                    
+        
                     # 检查并保存接口3的数据（每条数据都进行一致性检查）
                     result = db_service.save_long_short_ratio_partial(
                         coin, coin_symbol, ts_datetime_utc8, 
@@ -1422,44 +1422,24 @@ def collect_binance_funding_rate(coin, coin_symbol):
 
 
 def collect_binance_data():
-    """收集币安数据（每分钟）：持仓量、主动买卖量"""
+    """收集币安数据（每分钟）：持仓量、主动买卖量（串行执行确保ID连续）"""
     try:
         start_time = time.time()
         
-        def collect_coin_data(coin, coin_symbol):
-            """收集单个币种的数据"""
+        # 串行执行每个币种的数据收集，确保ID连续（不使用线程池）
+        for coin, config in BINANCE_COINS.items():
+            coin_symbol = config['symbol']
             try:
                 collect_binance_open_interest(coin, coin_symbol)
                 collect_binance_taker_volume(coin, coin_symbol)
                 collect_binance_basis(coin, coin_symbol)
                 collect_binance_long_short_ratio(coin, coin_symbol)
                 collect_binance_funding_rate(coin, coin_symbol)
-                return True
             except Exception as e:
                 logging.error(f"{coin} 币安数据收集失败: {e}")
                 import traceback
                 logging.error(f"{coin} 币安数据收集异常详情: {traceback.format_exc()}")
-                return False
-        
-        # 使用线程池并行收集多个币种的数据
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {}
-            for coin, config in BINANCE_COINS.items():
-                coin_symbol = config['symbol']
-                future = executor.submit(collect_coin_data, coin, coin_symbol)
-                futures[future] = coin
-            
-            # 等待所有任务完成，设置超时（最多30秒，因为每分钟执行）
-            for future in futures:
-                coin = futures[future]
-                try:
-                    future.result(timeout=30)
-                except FutureTimeoutError:
-                    logging.warning(f"{coin} 币安数据收集超时（30秒）")
-                except Exception as e:
-                    logging.error(f"{coin} 币安数据收集异常: {e}")
-                    import traceback
-                    logging.error(f"{coin} 币安数据收集异常详情: {traceback.format_exc()}")
+                continue  # 继续处理下一个币种
         
         elapsed_time = time.time() - start_time
         if elapsed_time > 30:
@@ -1478,7 +1458,7 @@ def collect_frequent_data():
         # logging.info("=" * 80)
         # logging.info("开始收集高频市场数据（每分钟）")
         # logging.info("=" * 80)
-        
+    
         def collect_coin_data(coin, coin_symbol):
             """收集单个币种的数据（每个线程使用独立的数据库连接）"""
             # 为每个线程创建独立的数据库连接
@@ -1543,7 +1523,7 @@ def collect_periodic_data():
         # logging.info("=" * 80)
         # logging.info("开始收集周期性市场数据（每5分钟）")
         # logging.info("=" * 80)
-        
+    
         def collect_coin_data(coin, coin_symbol):
             """收集单个币种的数据（每个线程使用独立的数据库连接）"""
             # 为每个线程创建独立的数据库连接

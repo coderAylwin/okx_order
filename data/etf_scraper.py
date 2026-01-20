@@ -186,7 +186,7 @@ def check_version_compatibility(chrome_version, chromedriver_version):
 
 def get_chrome_options():
     """获取配置好的 Chrome 选项"""
-    chrome_options = Options()
+chrome_options = Options()
     
     # 查找并设置 Chrome 二进制路径
     chrome_binary = find_chrome_binary()
@@ -196,16 +196,16 @@ def get_chrome_options():
     else:
         logging.warning("未找到 Chrome 二进制文件，将使用系统默认路径")
     
-    chrome_options.add_argument(
-        "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
+chrome_options.add_argument(
+    "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
+chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+chrome_options.add_experimental_option('useAutomationExtension', False)
     
     # 服务器环境必需的选项
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--headless=new")
+chrome_options.add_argument("--no-sandbox")
+chrome_options.add_argument("--disable-dev-shm-usage")
+chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--disable-extensions")
@@ -511,7 +511,7 @@ def scrape_etf_data_for_coin(coin_symbol):
                 service = Service(chromedriver_path)
                 driver = webdriver.Chrome(service=service, options=chrome_options)
             else:
-                driver = webdriver.Chrome(options=chrome_options)
+    driver = webdriver.Chrome(options=chrome_options)
             
             logging.info("✓ Chrome WebDriver 创建成功")
             break  # 成功创建，退出循环
@@ -759,7 +759,7 @@ def scrape_etf_data_for_coin(coin_symbol):
         # 安全关闭 driver
         if driver is not None:
             try:
-                driver.quit()
+        driver.quit()
             except Exception as e:
                 logging.warning(f"{coin_name} ETF: 关闭 WebDriver 时出错: {str(e)}")
 

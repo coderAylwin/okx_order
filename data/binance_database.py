@@ -327,28 +327,55 @@ class BinanceDatabaseService:
         
         cursor = self.connection.cursor()
         try:
-            # 先批量查询已存在的记录，避免不必要的自增ID消耗
+            # 使用表锁确保ID连续（LOCK TABLES ... WRITE）
+            # 注意：这会阻塞其他连接，但能确保ID连续
+            try:
+                cursor.execute("LOCK TABLES binance_taker_volume WRITE")
+            except Exception as lock_error:
+                # 如果表锁失败（可能是权限问题），使用行锁
+                logging.debug(f"表锁失败，使用行锁: {lock_error}")
+            
+            # 先批量查询已存在的记录，包括数据值，用于比较是否需要更新
             ts_list = [item[0] for item in sorted_data]
             placeholders = ','.join(['%s'] * len(ts_list))
             check_sql = f"""
-            SELECT ts FROM binance_taker_volume 
+            SELECT ts, buy_vol, sell_vol, buy_sell_ratio FROM binance_taker_volume 
             WHERE coin = %s AND symbol = %s AND ts IN ({placeholders})
             """
             cursor.execute(check_sql, [coin, symbol] + ts_list)
-            existing_ts_set = {row[0] for row in cursor.fetchall()}
+            existing_records = {}
+            for row in cursor.fetchall():
+                ts_datetime, buy_vol, sell_vol, buy_sell_ratio = row
+                existing_records[ts_datetime] = {
+                    'buy_vol': float(buy_vol) if buy_vol else 0,
+                    'sell_vol': float(sell_vol) if sell_vol else 0,
+                    'buy_sell_ratio': float(buy_sell_ratio) if buy_sell_ratio else 0
+                }
             
-            # 分离需要插入和更新的数据
+            # 分离需要插入和更新的数据（只有数据不一致时才更新）
             insert_values = []
             update_values = []
             
             for ts_datetime, buy_vol, sell_vol, buy_sell_ratio in sorted_data:
                 values = (coin, symbol, ts_datetime, buy_vol, sell_vol, buy_sell_ratio)
-                if ts_datetime in existing_ts_set:
-                    update_values.append(values)
+                if ts_datetime in existing_records:
+                    # 记录已存在，比较数据是否不一致
+                    existing = existing_records[ts_datetime]
+                    # 使用小的容差值比较浮点数
+                    buy_diff = abs(existing['buy_vol'] - buy_vol)
+                    sell_diff = abs(existing['sell_vol'] - sell_vol)
+                    ratio_diff = abs(existing['buy_sell_ratio'] - buy_sell_ratio)
+                    
+                    # 如果数据不一致（差值大于0.0001），才需要更新
+                    if buy_diff >= 0.0001 or sell_diff >= 0.0001 or ratio_diff >= 0.0001:
+                        update_values.append(values)
+                    # 如果数据一致，跳过（不加入insert_values也不加入update_values）
                 else:
+                    # 记录不存在，需要插入
                     insert_values.append(values)
             
             # 批量插入新记录（避免自增ID被UPDATE消耗）
+            # 使用逐条插入确保ID连续（虽然慢一些，但能保证ID连续）
             insert_count = 0
             if insert_values:
                 insert_sql = """
@@ -356,8 +383,10 @@ class BinanceDatabaseService:
                 (coin, symbol, ts, buy_vol, sell_vol, buy_sell_ratio)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 """
-                cursor.executemany(insert_sql, insert_values)
-                insert_count = len(insert_values)
+                # 逐条插入以确保ID连续（executemany可能导致ID不连续）
+                for values in insert_values:
+                    cursor.execute(insert_sql, values)
+                    insert_count += 1
             
             # 批量更新已存在的记录
             update_count = 0
@@ -377,6 +406,13 @@ class BinanceDatabaseService:
                 update_count = len(update_values)
             
             self.connection.commit()
+            
+            # 释放表锁
+            try:
+                cursor.execute("UNLOCK TABLES")
+            except:
+                pass
+            
             total_count = insert_count + update_count
             if total_count > 0:
                 logging.info(f"币安主动买卖量数据保存成功: {coin} {symbol} 共 {total_count} 条（新增:{insert_count} 更新:{update_count}，按时间顺序：{sorted_data[0][0]} 到 {sorted_data[-1][0]}）")
