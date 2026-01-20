@@ -34,8 +34,8 @@ FEAR_GREED_API_URL = 'https://api.alternative.me/fng/'
 # 初始化数据库服务
 macro_db = MacroDatabaseService(**DB_CONFIG)
 
-# VIX Ticker
-vix_ticker = yf.Ticker("^VIX")
+# 注意：不在模块级别创建vix_ticker，避免缓存问题
+# 每次调用时重新创建Ticker对象，确保获取最新数据
 
 # 时区设置
 ny_tz = pytz.timezone('America/New_York')
@@ -50,7 +50,7 @@ logging.basicConfig(
 
 # ==================== 数据收集函数 ====================
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
-def get_fear_greed_index(limit=5):
+def get_fear_greed_index(limit=3):
     """
     获取加密货币恐慌指数数据
     
@@ -93,21 +93,68 @@ def get_fear_greed_index(limit=5):
 
 def get_vix_value():
     """
-    获取VIX恐慌指数当前值
+    获取VIX恐慌指数当前值（每次调用都重新创建Ticker对象，避免缓存问题）
     
     Returns:
         float: VIX值，如果获取失败返回None
     """
     try:
+        # 每次调用时重新创建Ticker对象，避免使用缓存的旧数据
+        vix_ticker = yf.Ticker("^VIX")
+        
+        # 方法1：使用history方法获取最新数据（最可靠，强制刷新）
+        try:
+            # 获取最近1天的1分钟K线数据，取最后一条的收盘价
+            hist = vix_ticker.history(period="1d", interval="1m", progress=False)
+            if not hist.empty:
+                latest_vix = float(hist['Close'].iloc[-1])
+                latest_time = hist.index[-1]
+                logging.info(f"VIX通过history获取: {latest_vix}, 时间: {latest_time}")
+                return latest_vix
+        except Exception as hist_error:
+            logging.debug(f"history方法获取失败，尝试其他方法: {hist_error}")
+        
+        # 方法2：尝试使用fast_info获取最新价格（更快但可能缓存）
+        try:
+            fast_info = vix_ticker.fast_info
+            if hasattr(fast_info, 'last_price') and fast_info.last_price is not None:
+                logging.info(f"VIX fast_info.last_price: {fast_info.last_price}")
+                return float(fast_info.last_price)
+        except Exception as fast_error:
+            logging.debug(f"fast_info获取失败，尝试其他方法: {fast_error}")
+        
+        # 方法3：使用info获取详细数据（最后备选）
         info = vix_ticker.info
-        vix_value = info.get('regularMarketPrice') or info.get('previousClose')
+        
+        # 打印所有可用的价格字段（用于调试）
+        price_fields = {
+            'regularMarketPrice': info.get('regularMarketPrice'),
+            'currentPrice': info.get('currentPrice'),
+            'previousClose': info.get('previousClose'),
+            'regularMarketPreviousClose': info.get('regularMarketPreviousClose'),
+            'bid': info.get('bid'),
+            'ask': info.get('ask'),
+            'open': info.get('open'),
+            'dayHigh': info.get('dayHigh'),
+            'dayLow': info.get('dayLow'),
+        }
+        logging.info(f"VIX所有价格字段: {price_fields}")
+        
+        # 优先使用currentPrice（当前价格），如果没有则使用regularMarketPrice（常规市场价格）
+        # 如果都没有，则使用previousClose（前收盘价）作为兜底
+        vix_value = (info.get('currentPrice') or 
+                    info.get('regularMarketPrice') or 
+                    info.get('previousClose'))
         
         if vix_value is not None:
+            logging.info(f"VIX价格字段详情: currentPrice={info.get('currentPrice')}, regularMarketPrice={info.get('regularMarketPrice')}, previousClose={info.get('previousClose')}, 最终使用值={vix_value}")
             return float(vix_value)
         return None
         
     except Exception as e:
         logging.warning(f"获取VIX值失败: {e}")
+        import traceback
+        logging.warning(f"异常详情: {traceback.format_exc()}")
         return None
 
 
@@ -173,8 +220,9 @@ def collect_fear_greed_data():
     收集最新的恐慌指数数据（每5分钟执行一次）
     """
     try:
-        # 获取最新的加密货币恐慌指数数据
-        fear_greed_data = get_fear_greed_index(limit=1)
+        # 恐慌指数北京时间通常每日8点左右更新，但我们需要每5分钟落库一次（主要记录VIX实时值）
+        # 这里取最近3条用于兜底/排查，实际保存用最新一条即可
+        fear_greed_data = get_fear_greed_index(limit=3)
         
         if not fear_greed_data or len(fear_greed_data) == 0:
             logging.warning("未获取到加密货币恐慌指数数据")
@@ -183,8 +231,10 @@ def collect_fear_greed_data():
         # 获取最新的一条数据
         latest_item = fear_greed_data[0]
         
-        # 打印获取到的最新数据
-        logging.info(f"最新加密货币恐慌指数数据: {latest_item}")
+        # 打印获取到的数据（便于验证）
+        logging.info(f"最新加密货币恐慌指数数据(最新1条): {latest_item}")
+        if len(fear_greed_data) > 1:
+            logging.debug(f"恐慌指数最近{len(fear_greed_data)}条: {fear_greed_data}")
         
         # 解析数据
         crypto_value = int(latest_item.get('value', 0)) if latest_item.get('value') else None
@@ -195,22 +245,22 @@ def collect_fear_greed_data():
             logging.warning("加密货币恐慌指数数据不完整")
             return
         
-        # 将时间戳转换为UTC+8时间（整点时间）
-        ts_datetime_utc8 = datetime.fromtimestamp(crypto_timestamp, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
-        # 调整为整点时间（秒和微秒为0）
-        ts_datetime_utc8 = ts_datetime_utc8.replace(second=0, microsecond=0)
+        # 数据落库时间：用“当前北京时间整分钟”，确保每5分钟都能插入一条记录
+        now_utc8 = datetime.now(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+        ts_datetime_utc8 = now_utc8.replace(second=0, microsecond=0)
         
         # 获取VIX值
         vix_value = get_vix_value()
+        logging.info(f"最新VIX数据: ts={ts_datetime_utc8}, vix_value={vix_value}")
         
-        # 保存数据（检查更新，有变化才保存）
+        # 保存数据：每5分钟都保存（主要记录VIX实时值），不做“值相同就跳过”的判断
         result = macro_db.save_fear_greed_data(
             ts_datetime=ts_datetime_utc8,
             crypto_value=crypto_value,
             crypto_classification=crypto_classification,
             crypto_timestamp=crypto_timestamp,
             vix_value=vix_value,
-            check_update=True
+            check_update=False
         )
         
         if result == 'saved':
@@ -281,6 +331,8 @@ def supplement_vix_for_history():
                         period = "1y"
                     
                     logging.info(f"获取VIX历史数据，时间范围: {earliest_ts} 到 {latest_ts}，使用period={period}")
+                    # 重新创建Ticker对象，避免使用缓存的旧数据
+                    vix_ticker = yf.Ticker("^VIX")
                     hist = vix_ticker.history(period=period, interval="1d")
                     vix_history = {}
                     if not hist.empty:

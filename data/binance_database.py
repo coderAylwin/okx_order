@@ -297,7 +297,7 @@ class BinanceDatabaseService:
     
     def save_taker_volume_batch(self, coin, symbol, data_to_save):
         """
-        批量保存币安主动买卖量数据
+        批量保存币安主动买卖量数据（确保按时间顺序保存，减少ID跳号）
         
         Args:
             coin: 币种（BTC/ETH/SOL）
@@ -319,35 +319,68 @@ class BinanceDatabaseService:
             if not self.connect():
                 return False
         
+        if not data_to_save:
+            return True
+        
+        # 确保数据按时间顺序排序（从早到晚）
+        sorted_data = sorted(data_to_save, key=lambda x: x[0])
+        
         cursor = self.connection.cursor()
         try:
-            sql = """
-            INSERT INTO binance_taker_volume 
-            (coin, symbol, ts, buy_vol, sell_vol, buy_sell_ratio)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                buy_vol = VALUES(buy_vol),
-                sell_vol = VALUES(sell_vol),
-                buy_sell_ratio = VALUES(buy_sell_ratio),
-                updated_at = CURRENT_TIMESTAMP
+            # 先批量查询已存在的记录，避免不必要的自增ID消耗
+            ts_list = [item[0] for item in sorted_data]
+            placeholders = ','.join(['%s'] * len(ts_list))
+            check_sql = f"""
+            SELECT ts FROM binance_taker_volume 
+            WHERE coin = %s AND symbol = %s AND ts IN ({placeholders})
             """
+            cursor.execute(check_sql, [coin, symbol] + ts_list)
+            existing_ts_set = {row[0] for row in cursor.fetchall()}
             
-            # 确保数据按时间顺序保存（虽然已经排序，但再次确认）
-            sorted_data = sorted(data_to_save, key=lambda x: x[0])
+            # 分离需要插入和更新的数据
+            insert_values = []
+            update_values = []
             
-            saved_count = 0
             for ts_datetime, buy_vol, sell_vol, buy_sell_ratio in sorted_data:
-                try:
-                    cursor.execute(sql, (coin, symbol, ts_datetime, buy_vol, sell_vol, buy_sell_ratio))
-                    saved_count += 1
-                except Exception as e:
-                    logging.warning(f"保存币安主动买卖量数据失败 (coin={coin}, symbol={symbol}, ts={ts_datetime}): {e}")
-                    continue
+                values = (coin, symbol, ts_datetime, buy_vol, sell_vol, buy_sell_ratio)
+                if ts_datetime in existing_ts_set:
+                    update_values.append(values)
+                else:
+                    insert_values.append(values)
+            
+            # 批量插入新记录（避免自增ID被UPDATE消耗）
+            insert_count = 0
+            if insert_values:
+                insert_sql = """
+                INSERT INTO binance_taker_volume 
+                (coin, symbol, ts, buy_vol, sell_vol, buy_sell_ratio)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """
+                cursor.executemany(insert_sql, insert_values)
+                insert_count = len(insert_values)
+            
+            # 批量更新已存在的记录
+            update_count = 0
+            if update_values:
+                update_sql = """
+                UPDATE binance_taker_volume 
+                SET buy_vol = %s,
+                    sell_vol = %s,
+                    buy_sell_ratio = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE coin = %s AND symbol = %s AND ts = %s
+                """
+                # 调整参数顺序：先是要更新的值，然后是WHERE条件
+                update_params = [(buy_vol, sell_vol, buy_sell_ratio, coin, symbol, ts_datetime) 
+                                for coin_val, symbol_val, ts_datetime, buy_vol, sell_vol, buy_sell_ratio in update_values]
+                cursor.executemany(update_sql, update_params)
+                update_count = len(update_values)
             
             self.connection.commit()
-            if saved_count > 0:
-                logging.info(f"币安主动买卖量数据保存成功: {coin} {symbol} 共 {saved_count} 条（按时间顺序）")
-            return saved_count > 0
+            total_count = insert_count + update_count
+            if total_count > 0:
+                logging.info(f"币安主动买卖量数据保存成功: {coin} {symbol} 共 {total_count} 条（新增:{insert_count} 更新:{update_count}，按时间顺序：{sorted_data[0][0]} 到 {sorted_data[-1][0]}）")
+            return total_count > 0
             
         except Exception as e:
             self.connection.rollback()
