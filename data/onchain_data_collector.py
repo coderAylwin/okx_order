@@ -30,6 +30,9 @@ DB_CONFIG = {
 COINGLASS_API_KEY = '408475f9fdea470784103ae628c4fc8d'
 COINGLASS_API_BASE_URL = 'https://open-api-v4.coinglass.com/api'
 
+# Blockchair API 配置
+BLOCKCHAIR_API_URL = 'https://api.blockchair.com/bitcoin/stats'
+
 # 监控的币种
 COINS = ['BTC', 'ETH', 'XRP']
 
@@ -136,6 +139,75 @@ def collect_all_coins():
     logging.info("=" * 60)
 
 
+# ==================== BTC链上统计数据收集 ====================
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
+def get_btc_stats():
+    """
+    获取BTC链上统计数据
+    
+    Returns:
+        dict: 统计数据字典，如果失败返回None
+    """
+    try:
+        logging.info("开始获取BTC链上统计数据...")
+        resp = requests.get(BLOCKCHAIR_API_URL, timeout=30)
+        resp.raise_for_status()
+        json_data = resp.json()
+        
+        # 检查API响应
+        if json_data.get('context', {}).get('code') != 200:
+            error_msg = json_data.get('context', {}).get('error', '未知错误')
+            logging.warning(f"BTC链上数据：API错误（{error_msg}）")
+            return None
+        
+        data = json_data.get('data')
+        if not isinstance(data, dict):
+            logging.warning(f"BTC链上数据：数据格式错误")
+            return None
+        
+        logging.info(f"成功获取BTC链上统计数据")
+        return data
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"BTC链上数据：网络请求失败 - {e}")
+        return None
+    except Exception as e:
+        logging.error(f"获取BTC链上数据失败：{e}")
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
+        return None
+
+
+def collect_btc_stats():
+    """收集BTC链上统计数据并保存到数据库"""
+    try:
+        # 获取统计数据
+        stats_data = get_btc_stats()
+        
+        if not stats_data:
+            logging.warning("未获取到BTC链上统计数据")
+            return
+        
+        # 使用当前时间（UTC+8）作为时间戳，对齐到10分钟的整点
+        now_utc8 = datetime.now(ZoneInfo('Asia/Shanghai'))
+        # 对齐到10分钟的整点（0, 10, 20, 30, 40, 50分）
+        minute_aligned = (now_utc8.minute // 10) * 10
+        ts_datetime_utc8 = now_utc8.replace(minute=minute_aligned, second=0, microsecond=0)
+        
+        # 保存数据到数据库
+        result = onchain_db.save_btc_stats(stats_data, ts_datetime_utc8)
+        
+        if result:
+            logging.info(f"BTC链上统计数据保存成功: ts={ts_datetime_utc8}")
+        else:
+            logging.error(f"BTC链上统计数据保存失败: ts={ts_datetime_utc8}")
+            
+    except Exception as e:
+        logging.error(f"收集BTC链上统计数据失败: {e}")
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
+
+
 # ==================== 定时任务 ====================
 def job_listener(event):
     """任务执行监听器"""
@@ -158,6 +230,7 @@ def main():
     # 立即执行一次数据收集
     logging.info("立即执行一次数据收集...")
     collect_all_coins()
+    collect_btc_stats()
     
     # 创建调度器
     scheduler = BlockingScheduler(timezone='Asia/Shanghai')
@@ -175,11 +248,25 @@ def main():
         misfire_grace_time=60  # 任务错过执行时间后，60秒内仍可执行
     )
     
+    # 添加定时任务：每10分钟收集一次BTC链上统计数据（0, 10, 20, 30, 40, 50分）
+    scheduler.add_job(
+        collect_btc_stats,
+        trigger='cron',
+        minute='0,10,20,30,40,50',  # 每10分钟的整点时间
+        second=0,  # 整秒执行
+        id='collect_btc_stats',
+        name='收集BTC链上统计数据',
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120  # 任务错过执行时间后，120秒内仍可执行
+    )
+    
     # 添加任务监听器
     scheduler.add_listener(job_listener, apscheduler.events.EVENT_JOB_EXECUTED | apscheduler.events.EVENT_JOB_ERROR)
     
     logging.info("链上数据收集服务启动成功")
-    logging.info("定时任务：每5分钟在整点时间（0,5,10,15,20,25,30,35,40,45,50,55分）收集一次交易所余额数据")
+    logging.info("定时任务1：每5分钟在整点时间（0,5,10,15,20,25,30,35,40,45,50,55分）收集一次交易所余额数据")
+    logging.info("定时任务2：每10分钟在整点时间（0,10,20,30,40,50分）收集一次BTC链上统计数据")
     logging.info("ts字段保存为整点时间（秒和微秒为0），整点时间（分钟为0）的数据将标记为 is_hourly=True")
     
     try:

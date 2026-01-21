@@ -29,9 +29,11 @@ DB_CONFIG = {
 # Beaconcha.in API 配置
 BEACONCHA_API_URL = 'https://beaconcha.in/api/v2/ethereum/queues'
 BEACONCHA_API_TOKEN = 'CEV6oHTg7paT4bhATDYGyDR6dOg1voF1dzEudXJMH4u'
+BEACONCHA_EPOCH_API_URL = 'https://beaconcha.in/api/v1/epoch/latest'
 
-# Wei到ETH的转换系数（1 ETH = 10^18 wei）
-WEI_TO_ETH = 10 ** 18
+# Gwei到ETH的转换系数（1 ETH = 10^9 Gwei = 10^18 wei）
+# 注意：API返回的值实际上是Gwei单位，不是wei
+GWEI_TO_ETH = 10 ** 9
 
 # 初始化数据库服务
 eth_db = ETHDatabaseService(**DB_CONFIG)
@@ -87,25 +89,116 @@ def get_eth_staking_queue():
         return None
 
 
-def wei_to_eth(wei_value):
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
+def get_eth_epoch_latest():
     """
-    将Wei转换为ETH
+    获取ETH最新epoch数据
+    
+    Returns:
+        dict: epoch数据，失败返回None
+    """
+    try:
+        # 尝试两种方式：带token和不带token（v1 API可能是公开的）
+        headers_with_token = {
+            'Authorization': f'Bearer {BEACONCHA_API_TOKEN}',
+            'Content-Type': 'application/json'
+        }
+        headers_without_token = {
+            'Content-Type': 'application/json'
+        }
+        
+        logging.info("开始获取ETH最新epoch数据...")
+        
+        # 先尝试不带token的方式（v1 API通常是公开的）
+        try:
+            resp = requests.get(BEACONCHA_EPOCH_API_URL, headers=headers_without_token, timeout=30)
+            resp.raise_for_status()
+            json_data = resp.json()
+            logging.info(f"ETH epoch API请求成功（不带token）")
+        except:
+            # 如果失败，尝试带token
+            logging.info("尝试使用token获取ETH epoch数据...")
+            resp = requests.get(BEACONCHA_EPOCH_API_URL, headers=headers_with_token, timeout=30)
+            resp.raise_for_status()
+            json_data = resp.json()
+            logging.info(f"ETH epoch API请求成功（带token）")
+        
+        # 添加调试日志：打印原始响应
+        logging.info(f"ETH epoch API响应: status={json_data.get('status')}")
+        logging.info(f"ETH epoch API原始数据（前500字符）: {str(json_data)[:500]}")
+        
+        # 检查API响应
+        if json_data.get('status') != 'OK':
+            logging.warning(f"ETH epoch数据：API响应状态错误，status={json_data.get('status')}, 完整响应: {json_data}")
+            return None
+        
+        data = json_data.get('data', {})
+        if not isinstance(data, dict):
+            logging.warning(f"ETH epoch数据：数据格式错误，data类型={type(data)}, data值={data}")
+            return None
+        
+        # 打印解析后的数据字段
+        eligibleether = data.get('eligibleether')
+        totalvalidatorbalance = data.get('totalvalidatorbalance')
+        averagevalidatorbalance = data.get('averagevalidatorbalance')
+        validatorscount = data.get('validatorscount')
+        
+        logging.info(f"ETH epoch数据字段解析: eligibleether={eligibleether} (type={type(eligibleether)}), "
+                    f"totalvalidatorbalance={totalvalidatorbalance} (type={type(totalvalidatorbalance)}), "
+                    f"averagevalidatorbalance={averagevalidatorbalance} (type={type(averagevalidatorbalance)}), "
+                    f"validatorscount={validatorscount} (type={type(validatorscount)})")
+        
+        # 检查数据是否有效
+        if eligibleether is None and totalvalidatorbalance is None:
+            logging.warning(f"ETH epoch数据：关键字段为空，可能数据格式不正确。完整data: {data}")
+        
+        logging.info("获取到ETH最新epoch数据")
+        return data
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"ETH epoch数据：网络请求失败 - {e}")
+        import traceback
+        logging.error(f"请求异常详情: {traceback.format_exc()}")
+        return None
+    except Exception as e:
+        logging.error(f"获取ETH epoch数据失败：{e}")
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
+        return None
+
+
+def gwei_to_eth(gwei_value):
+    """
+    将Gwei转换为ETH（API返回的值实际上是Gwei单位）
     
     Args:
-        wei_value: Wei值（字符串或整数）
+        gwei_value: Gwei值（字符串或整数）
     
     Returns:
         float: ETH值
     """
     try:
-        if wei_value is None:
+        if gwei_value is None:
             return 0.0
-        # 处理字符串类型的wei值
-        wei_int = int(wei_value) if isinstance(wei_value, str) else wei_value
-        return float(wei_int) / WEI_TO_ETH
+        # 处理字符串类型的gwei值
+        gwei_int = int(gwei_value) if isinstance(gwei_value, str) else gwei_value
+        return float(gwei_int) / GWEI_TO_ETH
     except (ValueError, TypeError) as e:
-        logging.warning(f"Wei转换失败: {wei_value}, 错误: {e}")
+        logging.warning(f"Gwei转换失败: {gwei_value}, 错误: {e}")
         return 0.0
+
+# 为了保持兼容性，保留wei_to_eth函数名，但实际处理的是Gwei
+def wei_to_eth(wei_value):
+    """
+    将Gwei转换为ETH（API返回的值实际上是Gwei单位，不是真正的wei）
+    
+    Args:
+        wei_value: Gwei值（字符串或整数，虽然函数名叫wei_to_eth，但实际输入是Gwei）
+    
+    Returns:
+        float: ETH值
+    """
+    return gwei_to_eth(wei_value)
 
 
 def timestamp_to_datetime(timestamp):
@@ -148,6 +241,12 @@ def collect_eth_staking_data():
             logging.warning("未获取到ETH质押队列数据")
             return
         
+        # 获取ETH最新epoch数据
+        epoch_data = get_eth_epoch_latest()
+        
+        if not epoch_data:
+            logging.warning("未获取到ETH epoch数据，将继续保存质押队列数据")
+        
         # 解析deposit_queue数据
         deposit_queue = queue_data.get('deposit_queue', {})
         deposit_count = deposit_queue.get('deposit_count', 0)
@@ -186,21 +285,29 @@ def collect_eth_staking_data():
         # 解析finality状态
         finality_status = queue_data.get('finality', '')
         
-        # 打印获取到的数据
-        logging.info("=" * 80)
-        logging.info(f"ETH质押队列数据 (ts={ts_datetime_utc8}):")
-        logging.info(f"  质押请求数: {deposit_count}")
-        logging.info(f"  质押总数量: {deposit_balance_eth:.8f} ETH")
-        logging.info(f"  质押预计完成时间: {deposit_estimated_processed_at}")
-        logging.info(f"  质押每个epoch最多激活: {deposit_churn_eth:.8f} ETH")
-        logging.info(f"  退出队列总数量: {exit_balance_eth:.8f} ETH")
-        logging.info(f"  退出队列请求数: {exit_count}")
-        logging.info(f"  退出预计完成时间: {exit_estimated_processed_at}")
-        logging.info(f"  退出每个epoch最多退出: {exit_churn_eth:.8f} ETH")
-        logging.info(f"  提币队列延迟: {withdrawal_sweep_delay} slots")
-        logging.info(f"  上次扫完验证者索引: {withdrawal_sweep_last_validator_index}")
-        logging.info(f"  最终确认状态: {finality_status}")
-        logging.info("=" * 80)
+        # 解析epoch数据（将wei转换为ETH，保留两位小数）
+        eligibleether = None
+        totalvalidatorbalance = None
+        averagevalidatorbalance = None
+        validatorscount = None
+        
+        if epoch_data:
+            # 获取wei值
+            eligibleether_wei = epoch_data.get('eligibleether')
+            totalvalidatorbalance_wei = epoch_data.get('totalvalidatorbalance')
+            averagevalidatorbalance_wei = epoch_data.get('averagevalidatorbalance')
+            validatorscount = epoch_data.get('validatorscount')
+            
+            # 将wei转换为ETH并保留两位小数
+            if eligibleether_wei is not None:
+                eligibleether = round(wei_to_eth(eligibleether_wei), 2)
+            if totalvalidatorbalance_wei is not None:
+                totalvalidatorbalance = round(wei_to_eth(totalvalidatorbalance_wei), 2)
+            if averagevalidatorbalance_wei is not None:
+                averagevalidatorbalance = round(wei_to_eth(averagevalidatorbalance_wei), 2)
+            
+        else:
+            logging.warning("epoch_data为空，新字段将保存为NULL")
         
         # 保存到数据库
         if not eth_db.connection:
@@ -220,6 +327,10 @@ def collect_eth_staking_data():
             withdrawal_sweep_delay=withdrawal_sweep_delay,
             withdrawal_sweep_last_validator_index=withdrawal_sweep_last_validator_index,
             finality_status=finality_status,
+            eligibleether=eligibleether,
+            totalvalidatorbalance=totalvalidatorbalance,
+            averagevalidatorbalance=averagevalidatorbalance,
+            validatorscount=validatorscount,
             ts_datetime=ts_datetime_utc8
         )
         

@@ -165,10 +165,10 @@ class OdailyDatabaseService:
             else:
                 # 如果不存在，插入新记录
                 insert_sql = """
-                INSERT INTO odaily_newsflash 
-                (title, link, description, description_text, pub_date, category, author)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """
+            INSERT INTO odaily_newsflash 
+            (title, link, description, description_text, pub_date, category, author)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
                 cursor.execute(insert_sql, (title, link, description, description_text, pub_date, category, author))
             
             self.connection.commit()

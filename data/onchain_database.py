@@ -133,9 +133,59 @@ class OnchainDatabaseService:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='XRP交易所余额表';
             """
             
+            # BTC链上统计表
+            create_btc_stats_table = """
+            CREATE TABLE IF NOT EXISTS btc_onchain_stats (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ts DATETIME NOT NULL COMMENT '时间戳（UTC+8）',
+                blocks BIGINT DEFAULT NULL COMMENT '区块总数',
+                transactions BIGINT DEFAULT NULL COMMENT '交易总数',
+                outputs BIGINT DEFAULT NULL COMMENT '输出总数',
+                circulation BIGINT DEFAULT NULL COMMENT '流通量（satoshi）',
+                blocks_24h INT DEFAULT NULL COMMENT '24小时区块数',
+                transactions_24h INT DEFAULT NULL COMMENT '24小时交易数',
+                difficulty DECIMAL(30, 2) DEFAULT NULL COMMENT '难度',
+                volume_24h BIGINT DEFAULT NULL COMMENT '24小时交易量（satoshi）',
+                mempool_transactions INT DEFAULT NULL COMMENT '内存池交易数',
+                mempool_size BIGINT DEFAULT NULL COMMENT '内存池大小（bytes）',
+                mempool_tps DECIMAL(10, 4) DEFAULT NULL COMMENT '内存池TPS',
+                mempool_total_fee_usd DECIMAL(20, 4) DEFAULT NULL COMMENT '内存池总手续费（USD）',
+                best_block_height BIGINT DEFAULT NULL COMMENT '最佳区块高度',
+                best_block_hash VARCHAR(64) DEFAULT NULL COMMENT '最佳区块哈希',
+                best_block_time DATETIME DEFAULT NULL COMMENT '最佳区块时间',
+                blockchain_size BIGINT DEFAULT NULL COMMENT '区块链大小（bytes）',
+                average_transaction_fee_24h INT DEFAULT NULL COMMENT '24小时平均交易手续费（satoshi）',
+                inflation_24h BIGINT DEFAULT NULL COMMENT '24小时通胀（satoshi）',
+                median_transaction_fee_24h INT DEFAULT NULL COMMENT '24小时中位数交易手续费（satoshi）',
+                cdd_24h DECIMAL(20, 8) DEFAULT NULL COMMENT '24小时Coin Days Destroyed',
+                mempool_outputs INT DEFAULT NULL COMMENT '内存池输出数',
+                largest_transaction_24h_hash VARCHAR(64) DEFAULT NULL COMMENT '24小时最大交易哈希',
+                largest_transaction_24h_value_usd DECIMAL(20, 2) DEFAULT NULL COMMENT '24小时最大交易价值（USD）',
+                nodes INT DEFAULT NULL COMMENT '节点数',
+                hashrate_24h VARCHAR(50) DEFAULT NULL COMMENT '24小时哈希率',
+                inflation_usd_24h DECIMAL(20, 2) DEFAULT NULL COMMENT '24小时通胀（USD）',
+                average_transaction_fee_usd_24h DECIMAL(20, 8) DEFAULT NULL COMMENT '24小时平均交易手续费（USD）',
+                median_transaction_fee_usd_24h DECIMAL(20, 8) DEFAULT NULL COMMENT '24小时中位数交易手续费（USD）',
+                market_price_usd DECIMAL(20, 2) DEFAULT NULL COMMENT '市场价格（USD）',
+                market_price_btc DECIMAL(20, 8) DEFAULT NULL COMMENT '市场价格（BTC）',
+                market_price_usd_change_24h_percentage DECIMAL(10, 4) DEFAULT NULL COMMENT '24小时价格变化百分比',
+                market_cap_usd BIGINT DEFAULT NULL COMMENT '市值（USD）',
+                market_dominance_percentage DECIMAL(10, 4) DEFAULT NULL COMMENT '市值占比（%）',
+                next_retarget_time_estimate DATETIME DEFAULT NULL COMMENT '下次难度调整时间估计',
+                next_difficulty_estimate DECIMAL(30, 2) DEFAULT NULL COMMENT '下次难度估计',
+                suggested_transaction_fee_per_byte_sat INT DEFAULT NULL COMMENT '建议交易手续费（sat/byte）',
+                hodling_addresses BIGINT DEFAULT NULL COMMENT '持币地址数',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                INDEX idx_ts (ts),
+                INDEX idx_best_block_height (best_block_height)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='BTC链上统计数据表';
+            """
+            
             cursor.execute(create_btc_table)
             cursor.execute(create_eth_table)
             cursor.execute(create_xrp_table)
+            cursor.execute(create_btc_stats_table)
             self.connection.commit()
             logging.info("链上数据表创建/更新成功")
             return True
@@ -347,6 +397,150 @@ class OnchainDatabaseService:
             logging.error(f"批量保存{coin}交易所余额数据失败: {e}")
             logging.error(f"异常详情: {traceback.format_exc()}")
             return {'saved': 0, 'skipped': 0, 'unchanged': 0, 'total': total_count}
+        finally:
+            cursor.close()
+    
+    def save_btc_stats(self, stats_data, ts_datetime):
+        """
+        保存BTC链上统计数据
+        
+        Args:
+            stats_data: 统计数据字典（从API返回的data字段）
+            ts_datetime: 数据时间戳（UTC+8）
+        
+        Returns:
+            bool: 保存是否成功
+        """
+        if not self.connection:
+            if not self.connect():
+                return False
+        
+        # 检查连接是否有效
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception as ping_error:
+            logging.warning(f"数据库连接检查失败，尝试重新连接: {ping_error}")
+            if not self.connect():
+                return False
+        
+        cursor = self.connection.cursor()
+        
+        try:
+            # 解析数据
+            blocks = stats_data.get('blocks')
+            transactions = stats_data.get('transactions')
+            outputs = stats_data.get('outputs')
+            circulation = stats_data.get('circulation')
+            blocks_24h = stats_data.get('blocks_24h')
+            transactions_24h = stats_data.get('transactions_24h')
+            difficulty = stats_data.get('difficulty')
+            volume_24h = stats_data.get('volume_24h')
+            mempool_transactions = stats_data.get('mempool_transactions')
+            mempool_size = stats_data.get('mempool_size')
+            mempool_tps = stats_data.get('mempool_tps')
+            mempool_total_fee_usd = stats_data.get('mempool_total_fee_usd')
+            best_block_height = stats_data.get('best_block_height')
+            best_block_hash = stats_data.get('best_block_hash')
+            best_block_time_str = stats_data.get('best_block_time')
+            blockchain_size = stats_data.get('blockchain_size')
+            average_transaction_fee_24h = stats_data.get('average_transaction_fee_24h')
+            inflation_24h = stats_data.get('inflation_24h')
+            median_transaction_fee_24h = stats_data.get('median_transaction_fee_24h')
+            cdd_24h = stats_data.get('cdd_24h')
+            mempool_outputs = stats_data.get('mempool_outputs')
+            
+            # 解析最大交易
+            largest_tx = stats_data.get('largest_transaction_24h', {})
+            largest_tx_hash = largest_tx.get('hash') if isinstance(largest_tx, dict) else None
+            largest_tx_value_usd = largest_tx.get('value_usd') if isinstance(largest_tx, dict) else None
+            
+            nodes = stats_data.get('nodes')
+            hashrate_24h = stats_data.get('hashrate_24h')
+            inflation_usd_24h = stats_data.get('inflation_usd_24h')
+            average_transaction_fee_usd_24h = stats_data.get('average_transaction_fee_usd_24h')
+            median_transaction_fee_usd_24h = stats_data.get('median_transaction_fee_usd_24h')
+            market_price_usd = stats_data.get('market_price_usd')
+            market_price_btc = stats_data.get('market_price_btc')
+            market_price_usd_change_24h_percentage = stats_data.get('market_price_usd_change_24h_percentage')
+            market_cap_usd = stats_data.get('market_cap_usd')
+            market_dominance_percentage = stats_data.get('market_dominance_percentage')
+            next_retarget_time_estimate_str = stats_data.get('next_retarget_time_estimate')
+            next_difficulty_estimate = stats_data.get('next_difficulty_estimate')
+            suggested_transaction_fee_per_byte_sat = stats_data.get('suggested_transaction_fee_per_byte_sat')
+            hodling_addresses = stats_data.get('hodling_addresses')
+            
+            # 转换时间字符串为datetime
+            best_block_time = None
+            if best_block_time_str:
+                try:
+                    best_block_time = datetime.strptime(best_block_time_str, '%Y-%m-%d %H:%M:%S')
+                except:
+                    try:
+                        best_block_time = datetime.strptime(best_block_time_str, '%Y-%m-%d %H:%M:%S.%f')
+                    except:
+                        logging.warning(f"无法解析best_block_time: {best_block_time_str}")
+            
+            next_retarget_time = None
+            if next_retarget_time_estimate_str:
+                try:
+                    next_retarget_time = datetime.strptime(next_retarget_time_estimate_str, '%Y-%m-%d %H:%M:%S')
+                except:
+                    try:
+                        next_retarget_time = datetime.strptime(next_retarget_time_estimate_str, '%Y-%m-%d %H:%M:%S.%f')
+                    except:
+                        logging.warning(f"无法解析next_retarget_time_estimate: {next_retarget_time_estimate_str}")
+            
+            # 构建INSERT SQL
+            insert_sql = """
+            INSERT INTO btc_onchain_stats (
+                ts, blocks, transactions, outputs, circulation, blocks_24h, transactions_24h,
+                difficulty, volume_24h, mempool_transactions, mempool_size, mempool_tps,
+                mempool_total_fee_usd, best_block_height, best_block_hash, best_block_time,
+                blockchain_size, average_transaction_fee_24h, inflation_24h,
+                median_transaction_fee_24h, cdd_24h, mempool_outputs,
+                largest_transaction_24h_hash, largest_transaction_24h_value_usd,
+                nodes, hashrate_24h, inflation_usd_24h,
+                average_transaction_fee_usd_24h, median_transaction_fee_usd_24h,
+                market_price_usd, market_price_btc, market_price_usd_change_24h_percentage,
+                market_cap_usd, market_dominance_percentage,
+                next_retarget_time_estimate, next_difficulty_estimate,
+                suggested_transaction_fee_per_byte_sat, hodling_addresses
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s
+            )
+            """
+            
+            cursor.execute(insert_sql, (
+                ts_datetime,
+                blocks, transactions, outputs, circulation,
+                blocks_24h, transactions_24h,
+                difficulty, volume_24h,
+                mempool_transactions, mempool_size, mempool_tps,
+                mempool_total_fee_usd,
+                best_block_height, best_block_hash, best_block_time,
+                blockchain_size,
+                average_transaction_fee_24h, inflation_24h,
+                median_transaction_fee_24h, cdd_24h, mempool_outputs,
+                largest_tx_hash, largest_tx_value_usd,
+                nodes, hashrate_24h, inflation_usd_24h,
+                average_transaction_fee_usd_24h, median_transaction_fee_usd_24h,
+                market_price_usd, market_price_btc, market_price_usd_change_24h_percentage,
+                market_cap_usd, market_dominance_percentage,
+                next_retarget_time, next_difficulty_estimate,
+                suggested_transaction_fee_per_byte_sat, hodling_addresses
+            ))
+            
+            self.connection.commit()
+            logging.info(f"BTC链上统计数据保存成功: ts={ts_datetime}, block_height={best_block_height}")
+            return True
+                
+        except Exception as e:
+            self.connection.rollback()
+            logging.error(f"保存BTC链上统计数据失败: {e}")
+            logging.error(f"异常详情: {traceback.format_exc()}")
+            return False
         finally:
             cursor.close()
 

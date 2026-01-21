@@ -253,10 +253,26 @@ class ETFFlowDatabaseService:
             cursor.execute(check_sql, (date,))
             existing = cursor.fetchone()
             
+            # 检查API返回的ticker是否都在映射中
+            api_tickers = set(etf_flows_dict.keys())
+            mapped_tickers = set(ticker_fields.keys())
+            unmapped_tickers = api_tickers - mapped_tickers
+            if unmapped_tickers:
+                logging.warning(f"{coin} API返回了未映射的ticker: {unmapped_tickers}, 这些ticker的数据将被忽略")
+            
             # 获取各个ETF的流量值（转换为float，如果不存在则为0）
             etf_values = {}
             for ticker, field_name in ticker_fields.items():
-                etf_values[field_name] = float(etf_flows_dict.get(ticker, 0)) if etf_flows_dict.get(ticker) is not None else 0
+                flow_value = etf_flows_dict.get(ticker)
+                if flow_value is not None:
+                    etf_values[field_name] = float(flow_value)
+                else:
+                    etf_values[field_name] = 0
+            
+            # 添加调试日志
+            logging.info(f"{coin} ETF ticker映射配置: {ticker_fields}")
+            logging.info(f"{coin} 从API获取的ticker数据: {etf_flows_dict}")
+            logging.info(f"{coin} 映射后的字段值: {etf_values}")
             
             total = float(total_flow_usd) if total_flow_usd is not None else 0
             price = float(price_usd) if price_usd is not None else None
@@ -264,6 +280,11 @@ class ETFFlowDatabaseService:
             # 构建字段名和值的列表
             field_names = list(ticker_fields.values())
             field_values = [etf_values[field] for field in field_names]
+            
+            # 添加详细调试日志
+            logging.info(f"{coin} 准备插入数据: field_names={field_names}")
+            logging.info(f"{coin} 准备插入数据: field_values={field_values}")
+            logging.info(f"{coin} 准备插入数据: total={total}, price={price}")
             
             if existing:
                 # 记录已存在，跳过（不更新）
@@ -273,13 +294,21 @@ class ETFFlowDatabaseService:
                 # 新记录，插入数据
                 # 构建INSERT SQL
                 field_names_str = ', '.join(field_names)
-                placeholders = ', '.join(['%s'] * (len(field_names) + 2))  # +2 for total and price_usd
+                placeholders = ', '.join(['%s'] * len(field_names))  # 只包含ETF字段的占位符
                 insert_sql = f"""
                 INSERT INTO {table_name}
                 (date, {field_names_str}, total, price_usd)
-                VALUES (%s, {placeholders})
+                VALUES (%s, {placeholders}, %s, %s)
                 """
-                cursor.execute(insert_sql, (date,) + tuple(field_values) + (total, price))
+                
+                # 构建参数元组：date + ETF字段值 + total + price
+                insert_params = (date,) + tuple(field_values) + (total, price)
+                
+                logging.info(f"{coin} INSERT SQL: {insert_sql}")
+                logging.info(f"{coin} INSERT参数: {insert_params}")
+                logging.info(f"{coin} 参数数量: SQL占位符={insert_sql.count('%s')}, 实际参数={len(insert_params)}")
+                
+                cursor.execute(insert_sql, insert_params)
                 self.connection.commit()
                 logging.info(f"{coin} ETF流量数据保存成功: date={date}, total={total}, price={price}")
                 return 'saved'

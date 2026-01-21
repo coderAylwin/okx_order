@@ -145,11 +145,22 @@ def collect_etf_flow_data(coin='BTC'):
                 etf_flows = item.get('etf_flows', [])
                 etf_flows_dict = {}
                 
+                # 记录原始API返回的所有ticker（用于调试）
+                raw_tickers = []
                 for etf_flow in etf_flows:
-                    ticker = etf_flow.get('etf_ticker', '').upper()
-                    flow_usd = etf_flow.get('flow_usd', 0)
+                    raw_ticker = etf_flow.get('etf_ticker', '')
+                    raw_flow = etf_flow.get('flow_usd', 0)
+                    raw_tickers.append(f"{raw_ticker}={raw_flow}")
+                    
+                    ticker = raw_ticker.upper()
+                    flow_usd = raw_flow
                     if ticker:
                         etf_flows_dict[ticker] = flow_usd
+                
+                # 添加调试日志
+                logging.info(f"{coin} ETF流量数据解析: date={date}, total_flow_usd={total_flow_usd}, price_usd={price_usd}")
+                logging.info(f"{coin} API返回的原始ticker数据: {', '.join(raw_tickers)}")
+                logging.info(f"{coin} 解析后的ETF ticker字典: {etf_flows_dict}")
                 
                 # 保存数据到数据库
                 result = etf_flow_db.save_etf_flow_data(
