@@ -248,31 +248,101 @@ def collect_eth_staking_data():
             logging.warning("未获取到ETH epoch数据，将继续保存质押队列数据")
         
         # 解析deposit_queue数据
+        # 注意：需要检查API返回的单位，可能是wei或Gwei
         deposit_queue = queue_data.get('deposit_queue', {})
         deposit_count = deposit_queue.get('deposit_count', 0)
-        deposit_balance_wei = deposit_queue.get('balance', '0')
+        deposit_balance_raw = deposit_queue.get('balance', '0')
         deposit_estimated_processed_at_timestamp = deposit_queue.get('estimated_processed_at')
-        deposit_churn_wei = deposit_queue.get('churn', '0')
+        deposit_churn_raw = deposit_queue.get('churn', '0')
         
-        # 转换为ETH
-        deposit_balance_eth = wei_to_eth(deposit_balance_wei)
-        deposit_churn_eth = wei_to_eth(deposit_churn_wei)
+        # 添加调试日志
+        logging.info(f"deposit_queue原始数据: balance={deposit_balance_raw}, churn={deposit_churn_raw}")
+        
+        # 检查值的大小来判断单位
+        # 如果值非常大（> 10^15），可能是wei单位，需要除以10^18转换为ETH
+        # 如果值在合理范围内（< 10^10），可能是ETH单位或Gwei单位
+        try:
+            deposit_balance_raw_float = float(deposit_balance_raw) if deposit_balance_raw else 0.0
+            deposit_churn_raw_float = float(deposit_churn_raw) if deposit_churn_raw else 0.0
+            
+            # 如果值非常大（> 10^15），可能是wei单位，需要转换为ETH
+            if deposit_balance_raw_float > 10**15:
+                # 可能是wei单位，需要除以10^18
+                deposit_balance_eth = deposit_balance_raw_float / (10**18)
+                logging.info(f"deposit_balance看起来是wei单位，已转换为ETH: {deposit_balance_eth}")
+            elif deposit_balance_raw_float > 10**9:
+                # 可能是Gwei单位，需要除以10^9
+                deposit_balance_eth = deposit_balance_raw_float / (10**9)
+                logging.info(f"deposit_balance看起来是Gwei单位，已转换为ETH: {deposit_balance_eth}")
+            else:
+                # 已经是ETH单位
+                deposit_balance_eth = deposit_balance_raw_float
+                logging.info(f"deposit_balance已经是ETH单位: {deposit_balance_eth}")
+            
+            if deposit_churn_raw_float > 10**15:
+                deposit_churn_eth = deposit_churn_raw_float / (10**18)
+                logging.info(f"deposit_churn看起来是wei单位，已转换为ETH: {deposit_churn_eth}")
+            elif deposit_churn_raw_float > 10**9:
+                deposit_churn_eth = deposit_churn_raw_float / (10**9)
+                logging.info(f"deposit_churn看起来是Gwei单位，已转换为ETH: {deposit_churn_eth}")
+            else:
+                deposit_churn_eth = deposit_churn_raw_float
+                logging.info(f"deposit_churn已经是ETH单位: {deposit_churn_eth}")
+                
+        except (ValueError, TypeError) as e:
+            deposit_balance_eth = 0.0
+            deposit_churn_eth = 0.0
+            logging.warning(f"deposit_balance/churn转换失败: balance={deposit_balance_raw}, churn={deposit_churn_raw}, 错误: {e}")
         
         # 转换时间戳
         deposit_estimated_processed_at = timestamp_to_datetime(deposit_estimated_processed_at_timestamp)
         
         # 解析exit_queue数据
+        # 注意：需要检查API返回的单位，可能是wei或Gwei
         exit_queue = queue_data.get('exit_queue', {})
-        exit_balance_wei = exit_queue.get('balance', '0')
-        exit_churn_wei = exit_queue.get('churn', '0')
+        exit_balance_raw = exit_queue.get('balance', '0')
+        exit_churn_raw = exit_queue.get('churn', '0')
         exit_estimated_processed_at_timestamp = exit_queue.get('estimated_processed_at')
         
         # 兼容exit_count字段（可能是exit_count或count）
         exit_count = exit_queue.get('exit_count') or exit_queue.get('count', 0)
         
-        # 转换为ETH
-        exit_balance_eth = wei_to_eth(exit_balance_wei)
-        exit_churn_eth = wei_to_eth(exit_churn_wei)
+        # 添加调试日志
+        logging.info(f"exit_queue原始数据: balance={exit_balance_raw}, churn={exit_churn_raw}")
+        
+        # 检查值的大小来判断单位
+        try:
+            exit_balance_raw_float = float(exit_balance_raw) if exit_balance_raw else 0.0
+            exit_churn_raw_float = float(exit_churn_raw) if exit_churn_raw else 0.0
+            
+            # 如果值非常大（> 10^15），可能是wei单位，需要转换为ETH
+            if exit_balance_raw_float > 10**15:
+                # 可能是wei单位，需要除以10^18
+                exit_balance_eth = exit_balance_raw_float / (10**18)
+                logging.info(f"exit_balance看起来是wei单位，已转换为ETH: {exit_balance_eth}")
+            elif exit_balance_raw_float > 10**9:
+                # 可能是Gwei单位，需要除以10^9
+                exit_balance_eth = exit_balance_raw_float / (10**9)
+                logging.info(f"exit_balance看起来是Gwei单位，已转换为ETH: {exit_balance_eth}")
+            else:
+                # 已经是ETH单位
+                exit_balance_eth = exit_balance_raw_float
+                logging.info(f"exit_balance已经是ETH单位: {exit_balance_eth}")
+            
+            if exit_churn_raw_float > 10**15:
+                exit_churn_eth = exit_churn_raw_float / (10**18)
+                logging.info(f"exit_churn看起来是wei单位，已转换为ETH: {exit_churn_eth}")
+            elif exit_churn_raw_float > 10**9:
+                exit_churn_eth = exit_churn_raw_float / (10**9)
+                logging.info(f"exit_churn看起来是Gwei单位，已转换为ETH: {exit_churn_eth}")
+            else:
+                exit_churn_eth = exit_churn_raw_float
+                logging.info(f"exit_churn已经是ETH单位: {exit_churn_eth}")
+                
+        except (ValueError, TypeError) as e:
+            exit_balance_eth = 0.0
+            exit_churn_eth = 0.0
+            logging.warning(f"exit_balance/churn转换失败: balance={exit_balance_raw}, churn={exit_churn_raw}, 错误: {e}")
         
         # 转换退出预计完成时间
         exit_estimated_processed_at = timestamp_to_datetime(exit_estimated_processed_at_timestamp)
@@ -308,6 +378,13 @@ def collect_eth_staking_data():
             
         else:
             logging.warning("epoch_data为空，新字段将保存为NULL")
+        
+        # 添加调试日志：打印所有要保存的值
+        logging.info(f"准备保存ETH质押队列数据:")
+        logging.info(f"  deposit_balance_eth={deposit_balance_eth}")
+        logging.info(f"  deposit_churn_eth={deposit_churn_eth}")
+        logging.info(f"  exit_balance_eth={exit_balance_eth}")
+        logging.info(f"  exit_churn_eth={exit_churn_eth}")
         
         # 保存到数据库
         if not eth_db.connection:

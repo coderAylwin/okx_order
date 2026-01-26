@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 # 使用 websocket-client 库（需要安装: pip install websocket-client）
 # 注意：不要安装 websocket 包，要安装 websocket-client 包
 try:
-import websocket
+    import websocket
     if not hasattr(websocket, 'WebSocketApp'):
         raise ImportError(
             "错误：检测到错误的 websocket 模块。\n"
@@ -757,7 +757,7 @@ def collect_long_short_ratio_with_db(coin, coin_symbol, db_service):
                         logging.debug(f"{coin} 多空比（合约）数据一致，跳过: {ts_datetime_utc8} ratio={ratio}")
                     
                     prev_ratio = ratio
-        else:
+            else:
                 logging.warning(f"{coin} 多空比（合约）：API错误或数据为空")
         except Exception as e1:
             logging.warning(f"{coin} 多空比（合约）获取失败：{e1}")
@@ -1487,8 +1487,8 @@ def collect_frequent_data():
         # 使用线程池并行收集多个币种的数据，提高效率
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {}
-    for coin, config in SUPPORTED_COINS.items():
-        coin_symbol = config['symbol']
+            for coin, config in SUPPORTED_COINS.items():
+                coin_symbol = config['symbol']
                 future = executor.submit(collect_coin_data, coin, coin_symbol)
                 futures[future] = coin
             
@@ -1552,8 +1552,8 @@ def collect_periodic_data():
         # 使用线程池并行收集多个币种的数据，提高效率
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {}
-    for coin, config in SUPPORTED_COINS.items():
-        coin_symbol = config['symbol']
+            for coin, config in SUPPORTED_COINS.items():
+                coin_symbol = config['symbol']
                 future = executor.submit(collect_coin_data, coin, coin_symbol)
                 futures[future] = coin
             
@@ -1584,25 +1584,18 @@ def collect_periodic_data():
 def collect_macro_economic_data():
     """收集宏观经济数据（仅在整点时获取）"""
     try:
-    logging.info("=" * 80)
-    logging.info("开始收集宏观经济数据")
-    logging.info("=" * 80)
+        logging.info("=" * 80)
+        logging.info("开始收集宏观经济数据")
+        logging.info("=" * 80)
     
-    now = datetime.now(ZoneInfo('Asia/Shanghai'))
-    if now.minute == 0:
-        logging.info("当前为整点，收集宏观经济数据...")
-        result = collect_macro_data()
-        if result:
-            logging.info("宏观经济数据收集并保存成功")
-        else:
-            logging.error("宏观经济数据收集或保存失败")
-    else:
-        next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-        minutes_until_next_hour = (next_hour - now).total_seconds() / 60
-        logging.info(f"跳过宏观经济数据收集（非整点），下次整点：{next_hour.strftime('%H:00')}（{int(minutes_until_next_hour)}分钟后）")
-    
-    logging.info("宏观经济数据收集完成")
-    logging.info("=" * 80)
+        now = datetime.now(ZoneInfo('Asia/Shanghai'))
+        if now.minute == 0:
+            logging.info("当前为整点，收集宏观经济数据...")
+            result = collect_macro_data()
+            if result:
+                logging.info("宏观经济数据收集并保存成功")
+            else:
+                logging.error("宏观经济数据收集或保存失败")
     except Exception as e:
         # 顶层异常捕获，确保不会影响调度器
         logging.error(f"宏观经济数据收集任务发生未预期异常: {e}")
@@ -1628,8 +1621,8 @@ if __name__ == "__main__":
     
     # 启动OKX爆仓数据WebSocket监听器（后台运行）
     try:
-    liquidation_listener = OKXLiquidationListener()
-    liquidation_listener.start()
+        liquidation_listener = OKXLiquidationListener()
+        liquidation_listener.start()
         logging.info("OKX爆仓数据WebSocket监听器启动成功")
     except Exception as e:
         logging.error(f"OKX爆仓数据WebSocket监听器启动失败: {e}")
@@ -1650,12 +1643,12 @@ if __name__ == "__main__":
     
     # 立即执行一次所有数据收集（即使失败也不影响后续定时任务）
     try:
-    collect_frequent_data()
+        collect_frequent_data()
     except Exception as e:
         logging.error(f"初始高频数据收集失败: {e}")
     
     try:
-    collect_periodic_data()
+        collect_periodic_data()
     except Exception as e:
         logging.error(f"初始周期性数据收集失败: {e}")
     
@@ -1665,7 +1658,7 @@ if __name__ == "__main__":
         logging.error(f"初始币安数据收集失败: {e}")
     
     try:
-    collect_macro_economic_data()
+        collect_macro_economic_data()
     except Exception as e:
         logging.error(f"初始宏观经济数据收集失败: {e}")
     
@@ -1754,4 +1747,3 @@ if __name__ == "__main__":
         except:
             pass
         raise  # 重新抛出异常，让系统知道程序异常退出
-
