@@ -28,7 +28,8 @@ DB_CONFIG = {
 
 # Beaconcha.in API 配置
 BEACONCHA_API_URL = 'https://beaconcha.in/api/v2/ethereum/queues'
-BEACONCHA_API_TOKEN = 'CEV6oHTg7paT4bhATDYGyDR6dOg1voF1dzEudXJMH4u'
+# BEACONCHA_API_TOKEN = 'CEV6oHTg7paT4bhATDYGyDR6dOg1voF1dzEudXJMH4u'
+BEACONCHA_API_TOKEN = 'OVy4hxmL5nJnWi72SIBWGfR5pCPSWQAMb1nHL1WdbxL'
 BEACONCHA_EPOCH_API_URL = 'https://beaconcha.in/api/v1/epoch/latest'
 
 # Gwei到ETH的转换系数（1 ETH = 10^9 Gwei = 10^18 wei）
@@ -441,11 +442,11 @@ def main():
         # 创建调度器
         scheduler = BlockingScheduler(timezone='Asia/Shanghai')
         
-        # 每5分钟执行一次，在整点时间（0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55分）
+        # 每30分钟执行一次，在整点时间（0, 30分）
         scheduler.add_job(
             collect_eth_staking_data,
             trigger='cron',
-            minute='0,5,10,15,20,25,30,35,40,45,50,55',
+            minute='0,30',
             second=0,
             id='collect_eth_staking_data',
             name='收集ETH质押队列数据',
