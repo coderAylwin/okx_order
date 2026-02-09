@@ -317,23 +317,27 @@ def check_and_notify_fear_greed():
             logging.warning("当前整点数据不存在，跳过")
             return
         
-        # 检查是否有上一小时数据
-        if not one_hour_data:
-            logging.warning("上一小时数据不存在，跳过对比")
-            return
+        # 详细记录当前值和上一小时的值
+        current_crypto = current_data.get('crypto_fear_greed_value')
+        current_vix = current_data.get('vix_value')
+        one_hour_crypto = one_hour_data.get('crypto_fear_greed_value') if one_hour_data else None
+        one_hour_vix = one_hour_data.get('vix_value') if one_hour_data else None
         
-        # 检查值是否发生变化（与1小时前对比）
-        if notifier.check_value_changed(current_data, one_hour_data):
-            logging.info("检测到恐慌指数数据变化，发送通知")
-            logging.info(f"当前: crypto={current_data.get('crypto_fear_greed_value')}, vix={current_data.get('vix_value')}")
-            logging.info(f"1小时前: crypto={one_hour_data.get('crypto_fear_greed_value')}, vix={one_hour_data.get('vix_value')}")
-            
-            # 发送飞书通知（包含所有时间点的数据）
-            notifier.send_lark_notification(comparison_data, now)
+        logging.info(f"当前数据: crypto={current_crypto}, vix={current_vix}")
+        if one_hour_data:
+            logging.info(f"1小时前数据: crypto={one_hour_crypto}, vix={one_hour_vix}")
         else:
-            logging.info("恐慌指数数据未发生变化，跳过推送")
-            logging.debug(f"当前: crypto={current_data.get('crypto_fear_greed_value')}, vix={current_data.get('vix_value')}")
-            logging.debug(f"1小时前: crypto={one_hour_data.get('crypto_fear_greed_value')}, vix={one_hour_data.get('vix_value')}")
+            logging.info("1小时前数据: 不存在")
+        
+        # 检查值是否发生变化（用于日志记录）
+        if one_hour_data and notifier.check_value_changed(current_data, one_hour_data):
+            logging.info("✅ 检测到恐慌指数数据变化")
+        elif one_hour_data:
+            logging.info("ℹ️ 恐慌指数数据未发生变化（与1小时前相同）")
+        
+        # 无论是否有变化，都发送通知
+        logging.info("发送恐慌指数数据通知")
+        notifier.send_lark_notification(comparison_data, now)
         
         logging.info("恐慌指数数据检查完成")
         

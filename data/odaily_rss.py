@@ -62,6 +62,9 @@ logging.info(f"调度间隔: 每30秒执行一次 ({cron_timezone})")
 # RSS Feed URL
 RSS_URL = "https://rss.odaily.news/rss/newsflash"
 
+# 飞书Webhook地址 新闻消息
+LARK_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/8fb1eee3-5ad1-457a-88e1-3324fedadb67"
+
 
 def parse_rss_date(date_str):
     """
@@ -137,6 +140,50 @@ def clean_html_text(html_content):
         logging.warning(f"HTML 解析失败: {e}")
         # 如果解析失败，尝试简单的 HTML 实体解码
         return html_module.unescape(html_content)
+
+
+def send_lark_notification(title, description_text, link):
+    """
+    发送飞书消息通知
+    
+    Args:
+        title: 新闻标题
+        description_text: 新闻内容（纯文本）
+        link: 原文链接
+    """
+    try:
+        # 构建消息内容
+        content_lines = [
+            f"📰 {title}",
+            "",
+            f"{description_text}",
+            "",
+            f"🔗 原文地址: {link}"
+        ]
+        
+        content_text = "\n".join(content_lines)
+        
+        # 飞书Webhook消息格式
+        payload = {
+            "msg_type": "text",
+            "content": {
+                "text": content_text
+            }
+        }
+        
+        response = requests.post(LARK_WEBHOOK_URL, json=payload, timeout=5)
+        response.raise_for_status()
+        
+        result = response.json()
+        if result.get('code') == 0:
+            logging.info(f"✅ 新闻推送成功: {title[:50]}...")
+        else:
+            logging.warning(f"⚠️ 新闻推送返回异常: {result}")
+            
+    except requests.exceptions.RequestException as e:
+        logging.error(f"新闻推送失败（网络错误）: {e}")
+    except Exception as e:
+        logging.error(f"新闻推送失败: {e}")
 
 
 def scrape_odaily_rss():
@@ -249,6 +296,12 @@ def scrape_odaily_rss():
                 author=news['author']
             ):
                 saved_count += 1
+                # 保存成功后发送推送通知
+                send_lark_notification(
+                    title=news['title'],
+                    description_text=news['description_text'],
+                    link=news['link']
+                )
                 # logging.info(f"保存快讯: {news['title'][:50]}... (发布时间: {news['pub_date']})")
             else:
                 skipped_count += 1

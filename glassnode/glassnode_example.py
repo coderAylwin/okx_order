@@ -2,7 +2,7 @@ import requests
 import time
 
 # 1. 请将 'YOUR_API_KEY' 替换为真实API密钥,记得带英文双引号
-API_KEY = "YOUR_API_KEY"
+API_KEY = "myapi_sk_12b8288f106c4e779565c76c44433a25"
 BASE_URL = "https://api.alphanode.work"
 headers = {
     "x-key": API_KEY
@@ -16,45 +16,45 @@ try:
 
 
     # 示例1: 24h内BTC收盘价
-    resp = requests.get(f"{BASE_URL}/v1/metrics/market/price_usd_close", headers=headers, params={'a': 'BTC', 'i': '24h'})
-    resp.raise_for_status()
-    print("\nBTC Price (last 3):", resp.json()[-3:])
+    # resp = requests.get(f"{BASE_URL}/v1/metrics/market/price_usd_close", headers=headers, params={'a': 'BTC', 'i': '24h'})
+    # resp.raise_for_status()
+    # print("\nBTC Price (last 3):", resp.json()[-3:])
 
 
     # 示例2: ETH活跃地址
-    resp = requests.get(f"{BASE_URL}/v1/metrics/addresses/active_count", headers=headers, params={'a': 'ETH'})
-    resp.raise_for_status()
-    print("\nETH Active Addresses (last 3):", resp.json()[-3:])
+    # resp = requests.get(f"{BASE_URL}/v1/metrics/addresses/active_count", headers=headers, params={'a': 'ETH'})
+    # resp.raise_for_status()
+    # print("\nETH Active Addresses (last 3):", resp.json()[-3:])
 
 
     # 示例3: BTC 2022年1月OHLC
-    params_ohlc = {
-    'a': 'BTC', 
-    's': '1641013200', 
-    'u': '1643605200'
-    }
-    resp = requests.get(f"{BASE_URL}/v1/metrics/market/price_usd_ohlc", headers=headers, params=params_ohlc)
-    resp.raise_for_status()
-    print("\nBTC Jan 2022 OHLC:", resp.json())
+    # params_ohlc = {
+    # 'a': 'BTC', 
+    # 's': '1641013200', 
+    # 'u': '1643605200'
+    # }
+    # resp = requests.get(f"{BASE_URL}/v1/metrics/market/price_usd_ohlc", headers=headers, params=params_ohlc)
+    # resp.raise_for_status()
+    # print("\nBTC Jan 2022 OHLC:", resp.json())
 
 
     # 示例4: BTC MVRV Z-Score
-    resp = requests.get(f"{BASE_URL}/v1/metrics/market/mvrv_z_score", headers=headers, params={'a': 'BTC'})
-    resp.raise_for_status()
-    print("\nBTC MVRV Z-Score (last 3):", resp.json()[-3:])
+    # resp = requests.get(f"{BASE_URL}/v1/metrics/market/mvrv_z_score", headers=headers, params={'a': 'BTC'})
+    # resp.raise_for_status()
+    # print("\nBTC MVRV Z-Score (last 3):", resp.json()[-3:])
 
 
     # 示例5: BTC: Altcoin Cycle Signal
     # 绝大部分T2,T3数据都可以使用。若显示，Please reach out to our sales team to gain access to this metric
     # 则无法调用api。此api需单独购买。
     # 无法使用的api返回值为：{"type":"metric","requiredPlan":"professional_ml"}
-    params = {
-    'a': 'BTC',
-    's': '1641013200',
-    'u': '1643605200'
-    }
-    resp = requests.get(f"{BASE_URL}/v1/metrics/signals/altcoin_index", headers=headers, params=params)
-    print("\nBTC Altcoin Cycle Signal:", resp.json())
+    # params = {
+    # 'a': 'BTC',
+    # 's': '1641013200',
+    # 'u': '1643605200'
+    # }
+    # resp = requests.get(f"{BASE_URL}/v1/metrics/signals/altcoin_index", headers=headers, params=params)
+    # print("\nBTC Altcoin Cycle Signal:", resp.json())
 
     # 示例6: BTC多端点，多参数调用，其他asset请参考api docs
     # 注意：请只调用希望调用的指标，全部去掉注释将产生大量api调用。
@@ -64,7 +64,7 @@ try:
         # ------------ 现货 (spot) ------------------------ #
         # - 价格 (price)
         "/v1/metrics/market/price_usd_close",
-        "/v1/metrics/institutions/us_spot_etf_flows_all",
+        # "/v1/metrics/institutions/us_spot_etf_flows_all",
         # "/v1/metrics/market/emea_30d_price_change",
         # "/v1/metrics/market/apac_30d_price_change",
         # "/v1/metrics/market/price_drawdown_relative",

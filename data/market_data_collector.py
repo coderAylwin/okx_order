@@ -86,6 +86,12 @@ BINANCE_COINS = {
 # 时区配置
 TIMEZONE = 'Asia/Shanghai'
 
+# 飞书Webhook地址（爆仓提醒）
+LIQUIDATION_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/b2d10580-2a3a-4c7e-b42a-6fceb75d5342"
+
+# 爆仓价值阈值（USD）
+LIQUIDATION_THRESHOLD_USD = 100000  # 10万U
+
 # 设置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -102,6 +108,81 @@ liquidation_db = LiquidationDatabaseService(**DB_CONFIG)
 binance_db = BinanceDatabaseService(**DB_CONFIG)
 # 币安爆仓数据库服务（使用BinanceDatabaseService，但单独初始化用于爆仓数据）
 binance_liquidation_db = BinanceDatabaseService(**DB_CONFIG)
+
+
+# ==================== 推送函数 ====================
+def send_liquidation_notification(exchange, coin, usd_value, liquidation_type=None, side=None, price=None, quantity=None, ts_datetime=None):
+    """
+    发送爆仓提醒通知
+    
+    Args:
+        exchange: 交易所名称（'OKX' 或 'Binance'）
+        coin: 币种
+        usd_value: USD价值
+        liquidation_type: 爆仓类型（'LONG'/'SHORT'，仅币安）
+        side: 订单方向（'SELL'/'BUY'，仅币安）
+        price: 价格
+        quantity: 数量
+        ts_datetime: 时间戳
+    """
+    try:
+        # 格式化USD价值
+        if usd_value >= 10000:  # 大于等于1万，显示为万美元
+            usd_display = f"{usd_value / 10000:.2f} 万美元"
+        else:
+            usd_display = f"{usd_value:,.2f} 美元"
+        
+        # 构建消息内容
+        content_lines = [
+            f"🚨 {exchange} 大额爆仓提醒",
+            "",
+            f"💰 币种: {coin}",
+            f"💵 价值: {usd_display}",
+        ]
+        
+        # 添加爆仓类型信息
+        if liquidation_type:
+            type_display = "多单爆仓" if liquidation_type == 'LONG' else "空单爆仓"
+            content_lines.append(f"📊 类型: {type_display}")
+        
+        if side:
+            side_display = "卖出" if side == 'SELL' else "买入"
+            content_lines.append(f"📈 方向: {side_display}")
+        
+        if price:
+            content_lines.append(f"💲 价格: {price:,.4f}")
+        
+        if quantity:
+            content_lines.append(f"📦 数量: {quantity:,.4f}")
+        
+        if ts_datetime:
+            content_lines.append(f"⏰ 时间: {ts_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        content_text = "\n".join(content_lines)
+        
+        # 飞书Webhook消息格式
+        payload = {
+            "msg_type": "text",
+            "content": {
+                "text": content_text
+            }
+        }
+        
+        response = requests.post(LIQUIDATION_WEBHOOK_URL, json=payload, timeout=5)
+        response.raise_for_status()
+        
+        result = response.json()
+        if result.get('code') == 0:
+            logging.info(f"✅ {exchange} 爆仓提醒推送成功: {coin} {usd_display}")
+        else:
+            logging.warning(f"⚠️ {exchange} 爆仓提醒推送返回异常: {result}")
+            
+    except requests.exceptions.RequestException as e:
+        logging.error(f"{exchange} 爆仓提醒推送失败（网络错误）: {e}")
+    except Exception as e:
+        logging.error(f"{exchange} 爆仓提醒推送失败: {e}")
+        import traceback
+        logging.error(f"异常详情: {traceback.format_exc()}")
 
 
 # ==================== 爆仓数据WebSocket监听器 ====================
@@ -209,6 +290,18 @@ class OKXLiquidationListener:
                                                 usd_value=usd,
                                                 ts_datetime=ts_datetime_utc8
                                             )
+                                            
+                                            # 检查是否超过阈值，如果超过则推送
+                                            if usd >= LIQUIDATION_THRESHOLD_USD:
+                                                send_liquidation_notification(
+                                                    exchange='OKX',
+                                                    coin=matched_coin,
+                                                    usd_value=usd,
+                                                    side=side,
+                                                    price=float(bk_px) if bk_px and bk_px != '0' else None,
+                                                    quantity=float(sz) if sz and sz != '0' else None,
+                                                    ts_datetime=ts_datetime_utc8
+                                                )
                                         except Exception as db_error:
                                             logging.error(f"保存爆仓数据到数据库失败: {db_error}")
                                 except (ValueError, TypeError) as e:
@@ -434,6 +527,19 @@ class BinanceLiquidationListener:
                                 ts_datetime=ts_datetime_utc8
                             )
                             logging.info(f"币安WebSocket成功保存爆仓数据: {coin} {symbol}, 类型={liquidation_type}, USD价值={usd_value}")
+                            
+                            # 检查是否超过阈值，如果超过则推送
+                            if usd_value and usd_value >= LIQUIDATION_THRESHOLD_USD:
+                                send_liquidation_notification(
+                                    exchange='Binance',
+                                    coin=coin,
+                                    usd_value=usd_value,
+                                    liquidation_type=liquidation_type,
+                                    side=side,
+                                    price=price,
+                                    quantity=quantity,
+                                    ts_datetime=ts_datetime_utc8
+                                )
                         except Exception as db_error:
                             logging.error(f"保存币安爆仓数据到数据库失败: {db_error}")
                             import traceback
