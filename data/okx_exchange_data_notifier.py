@@ -51,8 +51,8 @@ COIN_SYMBOLS = {
 }
 
 # 超买超卖阈值配置
-OVERBUY_THRESHOLD = 2.0 # ratio大于此值视为超买
-OVERSELL_THRESHOLD = 0.5  # ratio小于此值视为超卖
+OVERBUY_THRESHOLD = 2.5 # ratio大于此值视为超买
+OVERSELL_THRESHOLD = 0.4  # ratio小于此值视为超卖
 
 
 class ExchangeDataNotifier:
