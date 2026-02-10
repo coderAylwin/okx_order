@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 
 # ===================== 配置区域 =====================
-LOG_FILE = "/var/log/arkham-webhook.log"
+LOG_FILE = "/home/ubuntu/okx_order/arkham/arkham-webhook.log"
 PORT = 8001                          # 内部监听端口（Nginx 会代理到这里）
 ALLOWED_IPS = []                     # 如果 Arkham 有固定 IP，可在这里限制（可选）
 # ====================================================
