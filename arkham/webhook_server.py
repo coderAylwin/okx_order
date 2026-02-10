@@ -29,8 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 保存原始 payload 的目录（可选）
-PAYLOAD_DIR = Path("/var/log/arkham-payloads")
-PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
+PAYLOAD_DIR = Path("/home/ubuntu/okx_order/arkham/payloads")
 
 @app.post("/webhook/arkham")
 async def receive_arkham_webhook(request: Request):
