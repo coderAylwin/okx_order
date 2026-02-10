@@ -269,7 +269,7 @@ class OKXLiquidationListener:
                         inst_family = order.get('instFamily', 'N/A')
                         
                         # 币种合约面值（每张合约对应的币种数量）
-                        contract_size_map = {'BTC': 0.001, 'ETH': 0.1, 'SOL': 1.0, 'XRP': 10.0}
+                        contract_size_map = {'BTC': 0.01, 'ETH': 0.1, 'SOL': 1.0, 'XRP': 100.0}
                         contract_size = contract_size_map.get(matched_coin, 0.1)
                         
                         for detail in details:
