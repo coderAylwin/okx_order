@@ -229,8 +229,9 @@ class ExchangeDataNotifier:
         one_day_data = self.get_latest_data_at_time(coin, symbol, one_day_ago)
         
         # 获取各个时间点的持仓量数据（整点数据）
-        # 对于持仓量，需要找整点时间的数据
-        current_oi_time = current_data_time.replace(minute=0, second=0, microsecond=0)
+        # 对于持仓量，使用传入的current_time来计算整点时间，确保获取正确的整点数据
+        # 例如：如果current_time是11:01，则获取11:00的数据，1小时前是10:00的数据
+        current_oi_time = current_time.replace(minute=0, second=0, microsecond=0)
         one_hour_oi_time = current_oi_time - timedelta(hours=1)
         four_hours_oi_time = current_oi_time - timedelta(hours=4)
         one_day_oi_time = current_oi_time - timedelta(days=1)

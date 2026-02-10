@@ -64,6 +64,10 @@ SUPPORTED_COINS = {
     'SOL': {
         'symbol': 'SOL-USDT-SWAP',
         'name': 'SOL'
+    },
+    'XRP': {
+        'symbol': 'XRP-USDT-SWAP',
+        'name': 'XRP'
     }
 }
 
@@ -80,6 +84,10 @@ BINANCE_COINS = {
     'SOL': {
         'symbol': 'SOLUSDT',
         'name': 'SOL'
+    },
+    'XRP': {
+        'symbol': 'XRPUSDT',
+        'name': 'XRP'
     }
 }
 
@@ -111,7 +119,7 @@ binance_liquidation_db = BinanceDatabaseService(**DB_CONFIG)
 
 
 # ==================== 推送函数 ====================
-def send_liquidation_notification(exchange, coin, usd_value, liquidation_type=None, side=None, price=None, quantity=None, ts_datetime=None):
+def send_liquidation_notification(exchange, coin, usd_value, liquidation_type=None, side=None, pos_side=None, price=None, quantity=None, ts_datetime=None):
     """
     发送爆仓提醒通知
     
@@ -120,7 +128,8 @@ def send_liquidation_notification(exchange, coin, usd_value, liquidation_type=No
         coin: 币种
         usd_value: USD价值
         liquidation_type: 爆仓类型（'LONG'/'SHORT'，仅币安）
-        side: 订单方向（'SELL'/'BUY'，仅币安）
+        side: 订单方向（'SELL'/'BUY'）
+        pos_side: 持仓方向（'long'/'short'，仅OKX）
         price: 价格
         quantity: 数量
         ts_datetime: 时间戳
@@ -141,7 +150,18 @@ def send_liquidation_notification(exchange, coin, usd_value, liquidation_type=No
         ]
         
         # 添加爆仓类型信息
-        if liquidation_type:
+        # OKX使用pos_side判断，币安使用liquidation_type判断
+        if pos_side:
+            # OKX的pos_side: 'long'表示多单，'short'表示空单
+            if pos_side.lower() == 'long':
+                type_display = "多单爆仓"
+            elif pos_side.lower() == 'short':
+                type_display = "空单爆仓"
+            else:
+                type_display = f"持仓方向: {pos_side}"
+            content_lines.append(f"📊 类型: {type_display}")
+        elif liquidation_type:
+            # 币安的liquidation_type: 'LONG'表示多单爆仓，'SHORT'表示空单爆仓
             type_display = "多单爆仓" if liquidation_type == 'LONG' else "空单爆仓"
             content_lines.append(f"📊 类型: {type_display}")
         
@@ -249,7 +269,7 @@ class OKXLiquidationListener:
                         inst_family = order.get('instFamily', 'N/A')
                         
                         # 币种合约面值（每张合约对应的币种数量）
-                        contract_size_map = {'BTC': 0.001, 'ETH': 0.1, 'SOL': 1.0}
+                        contract_size_map = {'BTC': 0.001, 'ETH': 0.1, 'SOL': 1.0, 'XRP': 10.0}
                         contract_size = contract_size_map.get(matched_coin, 0.1)
                         
                         for detail in details:
@@ -298,6 +318,7 @@ class OKXLiquidationListener:
                                                     coin=matched_coin,
                                                     usd_value=usd,
                                                     side=side,
+                                                    pos_side=pos_side if pos_side else None,
                                                     price=float(bk_px) if bk_px and bk_px != '0' else None,
                                                     quantity=float(sz) if sz and sz != '0' else None,
                                                     ts_datetime=ts_datetime_utc8
@@ -334,7 +355,7 @@ class OKXLiquidationListener:
                 "args": [{"channel": "liquidation-orders", "instType": "SWAP"}]
             }
             ws.send(json.dumps(subscribe_msg))
-            logging.info("WebSocket 连接成功，已订阅所有SWAP合约爆仓数据（将自动过滤BTC/ETH/SOL）")
+            logging.info("WebSocket 连接成功，已订阅所有SWAP合约爆仓数据（将自动过滤BTC/ETH/SOL/XRP）")
             self.last_pong_time = time.time()
         except Exception as e:
             logging.error(f"WebSocket 订阅失败：{e}")
@@ -578,7 +599,7 @@ class BinanceLiquidationListener:
         try:
             logging.info(f"币安WebSocket on_open回调触发，连接URL: {ws.url if hasattr(ws, 'url') else 'N/A'}")
             # 币安WebSocket连接成功后，不需要发送订阅消息（组合streams方式）
-            logging.info("币安WebSocket 连接成功，已订阅BTCUSDT、ETHUSDT、SOLUSDT爆仓数据")
+            logging.info("币安WebSocket 连接成功，已订阅BTCUSDT、ETHUSDT、SOLUSDT、XRPUSDT爆仓数据")
             self.last_pong_time = time.time()
         except Exception as e:
             logging.error(f"币安WebSocket 初始化失败：{e}")
@@ -616,8 +637,8 @@ class BinanceLiquidationListener:
             logging.warning("币安WebSocket已经在运行，跳过重复启动")
             return
         self.is_running = True
-        # 使用组合streams方式订阅三个币种的爆仓数据
-        streams = "btcusdt@forceOrder/ethusdt@forceOrder/solusdt@forceOrder"
+        # 使用组合streams方式订阅四个币种的爆仓数据
+        streams = "btcusdt@forceOrder/ethusdt@forceOrder/solusdt@forceOrder/xrpusdt@forceOrder"
         ws_url = f"wss://fstream.binance.com/stream?streams={streams}"
         logging.info(f"币安WebSocket准备连接，URL: {ws_url}")
         self.ws = websocket.WebSocketApp(ws_url,

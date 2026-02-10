@@ -93,10 +93,10 @@ def get_fear_greed_index(limit=3):
 
 def get_vix_value():
     """
-    获取VIX恐慌指数当前值（每次调用都重新创建Ticker对象，避免缓存问题）
+    获取VIX恐慌指数当前最新值（每次调用都重新创建Ticker对象，避免缓存问题）
     
     Returns:
-        float: VIX值，如果获取失败返回None
+        tuple: (VIX值, 数据时间戳, 数据来源说明) 或 (None, None, None)
     """
     try:
         # 每次调用时重新创建Ticker对象，避免使用缓存的旧数据
@@ -105,26 +105,47 @@ def get_vix_value():
         # 方法1：使用history方法获取最新数据（最可靠，强制刷新）
         try:
             # 获取最近1天的1分钟K线数据，取最后一条的收盘价
+            # 使用更短的时间范围确保获取最新数据
             hist = vix_ticker.history(period="1d", interval="1m", progress=False)
             if not hist.empty:
                 latest_vix = float(hist['Close'].iloc[-1])
                 latest_time = hist.index[-1]
-                logging.info(f"VIX通过history获取: {latest_vix}, 时间: {latest_time}")
-                return latest_vix
+                # 转换为美东时间
+                if hasattr(latest_time, 'tz'):
+                    latest_time_ny = latest_time.tz_convert(ny_tz)
+                else:
+                    latest_time_ny = latest_time.replace(tzinfo=pytz.UTC).astimezone(ny_tz)
+                
+                # 检查数据是否太旧（超过30分钟认为可能是延迟数据）
+                now_ny = datetime.now(ny_tz)
+                time_diff = (now_ny - latest_time_ny.replace(tzinfo=None)).total_seconds() / 60
+                
+                source_info = f"history方法（K线最后一条），数据时间: {latest_time_ny.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+                if time_diff > 30:
+                    logging.warning(f"VIX数据可能较旧（{time_diff:.1f}分钟前），尝试其他方法获取最新数据")
+                    # 不返回，继续尝试其他方法
+                else:
+                    logging.info(f"VIX通过history获取: {latest_vix}, {source_info}")
+                    return latest_vix, latest_time_ny, source_info
         except Exception as hist_error:
             logging.debug(f"history方法获取失败，尝试其他方法: {hist_error}")
         
         # 方法2：尝试使用fast_info获取最新价格（更快但可能缓存）
         try:
+            # 强制刷新fast_info
             fast_info = vix_ticker.fast_info
             if hasattr(fast_info, 'last_price') and fast_info.last_price is not None:
-                logging.info(f"VIX fast_info.last_price: {fast_info.last_price}")
-                return float(fast_info.last_price)
+                now_ny = datetime.now(ny_tz)
+                source_info = f"fast_info.last_price（快速信息）"
+                logging.info(f"VIX fast_info.last_price: {fast_info.last_price}, {source_info}")
+                return float(fast_info.last_price), now_ny, source_info
         except Exception as fast_error:
             logging.debug(f"fast_info获取失败，尝试其他方法: {fast_error}")
         
         # 方法3：使用info获取详细数据（最后备选）
+        # 尝试获取实时数据，优先使用bid/ask的中间价（如果可用）
         info = vix_ticker.info
+        now_ny = datetime.now(ny_tz)
         
         # 打印所有可用的价格字段（用于调试）
         price_fields = {
@@ -140,22 +161,45 @@ def get_vix_value():
         }
         logging.info(f"VIX所有价格字段: {price_fields}")
         
-        # 优先使用currentPrice（当前价格），如果没有则使用regularMarketPrice（常规市场价格）
-        # 如果都没有，则使用previousClose（前收盘价）作为兜底
-        vix_value = (info.get('currentPrice') or 
-                    info.get('regularMarketPrice') or 
-                    info.get('previousClose'))
+        # 优先使用bid和ask的中间价（如果两者都存在，说明是实时数据）
+        # 然后使用currentPrice（当前价格），如果没有则使用regularMarketPrice（常规市场价格）
+        # 最后使用previousClose（前收盘价）作为兜底
+        vix_value = None
+        source_field = None
+        
+        bid = info.get('bid')
+        ask = info.get('ask')
+        if bid is not None and ask is not None and bid > 0 and ask > 0:
+            # 使用bid和ask的中间价（更接近实时价格）
+            vix_value = (bid + ask) / 2.0
+            source_field = 'bid_ask_mid'
+            source_info = f"info.bid_ask中间价（实时数据，bid={bid}, ask={ask}）"
+        elif info.get('currentPrice') is not None:
+            vix_value = info.get('currentPrice')
+            source_field = 'currentPrice'
+            source_info = f"info.currentPrice"
+        elif info.get('regularMarketPrice') is not None:
+            vix_value = info.get('regularMarketPrice')
+            source_field = 'regularMarketPrice'
+            source_info = f"info.regularMarketPrice"
+        elif info.get('previousClose') is not None:
+            vix_value = info.get('previousClose')
+            source_field = 'previousClose'
+            source_info = f"info.previousClose（兜底方案，可能是前收盘价）"
+        else:
+            source_info = "无法获取VIX值"
         
         if vix_value is not None:
-            logging.info(f"VIX价格字段详情: currentPrice={info.get('currentPrice')}, regularMarketPrice={info.get('regularMarketPrice')}, previousClose={info.get('previousClose')}, 最终使用值={vix_value}")
-            return float(vix_value)
-        return None
+            logging.info(f"VIX价格字段详情: bid={bid}, ask={ask}, currentPrice={info.get('currentPrice')}, regularMarketPrice={info.get('regularMarketPrice')}, previousClose={info.get('previousClose')}, 最终使用值={vix_value} ({source_info})")
+            return float(vix_value), now_ny, source_info
+        
+        return None, None, None
         
     except Exception as e:
         logging.warning(f"获取VIX值失败: {e}")
         import traceback
         logging.warning(f"异常详情: {traceback.format_exc()}")
-        return None
+        return None, None, None
 
 
 def save_historical_fear_greed_data():
@@ -250,8 +294,13 @@ def collect_fear_greed_data():
         ts_datetime_utc8 = now_utc8.replace(second=0, microsecond=0)
         
         # 获取VIX值
-        vix_value = get_vix_value()
-        logging.info(f"最新VIX数据: ts={ts_datetime_utc8}, vix_value={vix_value}")
+        vix_value, vix_time, vix_source = get_vix_value()
+        if vix_value is not None:
+            logging.info(f"最新VIX数据: ts={ts_datetime_utc8}, vix_value={vix_value}, 数据来源={vix_source}")
+            if vix_time:
+                logging.info(f"VIX数据时间: {vix_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        else:
+            logging.warning("未能获取到VIX数据")
         
         # 保存数据：每5分钟都保存（主要记录VIX实时值），不做“值相同就跳过”的判断
         result = macro_db.save_fear_greed_data(
@@ -292,7 +341,7 @@ def supplement_vix_for_history():
         logging.info(f"发现 {len(missing_records)} 条缺少VIX数据的记录，开始补充...")
         
         # 获取当前VIX值
-        current_vix = get_vix_value()
+        current_vix, _, _ = get_vix_value()
         
         if current_vix is None:
             logging.warning("无法获取VIX值，跳过补充")
