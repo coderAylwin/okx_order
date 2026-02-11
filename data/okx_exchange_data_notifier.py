@@ -406,6 +406,7 @@ class ExchangeDataNotifier:
                     # content_lines.append("")
                     content_lines.append("⏱️ 最近1小时:")
                     content_lines.append(f"  • 爆仓总额: {self.format_usd_display(liq_1h['total_usd'])} ({liq_1h['total_count']}次)")
+                    content_lines.append("")
                     content_lines.append(f"  • 多单爆仓: {self.format_usd_display(liq_1h['long_usd'])} ({liq_1h['long_count']}次)")
                     content_lines.append(f"  • 空单爆仓: {self.format_usd_display(liq_1h['short_usd'])} ({liq_1h['short_count']}次)")
                 else:
@@ -416,6 +417,7 @@ class ExchangeDataNotifier:
                     content_lines.append("")
                     content_lines.append("⏱️ 最近4小时:")
                     content_lines.append(f"  • 爆仓总额: {self.format_usd_display(liq_4h['total_usd'])} ({liq_4h['total_count']}次)")
+                    content_lines.append("")
                     content_lines.append(f"  • 多单爆仓: {self.format_usd_display(liq_4h['long_usd'])} ({liq_4h['long_count']}次)")
                     content_lines.append(f"  • 空单爆仓: {self.format_usd_display(liq_4h['short_usd'])} ({liq_4h['short_count']}次)")
                 else:
@@ -426,6 +428,7 @@ class ExchangeDataNotifier:
                     content_lines.append("")
                     content_lines.append("⏱️ 最近24小时:")
                     content_lines.append(f"  • 爆仓总额: {self.format_usd_display(liq_1d['total_usd'])} ({liq_1d['total_count']}次)")
+                    content_lines.append("")
                     content_lines.append(f"  • 多单爆仓: {self.format_usd_display(liq_1d['long_usd'])} ({liq_1d['long_count']}次)")
                     content_lines.append(f"  • 空单爆仓: {self.format_usd_display(liq_1d['short_usd'])} ({liq_1d['short_count']}次)")
                 else:
