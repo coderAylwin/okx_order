@@ -4,9 +4,13 @@
 OKX交易所数据提醒服务
 1. 在整点后1分钟（如17:01、18:01）获取BTC、ETH、SOL的多空比和持仓量数据
    对比当前、上一小时、上四小时、上一天的数据变化，发送飞书消息提醒
+   同时包含爆仓数据聚合（1小时、4小时、24小时）
 2. 每分钟获取BTC、ETH、SOL的交易量数据：
    - 检查超买超卖（ratio >= 2.0 为超买，ratio <= 0.5 为超卖）
    - 当最新数据是整点时，聚合1小时、4小时、24小时的交易量数据并发送通知
+3. 每分钟检查爆仓预警：
+   - 最近1分钟单币种爆仓超过阈值预警
+   - 最近5分钟单币种爆仓超过阈值预警
 """
 
 import sys
@@ -42,6 +46,9 @@ LARK_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/8fb1eee3-5a
 # 超买超卖提醒专用Webhook地址
 OVERBUY_OVERSELL_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/2bdfac02-913c-4210-ad53-3870782701b5"
 
+# 爆仓预警专用Webhook地址
+LIQUIDATION_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/b2d10580-2a3a-4c7e-b42a-6fceb75d5342"
+
 # 币种配置
 COINS = ['BTC', 'ETH', 'SOL']
 COIN_SYMBOLS = {
@@ -53,6 +60,10 @@ COIN_SYMBOLS = {
 # 超买超卖阈值配置
 OVERBUY_THRESHOLD = 2.5 # ratio大于此值视为超买
 OVERSELL_THRESHOLD = 0.4  # ratio小于此值视为超卖
+
+# 爆仓预警阈值配置（USD）
+LIQUIDATION_ALERT_1MIN_THRESHOLD = 100000   # 1分钟内单币种爆仓超过10万USD预警
+LIQUIDATION_ALERT_5MIN_THRESHOLD = 5000000  # 5分钟内单币种爆仓超过50万USD预警
 
 
 class ExchangeDataNotifier:
@@ -269,7 +280,7 @@ class ExchangeDataNotifier:
         else:
             return f"{current_value:.4f}（无变化）"
     
-    def send_lark_notification(self, coin, comparison_data, current_time):
+    def send_lark_notification(self, coin, comparison_data, current_time, liquidation_data=None):
         """
         发送飞书消息通知
         
@@ -277,6 +288,7 @@ class ExchangeDataNotifier:
             coin: 币种
             comparison_data: 对比数据字典
             current_time: 当前时间
+            liquidation_data: 爆仓对比数据（可选）
         """
         try:
             current = comparison_data['current']
@@ -307,21 +319,21 @@ class ExchangeDataNotifier:
                     change_1h_pct = (change_1h / one_hour['long_short_ratio'] * 100) if one_hour['long_short_ratio'] != 0 else 0
                     change_sign = "+" if change_1h >= 0 else ""
                     content_lines.append(f"  • vs 1小时前: {one_hour['long_short_ratio']:.4f} ({change_sign}{change_1h:.4f}, {change_sign}{change_1h_pct:.2f}%)")
-                    content_lines.append(f"    时间: {one_hour['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    # content_lines.append(f"    时间: {one_hour['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 if four_hours and four_hours['long_short_ratio'] is not None:
                     change_4h = current_lsr - four_hours['long_short_ratio']
                     change_4h_pct = (change_4h / four_hours['long_short_ratio'] * 100) if four_hours['long_short_ratio'] != 0 else 0
                     change_sign = "+" if change_4h >= 0 else ""
                     content_lines.append(f"  • vs 4小时前: {four_hours['long_short_ratio']:.4f} ({change_sign}{change_4h:.4f}, {change_sign}{change_4h_pct:.2f}%)")
-                    content_lines.append(f"    时间: {four_hours['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    # content_lines.append(f"    时间: {four_hours['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 if one_day and one_day['long_short_ratio'] is not None:
                     change_1d = current_lsr - one_day['long_short_ratio']
                     change_1d_pct = (change_1d / one_day['long_short_ratio'] * 100) if one_day['long_short_ratio'] != 0 else 0
                     change_sign = "+" if change_1d >= 0 else ""
                     content_lines.append(f"  • vs 1天前: {one_day['long_short_ratio']:.4f} ({change_sign}{change_1d:.4f}, {change_sign}{change_1d_pct:.2f}%)")
-                    content_lines.append(f"    时间: {one_day['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    # content_lines.append(f"    时间: {one_day['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
             else:
                 content_lines.append("  • 当前: N/A")
             
@@ -381,6 +393,45 @@ class ExchangeDataNotifier:
             else:
                 content_lines.append("  • 当前: N/A")
             
+            # 添加爆仓数据（在持仓量上方）
+            if liquidation_data:
+                content_lines.append("")
+                content_lines.append("💥 爆仓数据 (liquidation):")
+                
+                liq_1h = liquidation_data.get('one_hour')
+                liq_4h = liquidation_data.get('four_hours')
+                liq_1d = liquidation_data.get('one_day')
+                
+                if liq_1h:
+                    # content_lines.append("")
+                    content_lines.append("⏱️ 最近1小时:")
+                    content_lines.append(f"  • 爆仓总额: {self.format_usd_display(liq_1h['total_usd'])} ({liq_1h['total_count']}次)")
+                    content_lines.append(f"  • 多单爆仓: {self.format_usd_display(liq_1h['long_usd'])} ({liq_1h['long_count']}次)")
+                    content_lines.append(f"  • 空单爆仓: {self.format_usd_display(liq_1h['short_usd'])} ({liq_1h['short_count']}次)")
+                else:
+                    content_lines.append("")
+                    content_lines.append("⏱️ 最近1小时: 无爆仓数据")
+                
+                if liq_4h:
+                    content_lines.append("")
+                    content_lines.append("⏱️ 最近4小时:")
+                    content_lines.append(f"  • 爆仓总额: {self.format_usd_display(liq_4h['total_usd'])} ({liq_4h['total_count']}次)")
+                    content_lines.append(f"  • 多单爆仓: {self.format_usd_display(liq_4h['long_usd'])} ({liq_4h['long_count']}次)")
+                    content_lines.append(f"  • 空单爆仓: {self.format_usd_display(liq_4h['short_usd'])} ({liq_4h['short_count']}次)")
+                else:
+                    content_lines.append("")
+                    content_lines.append("⏱️ 最近4小时: 无爆仓数据")
+                
+                if liq_1d:
+                    content_lines.append("")
+                    content_lines.append("⏱️ 最近24小时:")
+                    content_lines.append(f"  • 爆仓总额: {self.format_usd_display(liq_1d['total_usd'])} ({liq_1d['total_count']}次)")
+                    content_lines.append(f"  • 多单爆仓: {self.format_usd_display(liq_1d['long_usd'])} ({liq_1d['long_count']}次)")
+                    content_lines.append(f"  • 空单爆仓: {self.format_usd_display(liq_1d['short_usd'])} ({liq_1d['short_count']}次)")
+                else:
+                    content_lines.append("")
+                    content_lines.append("⏱️ 最近24小时: 无爆仓数据")
+            
             # 添加持仓量数据
             current_oi = comparison_data.get('current_oi')
             one_hour_oi = comparison_data.get('one_hour_ago_oi')
@@ -400,31 +451,31 @@ class ExchangeDataNotifier:
                         change_1h_pct = (change_1h / one_hour_oi['open_interest'] * 100) if one_hour_oi['open_interest'] != 0 else 0
                         change_sign = "+" if change_1h >= 0 else ""
                         content_lines.append(f"  • vs 1小时前: {one_hour_oi['open_interest']:,.2f} 张 ({change_sign}{change_1h:,.2f}, {change_sign}{change_1h_pct:.2f}%)")
-                        content_lines.append(f"    时间: {one_hour_oi['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
+                        # content_lines.append(f"    时间: {one_hour_oi['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
                     
                     if four_hours_oi and four_hours_oi.get('open_interest') is not None:
                         change_4h = current_oi_value - four_hours_oi['open_interest']
                         change_4h_pct = (change_4h / four_hours_oi['open_interest'] * 100) if four_hours_oi['open_interest'] != 0 else 0
                         change_sign = "+" if change_4h >= 0 else ""
                         content_lines.append(f"  • vs 4小时前: {four_hours_oi['open_interest']:,.2f} 张 ({change_sign}{change_4h:,.2f}, {change_sign}{change_4h_pct:.2f}%)")
-                        content_lines.append(f"    时间: {four_hours_oi['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
+                        # content_lines.append(f"    时间: {four_hours_oi['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
                     
                     if one_day_oi and one_day_oi.get('open_interest') is not None:
                         change_1d = current_oi_value - one_day_oi['open_interest']
                         change_1d_pct = (change_1d / one_day_oi['open_interest'] * 100) if one_day_oi['open_interest'] != 0 else 0
                         change_sign = "+" if change_1d >= 0 else ""
                         content_lines.append(f"  • vs 1天前: {one_day_oi['open_interest']:,.2f} 张 ({change_sign}{change_1d:,.2f}, {change_sign}{change_1d_pct:.2f}%)")
-                        content_lines.append(f"    时间: {one_day_oi['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
+                        # content_lines.append(f"    时间: {one_day_oi['ts'].strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 # 显示USD价值
                 if current_oi.get('oi_usd') is not None:
                     oi_usd_value = current_oi['oi_usd']
                     if oi_usd_value >= 100000000:  # 大于1亿
-                        oi_usd_display = f"{oi_usd_value / 100000000:.2f} 亿美元"
+                        oi_usd_display = f"{oi_usd_value / 100000000:.2f} 亿U"
                     elif oi_usd_value >= 10000:  # 大于1万
-                        oi_usd_display = f"{oi_usd_value / 10000:.2f} 万美元"
+                        oi_usd_display = f"{oi_usd_value / 10000:.2f} 万U"
                     else:
-                        oi_usd_display = f"{oi_usd_value:,.2f} 美元"
+                        oi_usd_display = f"{oi_usd_value:,.2f} U"
                     content_lines.append(f"  • 持仓量价值: {oi_usd_display}")
             
             content_lines.append("")
@@ -861,6 +912,199 @@ class ExchangeDataNotifier:
         
         if keys_to_remove:
             logging.debug(f"清理了 {len(keys_to_remove)} 条旧的提醒记录")
+    
+    def format_usd_display(self, usd_value):
+        """格式化USD价值显示"""
+        if usd_value >= 100000000:  # 大于1亿
+            return f"{usd_value / 100000000:.2f} 亿U"
+        elif usd_value >= 10000:  # 大于1万
+            return f"{usd_value / 10000:.2f} 万U"
+        else:
+            return f"{usd_value:,.2f} U"
+    
+    def get_liquidation_aggregation(self, coin, start_time, end_time):
+        """
+        聚合指定时间范围内的爆仓数据
+        
+        Args:
+            coin: 币种
+            start_time: 开始时间（datetime对象，包含）
+            end_time: 结束时间（datetime对象，不包含）
+        
+        Returns:
+            dict: 聚合结果，包含爆仓总额、多空分布等
+        """
+        if not self.connection:
+            if not self.connect():
+                return None
+        
+        try:
+            self.connection.ping(reconnect=True)
+        except Exception:
+            if not self.connect():
+                return None
+        
+        cursor = self.connection.cursor()
+        try:
+            sql = """
+            SELECT 
+                COUNT(*) as total_count,
+                COALESCE(SUM(usd_value), 0) as total_usd,
+                COALESCE(SUM(CASE WHEN pos_side = 'long' THEN usd_value ELSE 0 END), 0) as long_usd,
+                COALESCE(SUM(CASE WHEN pos_side = 'short' THEN usd_value ELSE 0 END), 0) as short_usd,
+                COUNT(CASE WHEN pos_side = 'long' THEN 1 END) as long_count,
+                COUNT(CASE WHEN pos_side = 'short' THEN 1 END) as short_count
+            FROM liquidation_data
+            WHERE coin = %s AND ts >= %s AND ts < %s
+            """
+            cursor.execute(sql, (coin, start_time, end_time))
+            result = cursor.fetchone()
+            
+            if result and result[0] > 0:
+                return {
+                    'total_count': result[0],
+                    'total_usd': float(result[1]),
+                    'long_usd': float(result[2]),
+                    'short_usd': float(result[3]),
+                    'long_count': result[4],
+                    'short_count': result[5]
+                }
+            return None
+        except Exception as e:
+            logging.error(f"聚合爆仓数据失败: {e}")
+            logging.error(f"异常详情: {traceback.format_exc()}")
+            return None
+        finally:
+            cursor.close()
+    
+    def get_liquidation_comparison(self, coin, current_time):
+        """
+        获取爆仓对比数据：1小时、4小时、24小时
+        
+        Args:
+            coin: 币种
+            current_time: 当前时间
+        
+        Returns:
+            dict: 包含各个时间段的爆仓聚合数据
+        """
+        current_hour = current_time.replace(minute=0, second=0, microsecond=0)
+        
+        # 1小时内：current_hour - 1h 到 current_hour
+        one_hour_start = current_hour - timedelta(hours=1)
+        # 4小时内
+        four_hours_start = current_hour - timedelta(hours=4)
+        # 24小时内
+        one_day_start = current_hour - timedelta(days=1)
+        
+        one_hour_liq = self.get_liquidation_aggregation(coin, one_hour_start, current_hour)
+        four_hours_liq = self.get_liquidation_aggregation(coin, four_hours_start, current_hour)
+        one_day_liq = self.get_liquidation_aggregation(coin, one_day_start, current_hour)
+        
+        return {
+            'one_hour': one_hour_liq,
+            'four_hours': four_hours_liq,
+            'one_day': one_day_liq
+        }
+    
+    def check_and_notify_liquidation_alert(self, coin, current_time):
+        """
+        检查爆仓预警并发送通知
+        每分钟检查最近1分钟和最近5分钟的爆仓数据
+        
+        Args:
+            coin: 币种
+            current_time: 当前时间
+        """
+        # 将当前时间对齐到整分钟（去掉秒和微秒）
+        current_minute = current_time.replace(second=0, microsecond=0)
+        
+        # 计算时间范围（整分钟）
+        one_min_start = current_minute - timedelta(minutes=1)
+        five_min_start = current_minute - timedelta(minutes=5)
+        
+        # 获取最近1分钟的爆仓数据
+        one_min_data = self.get_liquidation_aggregation(coin, one_min_start, current_minute)
+        # 获取最近5分钟的爆仓数据
+        five_min_data = self.get_liquidation_aggregation(coin, five_min_start, current_minute)
+        
+        # 检查1分钟预警
+        if one_min_data and one_min_data['total_usd'] >= LIQUIDATION_ALERT_1MIN_THRESHOLD:
+            alert_key = (coin, 'liquidation_1min')
+            if alert_key not in self.sent_alerts:
+                self._send_liquidation_alert(
+                    coin, one_min_data, '1分钟', current_time,
+                    LIQUIDATION_ALERT_1MIN_THRESHOLD,
+                    one_min_start, current_minute
+                )
+                self.sent_alerts[alert_key] = ('liquidation_1min', current_time)
+        
+        # 检查5分钟预警
+        if five_min_data and five_min_data['total_usd'] >= LIQUIDATION_ALERT_5MIN_THRESHOLD:
+            alert_key = (coin, 'liquidation_5min')
+            if alert_key not in self.sent_alerts:
+                self._send_liquidation_alert(
+                    coin, five_min_data, '5分钟', current_time,
+                    LIQUIDATION_ALERT_5MIN_THRESHOLD,
+                    five_min_start, current_minute
+                )
+                self.sent_alerts[alert_key] = ('liquidation_5min', current_time)
+    
+    def _send_liquidation_alert(self, coin, liq_data, time_range_label, current_time, threshold, start_time, end_time):
+        """
+        发送爆仓预警通知
+        
+        Args:
+            coin: 币种
+            liq_data: 爆仓聚合数据
+            time_range_label: 时间范围标签（如 '1分钟'、'5分钟'）
+            current_time: 当前时间
+            threshold: 阈值
+            start_time: 统计开始时间
+            end_time: 统计结束时间
+        """
+        try:
+            total_usd_display = self.format_usd_display(liq_data['total_usd'])
+            long_usd_display = self.format_usd_display(liq_data['long_usd'])
+            short_usd_display = self.format_usd_display(liq_data['short_usd'])
+            threshold_display = self.format_usd_display(threshold)
+            
+            content_lines = [
+                f"🔥 {coin} 爆仓预警",
+                "",
+                f"⏰ 最近 {time_range_label} 内爆仓异常",
+                f"📅 时间范围: {start_time.strftime('%H:%M:%S')} - {end_time.strftime('%H:%M:%S')}",
+                f"⚠️ 阈值: {threshold_display}",
+                "",
+                f"💰 爆仓总额: {total_usd_display} ({liq_data['total_count']}次)",
+                f"📈 多单爆仓: {long_usd_display} ({liq_data['long_count']}次)",
+                f"📉 空单爆仓: {short_usd_display} ({liq_data['short_count']}次)",
+                "",
+                f"⏰ 通知时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}",
+                "📊 数据来源: OKX"
+            ]
+            
+            content_text = "\n".join(content_lines)
+            
+            payload = {
+                "msg_type": "text",
+                "content": {
+                    "text": content_text
+                }
+            }
+            
+            response = requests.post(LIQUIDATION_WEBHOOK_URL, json=payload, timeout=5)
+            response.raise_for_status()
+            
+            result = response.json()
+            if result.get('code') == 0:
+                logging.info(f"✅ {coin} 爆仓预警推送成功 (最近{time_range_label}: {total_usd_display})")
+            else:
+                logging.warning(f"⚠️ {coin} 爆仓预警推送返回异常: {result}")
+                
+        except Exception as e:
+            logging.error(f"{coin} 爆仓预警推送失败: {e}")
+            logging.error(f"异常详情: {traceback.format_exc()}")
 
 
 # 初始化服务
@@ -892,8 +1136,11 @@ def collect_and_notify_exchange_data():
                     logging.warning(f"{coin} 当前多空比数据不存在，跳过")
                     continue
                 
-                # 发送飞书通知
-                notifier.send_lark_notification(coin, comparison_data, now)
+                # 获取爆仓对比数据
+                liquidation_data = notifier.get_liquidation_comparison(coin, now)
+                
+                # 发送飞书通知（包含爆仓数据）
+                notifier.send_lark_notification(coin, comparison_data, now, liquidation_data=liquidation_data)
                 
             except Exception as e:
                 logging.error(f"{coin} 处理失败: {e}")
@@ -942,6 +1189,9 @@ def check_and_notify_taker_volume():
                 # 2. 如果是整点数据，发送聚合数据通知
                 if aggregation_data['is_hourly']:
                     notifier.send_taker_volume_notification(coin, aggregation_data, now)
+                
+                # 3. 检查爆仓预警（最近1分钟和5分钟）
+                notifier.check_and_notify_liquidation_alert(coin, now)
                 
             except Exception as e:
                 logging.error(f"{coin} 交易量数据处理失败: {e}")
@@ -1042,6 +1292,8 @@ if __name__ == "__main__":
     logging.info("  - 直接运行 'python3 okx_exchange_data_notifier.py' 每小时1分推送一次（正常模式）")
     logging.info(f"  - 超买阈值: ratio >= {OVERBUY_THRESHOLD}")
     logging.info(f"  - 超卖阈值: ratio <= {OVERSELL_THRESHOLD}")
+    logging.info(f"  - 爆仓预警(1分钟): >= {LIQUIDATION_ALERT_1MIN_THRESHOLD:,} USD")
+    logging.info(f"  - 爆仓预警(5分钟): >= {LIQUIDATION_ALERT_5MIN_THRESHOLD:,} USD")
     
     try:
         scheduler.start()

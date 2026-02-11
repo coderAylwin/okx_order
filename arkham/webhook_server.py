@@ -73,7 +73,6 @@ async def receive_arkham_webhook(request: Request):
         content={"status": "received"}
     )
 
-
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
