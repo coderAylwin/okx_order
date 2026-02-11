@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 import uvicorn
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import logging
 from pathlib import Path
 
@@ -88,41 +88,80 @@ def send_lark_notification(payload):
             return
         
         # ====== 解析发送方 ======
-        from_address_info = transfer.get("fromAddress", {})
-        from_entity = from_address_info.get("arkhamEntity", {})
-        from_label = from_address_info.get("arkhamLabel", {})
+        # 兼容两种格式：fromAddress（单对象）和 fromAddresses（数组）
+        from_entity_name = ""
+        from_entity_id = ""
+        from_label_name = ""
+        from_address = "未知地址"
         
-        from_entity_name = from_entity.get("name", "未知实体")
-        from_entity_id = from_entity.get("id", "")
-        from_label_name = from_label.get("name", "")
-        from_address = from_address_info.get("address", "未知地址")
+        from_address_info = transfer.get("fromAddress")
+        if from_address_info:
+            # 格式1: fromAddress 是单个对象
+            from_entity = from_address_info.get("arkhamEntity", {}) or {}
+            from_label = from_address_info.get("arkhamLabel", {}) or {}
+            from_entity_name = from_entity.get("name", "")
+            from_entity_id = from_entity.get("id", "")
+            from_label_name = from_label.get("name", "")
+            from_address = from_address_info.get("address", "未知地址")
+        
+        from_addresses = transfer.get("fromAddresses", [])
+        if from_addresses and not from_entity_name:
+            # 格式2: fromAddresses 是数组，取价值最大的
+            max_value = 0
+            for fa_info in from_addresses:
+                fa_value = fa_info.get("value", 0)
+                if fa_value > max_value:
+                    max_value = fa_value
+                    addr_detail = fa_info.get("address", {})
+                    fa_entity = addr_detail.get("arkhamEntity", {}) or {}
+                    fa_label = addr_detail.get("arkhamLabel", {}) or {}
+                    from_entity_name = fa_entity.get("name", "")
+                    from_entity_id = fa_entity.get("id", "")
+                    from_label_name = fa_label.get("name", "")
+                    from_address = addr_detail.get("address", "未知地址")
         
         # 发送方显示：实体名 + 标签名（如果有）
-        if from_label_name:
+        if from_entity_name and from_label_name:
             from_display = f"{from_entity_name} ({from_label_name})"
-        else:
+        elif from_entity_name:
             from_display = from_entity_name
+        elif from_label_name:
+            from_display = from_label_name
+        else:
+            from_display = f"{from_address[:8]}...{from_address[-6:]}" if len(from_address) > 14 else from_address
         
-        # ====== 解析接收方（取第一个主要接收地址） ======
-        to_addresses = transfer.get("toAddresses", [])
-        to_entity_name = "未知实体"
+        # ====== 解析接收方 ======
+        # 兼容两种格式：toAddress（单对象）和 toAddresses（数组）
+        to_entity_name = ""
         to_entity_id = ""
         to_label_name = ""
         to_address = "未知地址"
         
-        # 找到价值最大的接收地址作为主要接收方
-        max_value = 0
-        for to_addr_info in to_addresses:
-            addr_value = to_addr_info.get("value", 0)
-            if addr_value > max_value:
-                max_value = addr_value
-                addr_detail = to_addr_info.get("address", {})
-                to_entity = addr_detail.get("arkhamEntity", {})
-                to_label = addr_detail.get("arkhamLabel", {})
-                to_entity_name = to_entity.get("name", "") if to_entity else ""
-                to_entity_id = to_entity.get("id", "") if to_entity else ""
-                to_label_name = to_label.get("name", "") if to_label else ""
-                to_address = addr_detail.get("address", "未知地址")
+        to_address_info = transfer.get("toAddress")
+        if to_address_info:
+            # 格式1: toAddress 是单个对象
+            to_entity = to_address_info.get("arkhamEntity", {}) or {}
+            to_label = to_address_info.get("arkhamLabel", {}) or {}
+            to_entity_name = to_entity.get("name", "")
+            to_entity_id = to_entity.get("id", "")
+            to_label_name = to_label.get("name", "")
+            to_address = to_address_info.get("address", "未知地址")
+        
+        to_addresses = transfer.get("toAddresses", [])
+        if to_addresses and not to_entity_name:
+            # 格式2: toAddresses 是数组，取价值最大的
+            max_value = 0
+            for ta_info in to_addresses:
+                ta_value = ta_info.get("value", 0)
+                if ta_value > max_value:
+                    max_value = ta_value
+                    addr_detail = ta_info.get("address", {})
+                    ta_entity = addr_detail.get("arkhamEntity", {}) or {}
+                    ta_label = addr_detail.get("arkhamLabel", {}) or {}
+                    to_entity_name = ta_entity.get("name", "")
+                    to_entity_id = ta_entity.get("id", "")
+                    to_label_name = ta_label.get("name", "")
+                    to_address = addr_detail.get("address", "未知地址")
         
         # 接收方显示
         if to_entity_name and to_label_name:
@@ -137,19 +176,22 @@ def send_lark_notification(payload):
         # ====== 解析其他信息 ======
         chain = transfer.get("chain", "unknown")
         chain_display = CHAIN_DISPLAY_MAP.get(chain, chain.upper())
-        to_value = transfer.get("toValue", transfer.get("unitValue", 0))
+        # 兼容 toValue / fromValue / unitValue
+        to_value = transfer.get("toValue") or transfer.get("fromValue") or transfer.get("unitValue", 0)
         historical_usd = transfer.get("historicalUSD", 0)
         block_timestamp = transfer.get("blockTimestamp", "")
         
-        # 格式化时间
+        # 格式化时间（转换为北京时间 UTC+8）
+        beijing_tz = timezone(timedelta(hours=8))
         if block_timestamp:
             try:
-                dt = datetime.fromisoformat(block_timestamp.replace("Z", "+00:00"))
-                time_display = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                dt_utc = datetime.fromisoformat(block_timestamp.replace("Z", "+00:00"))
+                dt_beijing = dt_utc.astimezone(beijing_tz)
+                time_display = dt_beijing.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 time_display = block_timestamp
         else:
-            time_display = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            time_display = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
         
         # 格式化金额
         amount_display = format_amount_display(to_value)
