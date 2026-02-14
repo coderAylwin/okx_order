@@ -39,15 +39,49 @@ DB_CONFIG = {
     'database': 'quantify'
 }
 
-# 飞书Webhook地址
+# 飞书Webhook地址（全局默认值，用于向后兼容）
 # LARK_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/b5745320-444f-43b8-a09e-dee2a62f7731"
 LARK_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/8fb1eee3-5ad1-457a-88e1-3324fedadb67"
 
-# 超买超卖提醒专用Webhook地址
+# 超买超卖提醒专用Webhook地址（全局默认值）
 OVERBUY_OVERSELL_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/2bdfac02-913c-4210-ad53-3870782701b5"
 
-# 爆仓预警专用Webhook地址
+# 爆仓预警专用Webhook地址（全局默认值）
 LIQUIDATION_WEBHOOK_URL = "https://open.larksuite.com/open-apis/bot/v2/hook/b2d10580-2a3a-4c7e-b42a-6fceb75d5342"
+
+# 币种特定Webhook配置（按币种分群推送）
+# 如果某个币种配置了Webhook，则使用该配置；否则使用全局默认值
+# 群名格式：BTC-交易数据、ETH-交易数据、SOL-交易数据
+# 示例配置：
+# COIN_WEBHOOKS = {
+#     'BTC': {
+#         'main': 'https://open.larksuite.com/open-apis/bot/v2/hook/xxx',  # 主数据推送
+#         'overbuy_oversell': 'https://open.larksuite.com/open-apis/bot/v2/hook/xxx',  # 超买超卖
+#         'liquidation': 'https://open.larksuite.com/open-apis/bot/v2/hook/xxx'  # 爆仓预警
+#     },
+#     'ETH': {
+#         'main': None,  # None表示使用全局默认值
+#         'overbuy_oversell': None,
+#         'liquidation': None
+#     }
+# }
+COIN_WEBHOOKS = {
+    'BTC': {
+        'main': 'https://open.larksuite.com/open-apis/bot/v2/hook/91a81deb-37d6-4233-a8ef-050faca609c9',  # 主数据推送（多空比、持仓量、交易量聚合、爆仓聚合）
+        'overbuy_oversell': 'https://open.larksuite.com/open-apis/bot/v2/hook/497edd32-baee-47e9-927d-dd89d9710561',  # 超买超卖提醒
+        'liquidation': 'https://open.larksuite.com/open-apis/bot/v2/hook/2534ffc0-de7f-49cb-b063-5c497dfd75f7'  # 爆仓预警
+    },
+    'ETH': {
+        'main': None,
+        'overbuy_oversell': None,
+        'liquidation': None
+    },
+    'SOL': {
+        'main': None,
+        'overbuy_oversell': None,
+        'liquidation': None
+    }
+}
 
 # 币种配置
 COINS = ['BTC', 'ETH', 'SOL']
@@ -98,6 +132,36 @@ class ExchangeDataNotifier:
         if self.connection:
             self.connection.close()
             self.connection = None
+    
+    def get_webhook_url(self, coin, alert_type='main'):
+        """
+        根据币种和提醒类型获取Webhook URL
+        
+        Args:
+            coin: 币种（如 'BTC', 'ETH', 'SOL'）
+            alert_type: 提醒类型
+                - 'main': 主数据推送（多空比、持仓量、交易量聚合、爆仓聚合）
+                - 'overbuy_oversell': 超买超卖提醒
+                - 'liquidation': 爆仓预警
+        
+        Returns:
+            str: Webhook URL
+        """
+        # 如果币种配置了特定Webhook，则使用该配置
+        if coin in COIN_WEBHOOKS:
+            coin_config = COIN_WEBHOOKS[coin]
+            if alert_type in coin_config and coin_config[alert_type] is not None:
+                return coin_config[alert_type]
+        
+        # 否则使用全局默认值
+        if alert_type == 'main':
+            return LARK_WEBHOOK_URL
+        elif alert_type == 'overbuy_oversell':
+            return OVERBUY_OVERSELL_WEBHOOK_URL
+        elif alert_type == 'liquidation':
+            return LIQUIDATION_WEBHOOK_URL
+        else:
+            return LARK_WEBHOOK_URL
     
     def get_latest_data_at_time(self, coin, symbol, target_time):
         """
@@ -495,7 +559,9 @@ class ExchangeDataNotifier:
                 }
             }
             
-            response = requests.post(LARK_WEBHOOK_URL, json=payload, timeout=5)
+            # 使用币种特定的Webhook URL
+            webhook_url = self.get_webhook_url(coin, 'main')
+            response = requests.post(webhook_url, json=payload, timeout=5)
             response.raise_for_status()
             
             result = response.json()
@@ -766,7 +832,9 @@ class ExchangeDataNotifier:
                 }
             }
             
-            response = requests.post(LARK_WEBHOOK_URL, json=payload, timeout=5)
+            # 使用币种特定的Webhook URL
+            webhook_url = self.get_webhook_url(coin, 'main')
+            response = requests.post(webhook_url, json=payload, timeout=5)
             response.raise_for_status()
             
             result = response.json()
@@ -839,7 +907,9 @@ class ExchangeDataNotifier:
                     }
                 }
                 
-                response = requests.post(OVERBUY_OVERSELL_WEBHOOK_URL, json=payload, timeout=5)
+                # 使用币种特定的Webhook URL
+                webhook_url = self.get_webhook_url(coin, 'overbuy_oversell')
+                response = requests.post(webhook_url, json=payload, timeout=5)
                 response.raise_for_status()
                 
                 result = response.json()
@@ -879,7 +949,9 @@ class ExchangeDataNotifier:
                     }
                 }
                 
-                response = requests.post(OVERBUY_OVERSELL_WEBHOOK_URL, json=payload, timeout=5)
+                # 使用币种特定的Webhook URL
+                webhook_url = self.get_webhook_url(coin, 'overbuy_oversell')
+                response = requests.post(webhook_url, json=payload, timeout=5)
                 response.raise_for_status()
                 
                 result = response.json()
@@ -1096,7 +1168,9 @@ class ExchangeDataNotifier:
                 }
             }
             
-            response = requests.post(LIQUIDATION_WEBHOOK_URL, json=payload, timeout=5)
+            # 使用币种特定的Webhook URL
+            webhook_url = self.get_webhook_url(coin, 'liquidation')
+            response = requests.post(webhook_url, json=payload, timeout=5)
             response.raise_for_status()
             
             result = response.json()
