@@ -424,7 +424,8 @@ class BinanceDatabaseService:
             total_count = insert_count + update_count
             if total_count > 0:
                 logging.info(f"币安主动买卖量数据保存成功: {coin} {symbol} 共 {total_count} 条（新增:{insert_count} 更新:{update_count}，按时间顺序：{sorted_data[0][0]} 到 {sorted_data[-1][0]}）")
-            return total_count > 0
+            # 无新增/更新但数据已存在且一致时也视为成功，避免误报“保存失败”
+            return True
             
         except Exception as e:
             self.connection.rollback()

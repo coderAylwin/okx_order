@@ -878,15 +878,14 @@ class MarketDataDatabaseService:
                     return 'skipped'
             else:
                 # 数据不存在，插入新记录
-                # 构建INSERT语句，只包含传入的非None字段
+                # 构建INSERT语句；long_short_ratio 为表 NOT NULL 字段，未传入时用 0 占位
                 insert_fields = ['coin', 'symbol', 'ts']
                 insert_values = [coin, symbol, ts_datetime]
                 placeholders = ['%s', '%s', '%s']
                 
-                if long_short_ratio is not None:
-                    insert_fields.append('long_short_ratio')
-                    insert_values.append(long_short_ratio)
-                    placeholders.append('%s')
+                insert_fields.append('long_short_ratio')
+                insert_values.append(long_short_ratio if long_short_ratio is not None else 0)
+                placeholders.append('%s')
                 
                 if delta_ratio is not None:
                     insert_fields.append('delta_ratio')

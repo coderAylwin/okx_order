@@ -10,7 +10,7 @@ import requests
 import time
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from tenacity import retry, stop_after_attempt, wait_fixed
 import json
@@ -290,9 +290,8 @@ class OKXLiquidationListener:
                                     usd = float(sz) * contract_size * float(bk_px)
                                     
                                     ts_seconds = int(ts_str) / 1000.0
-                                    ts_datetime_utc = datetime.utcfromtimestamp(ts_seconds)
                                     utc8_timezone = ZoneInfo('Asia/Shanghai')
-                                    ts_datetime_utc8 = ts_datetime_utc.replace(tzinfo=ZoneInfo('UTC')).astimezone(utc8_timezone).replace(tzinfo=None)
+                                    ts_datetime_utc8 = datetime.fromtimestamp(ts_seconds, tz=timezone.utc).astimezone(utc8_timezone).replace(tzinfo=None)
                                     
                                     if self.db_service:
                                         try:
@@ -685,9 +684,8 @@ def collect_taker_volume_with_db(coin, coin_symbol, db_service):
                 
                 # 转换为UTC+8时间
                 ts_seconds = ts_ms / 1000.0
-                ts_datetime_utc = datetime.utcfromtimestamp(ts_seconds)
                 utc8_timezone = ZoneInfo('Asia/Shanghai')
-                ts_datetime_utc8 = ts_datetime_utc.replace(tzinfo=ZoneInfo('UTC')).astimezone(utc8_timezone).replace(tzinfo=None)
+                ts_datetime_utc8 = datetime.fromtimestamp(ts_seconds, tz=timezone.utc).astimezone(utc8_timezone).replace(tzinfo=None)
                 
                 data_to_save.append((ts_datetime_utc8, sell_vol, buy_vol))
         
@@ -786,9 +784,8 @@ def collect_open_interest_with_db(coin, coin_symbol, db_service):
                         
                         # 转换为UTC+8时间
                         ts_seconds = ts_ms / 1000.0
-                        ts_datetime_utc = datetime.utcfromtimestamp(ts_seconds)
                         utc8_timezone = ZoneInfo('Asia/Shanghai')
-                        ts_datetime_utc8 = ts_datetime_utc.replace(tzinfo=ZoneInfo('UTC')).astimezone(utc8_timezone).replace(tzinfo=None)
+                        ts_datetime_utc8 = datetime.fromtimestamp(ts_seconds, tz=timezone.utc).astimezone(utc8_timezone).replace(tzinfo=None)
                         
                         data_to_save.append((ts_datetime_utc8, oi, oi_ccy, oi_usd))
                 
