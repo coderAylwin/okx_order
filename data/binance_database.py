@@ -335,6 +335,12 @@ class BinanceDatabaseService:
                 # 如果表锁失败（可能是权限问题），使用行锁
                 logging.debug(f"表锁失败，使用行锁: {lock_error}")
             
+            # 规范化 ts 为整秒（与 DB DATETIME 一致），避免微秒导致误判“不存在”而重复插入
+            def _norm_ts(dt):
+                if dt is None:
+                    return None
+                return dt.replace(microsecond=0) if hasattr(dt, 'replace') else dt
+
             # 先批量查询已存在的记录，包括数据值，用于比较是否需要更新
             ts_list = [item[0] for item in sorted_data]
             placeholders = ','.join(['%s'] * len(ts_list))
@@ -346,7 +352,8 @@ class BinanceDatabaseService:
             existing_records = {}
             for row in cursor.fetchall():
                 ts_datetime, buy_vol, sell_vol, buy_sell_ratio = row
-                existing_records[ts_datetime] = {
+                key = _norm_ts(ts_datetime)
+                existing_records[key] = {
                     'buy_vol': float(buy_vol) if buy_vol else 0,
                     'sell_vol': float(sell_vol) if sell_vol else 0,
                     'buy_sell_ratio': float(buy_sell_ratio) if buy_sell_ratio else 0
@@ -358,9 +365,10 @@ class BinanceDatabaseService:
             
             for ts_datetime, buy_vol, sell_vol, buy_sell_ratio in sorted_data:
                 values = (coin, symbol, ts_datetime, buy_vol, sell_vol, buy_sell_ratio)
-                if ts_datetime in existing_records:
+                ts_key = _norm_ts(ts_datetime)
+                if ts_key in existing_records:
                     # 记录已存在，比较数据是否不一致
-                    existing = existing_records[ts_datetime]
+                    existing = existing_records[ts_key]
                     # 使用小的容差值比较浮点数
                     buy_diff = abs(existing['buy_vol'] - buy_vol)
                     sell_diff = abs(existing['sell_vol'] - sell_vol)

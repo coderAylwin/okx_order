@@ -1223,8 +1223,8 @@ def collect_binance_taker_volume(coin, coin_symbol):
                 sell_vol = float(item.get('sellVol', 0))
                 buy_sell_ratio = float(item.get('buySellRatio', 0))
                 
-                # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）
-                ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None)
+                # 使用接口返回的时间戳转换为UTC+8时间（确保时间戳准确性）；去掉微秒与 DB DATETIME 一致，避免重复插入触发唯一键冲突
+                ts_datetime_utc8 = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=ZoneInfo('UTC')).astimezone(ZoneInfo('Asia/Shanghai')).replace(tzinfo=None, microsecond=0)
                 
                 data_to_save.append((ts_datetime_utc8, buy_vol, sell_vol, buy_sell_ratio))
         
@@ -1242,7 +1242,7 @@ def collect_binance_taker_volume(coin, coin_symbol):
                 
                 result = thread_db.save_taker_volume_batch(coin, coin_symbol, data_to_save)
                 if not result:
-                    error_msg = f"{coin} 币安主动买卖量数据保存失败，将重试"
+                    error_msg = f"{coin} 币安主动买卖量数据保存失败，将重试（具体原因见上方或 binance_database 日志）"
                     logging.error(error_msg)
                     raise Exception(error_msg)  # 抛出异常以触发重试
                 return result
