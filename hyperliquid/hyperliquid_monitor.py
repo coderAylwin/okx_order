@@ -56,16 +56,17 @@ ADDRESS_CONFIG = [
     {"address": "0x6c8512516ce5669d35113a11ca8b8de322fd84f6", "label": "聪明钱D"},
     {"address": "0x71dfc07de32c2ebf1c4801f4b1c9e40b76d4a23d", "label": "聪明钱E"},
     {"address": "0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1", "label": "聪明钱F"},
+    {"address": "0x020ca66c30bec2c4fe3861a94e4db4a498a35872", "label": "麻吉大哥"},
     # {"address": "0xabc...", "label": "聪明钱B"},
 ]
 
 # 监控币种（只关注这些币种的仓位变动，其他忽略）
 # 设为空列表 [] 则监控所有币种
 # 注意：API返回的币种可能有前缀如 "xyz:GOLD"，这里只需要写 "GOLD" 即可
-WATCH_COINS = ["BTC", "ETH", "SOL"]
+WATCH_COINS = ["BTC", "ETH", "SOL", "XRP"]
 
 # 飞书Webhook地址
-LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/39ed67d4-8214-4b8b-bf1a-e17f3acdca9f"
+LARK_WEBHOOK = "https://open.larksuite.com/open-apis/bot/v2/hook/b820bda8-4d32-4f11-8530-2dc37bcdcaad"
 
 # 轮询间隔（秒）
 POLL_INTERVAL = 300  # 5分钟
