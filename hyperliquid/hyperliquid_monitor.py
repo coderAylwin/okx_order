@@ -81,7 +81,7 @@ DB_CONFIG = {
     'user': 'payment_pro',
     'password': 'nS4kO7tG1jH7cI6oR4b',
     'database': 'quantify'
-}
+} 
 
 # 北京时区
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -578,15 +578,44 @@ def check_once():
             prev_snapshot = get_latest_snapshot(address)
             
             if prev_snapshot is None:
-                # 第一次运行，只保存不推送
+                # 第一次运行：保存快照并推送“初始仓位”消息
                 save_snapshot(address, account_value, total_margin_used, curr_positions_list, snapshot_time)
-                logging.info(f"[{label}] 初始仓位已保存（首次运行，不推送）")
+                logging.info(f"[{label}] 初始仓位已保存（首次运行，发送飞书通知）")
                 
-                # 日志打印当前仓位
+                # 当前持仓概览
+                pos_summary_parts = []
                 for p in curr_positions_list:
                     direction = "多" if p['szi'] > 0 else "空"
-                    logging.info(f"  [{label}] {p['display_coin']}: {direction} size={p['szi']:.4f}, "
-                                 f"entry={p['entry_px']}, leverage={p['leverage_value']}x")
+                    pnl_sign = "+" if p['unrealized_pnl'] >= 0 else ""
+                    roe = float(p['return_on_equity']) * 100
+                    roe_sign = "+" if roe >= 0 else ""
+                    pos_summary_parts.append(
+                        f"• {p['display_coin']} {direction} size={p['szi']:.4f} "
+                        f"entry={p['entry_px']} "
+                        f"uPnL={pnl_sign}{p['unrealized_pnl']:.2f}({roe_sign}{roe:.2f}%)"
+                    )
+                
+                pos_summary = "\n".join(pos_summary_parts) if pos_summary_parts else "（无持仓）"
+                
+                beijing_now = datetime.fromtimestamp(snapshot_time / 1000, tz=BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S') if snapshot_time else datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
+                addr_short = f"{address[:6]}...{address[-4:]}"
+                account_info = f"💰 账户价值: {format_usd(account_value)}\n📌 已用保证金: {format_usd(total_margin_used)}"
+                coinglass_url = f"https://www.coinglass.com/zh/hyperliquid/{address}"
+                
+                init_message = (
+                    f"🟢 Hyperliquid 初始仓位快照\n"
+                    f"📍 {label} ({addr_short})\n"
+                    f"⏰ {beijing_now}\n"
+                    f"\n"
+                    f"{account_info}\n"
+                    f"\n"
+                    f"📊 当前持仓:\n"
+                    f"{pos_summary}\n"
+                    f"\n"
+                    f"🔎 说明：本消息为该地址监控开启时的初始仓位快照，后续仅在仓位发生变动时推送变动通知。\n"
+                    f"🔗 {coinglass_url}"
+                )
+                send_lark_message(init_message)
                 continue
             
             prev_positions_dict = positions_to_dict(prev_snapshot['positions'])
