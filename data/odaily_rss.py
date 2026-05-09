@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup
 import html as html_module
 
 # 读取配置文件
-config = configparser.ConfigParser()
+config = configparser.ConfigParser(interpolation=None)
 # 使用脚本所在目录的配置文件
 config_file = os.path.join(os.path.dirname(__file__), 'config.ini')
 config.read(config_file)
