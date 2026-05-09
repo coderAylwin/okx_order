@@ -20,8 +20,8 @@ from etf_flow_database import ETFFlowDatabaseService
 DB_CONFIG = {
     'host': 'rm-t4nea067q32i31k9aro.mysql.singapore.rds.aliyuncs.com',
     'port': 3306,
-    'user': 'payment_pro',
-    'password': 'nS4kO7tG1jH7cI6oR4b',
+    'user': 'quantify_read_write',
+    'password': '02Ya6fPDo@w67UI%sEaDvPXfT',
     'database': 'quantify'
 }
 

@@ -44,8 +44,8 @@ from binance_database import BinanceDatabaseService
 DB_CONFIG = {
     'host': 'rm-t4nea067q32i31k9aro.mysql.singapore.rds.aliyuncs.com',     # 本地MySQL
     'port': 3306,
-    'user': 'payment_pro',
-    'password': 'nS4kO7tG1jH7cI6oR4b',# 请修改为您的MySQL密码
+    'user': 'quantify_read_write',
+    'password': '02Ya6fPDo@w67UI%sEaDvPXfT',# 请修改为您的MySQL密码
     'database': 'quantify'
 }
 

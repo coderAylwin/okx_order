@@ -60,8 +60,8 @@ DB_CONFIG = {
     'host': 'rm-t4nea067q32i31k9aro.mysql.singapore.rds.aliyuncs.com',          # 或 'localhost'、远程 IP
     'port': 3306,
     'database': 'quantify',
-    'user': 'payment_pro',               # 你的 MySQL 用户名
-    'password': 'nS4kO7tG1jH7cI6oR4b',       # 你的 MySQL 密码
+    'user': 'quantify_read_write',               # 你的 MySQL 用户名
+    'password': '02Ya6fPDo@w67UI%sEaDvPXfT',       # 你的 MySQL 密码
     'raise_on_warnings': True
 }
 

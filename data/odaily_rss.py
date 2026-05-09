@@ -32,8 +32,8 @@ log_dir = os.path.expanduser(scraper_config.get('log_dir', '~/liq_data'))
 # 数据库配置
 db_host = scraper_config.get('db_host', 'rm-t4nea067q32i31k9aro.mysql.singapore.rds.aliyuncs.com')
 db_port = int(scraper_config.get('db_port', 3306))
-db_user = scraper_config.get('db_user', 'payment_pro')
-db_password = scraper_config.get('db_password', 'nS4kO7tG1jH7cI6oR4b')
+db_user = scraper_config.get('db_user', 'quantify_read_write')
+db_password = scraper_config.get('db_password', '02Ya6fPDo@w67UI%sEaDvPXfT')
 db_database = scraper_config.get('db_database', 'quantify')
 
 # 初始化数据库服务
